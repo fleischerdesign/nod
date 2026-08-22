@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio::process::Command;
 
 pub struct NixCliEvaluator;
@@ -16,8 +17,11 @@ impl NixCliEvaluator {
 
 #[async_trait]
 impl NixEvaluator for NixCliEvaluator {
-    async fn discover_hosts(&self, flake_path: &Path) -> Result<Vec<HostEntity>> {
-        println!("{}", "Evaluating flake host matrix...".dimmed());
+    async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>> {
+        let start = Instant::now();
+        if verbose {
+            println!("  {}", format!("Evaluating host matrix for {}...", flake_path.display()).dimmed());
+        }
 
         let output = Command::new("nix")
             .args([
@@ -67,17 +71,22 @@ impl NixEvaluator for NixCliEvaluator {
             hosts.push(entity);
         }
 
+        if verbose {
+            println!("  {}", format!("Discovered {} hosts in {:?}", hosts.len(), start.elapsed()).dimmed());
+        }
+
         Ok(hosts)
     }
 
-    async fn build_toplevel(&self, flake_path: &Path, host_name: &str) -> Result<PathBuf> {
+    async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf> {
         let flake_attr = format!(
             "{}#nixosConfigurations.{}.config.system.build.toplevel",
             flake_path.display(),
             host_name
         );
 
-        println!("{}", format!("Building NixOS closure for {}...", host_name).bold().blue());
+        let start = Instant::now();
+        println!("  {}", format!("Building closure for {}...", host_name).dimmed());
 
         let output = Command::new("nix")
             .args(["build", "--json", &flake_attr, "--no-link"])
@@ -96,6 +105,10 @@ impl NixEvaluator for NixCliEvaluator {
         let out_path = build_json[0]["outputs"]["out"]
             .as_str()
             .ok_or_else(|| anyhow!("Build JSON did not contain 'out' store path"))?;
+
+        if verbose {
+            println!("  {}", format!("Build completed in {:?} -> {}", start.elapsed(), out_path).dimmed());
+        }
 
         Ok(PathBuf::from(out_path))
     }

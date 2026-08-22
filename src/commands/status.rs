@@ -6,24 +6,22 @@ use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 
-pub async fn execute(flake_path: &Path) -> Result<()> {
+pub async fn execute(flake_path: &Path, verbose: bool) -> Result<()> {
     let evaluator = NixCliEvaluator::new();
     let deployer = TokioSshDeployer::new();
 
-    println!("{}", "Discovering hosts from Nix Flake...".bold().cyan());
-    let hosts = evaluator.discover_hosts(flake_path).await?;
+    let hosts = evaluator.discover_hosts(flake_path, verbose).await?;
 
-    println!("\n{:<12} {:<15} {:<10}", "HOST".bold(), "TARGET IP".bold(), "STATUS".bold());
-    println!("{}", "─".repeat(40));
+    println!("\n{:<14} {:<24} {:<10}", "HOST".bold(), "TARGET IP".bold(), "STATUS".bold());
 
     for host in hosts {
         let is_up = deployer.check_reachability(&host).await.unwrap_or(false);
         let status_str = if is_up {
-            "● Online".bold().green()
+            "● Online".green()
         } else {
-            "○ Offline".bold().red()
+            "○ Offline".red()
         };
-        println!("{:<12} {:<15} {:<10}", host.name, host.target_host, status_str);
+        println!("{:<14} {:<24} {:<10}", host.name, host.target_host, status_str);
     }
 
     Ok(())

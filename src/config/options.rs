@@ -8,6 +8,14 @@ use clap::{Parser, Subcommand};
     long_about = "Universal, zero-config, high-performance Nix Flake deployment, orchestration, and monitoring engine."
 )]
 pub struct Cli {
+    /// Enable verbose output with detailed build paths and metrics
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
+    /// Quiet mode, suppress non-essential output
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

@@ -7,7 +7,7 @@ pub struct QualityGate;
 
 impl QualityGate {
     pub async fn run_all(flake_path: &Path) -> Result<()> {
-        println!("{}", "Running repository quality gates...".bold().cyan());
+        println!("{}", "> Quality gates".bold().cyan());
 
         let target_file = if flake_path.is_dir() {
             flake_path.join("flake.nix")
@@ -23,7 +23,7 @@ impl QualityGate {
 
             if let Ok(status) = fmt_status {
                 if !status.success() {
-                    println!("{}", "⚠ nixfmt check reported formatting issues.".yellow());
+                    println!("  {}", "⚠ nixfmt reported formatting issues.".yellow());
                 }
             }
         }
@@ -46,11 +46,11 @@ impl QualityGate {
 
         if let Ok(status) = statix_status {
             if !status.success() {
-                println!("{}", "⚠ statix check reported anti-patterns.".yellow());
+                println!("  {}", "⚠ statix reported anti-patterns.".yellow());
             }
         }
 
-        println!("{}", "✓ Quality gates passed successfully!".bold().green());
+        println!("  {}", "✓ Passed".bold().green());
         Ok(())
     }
 }

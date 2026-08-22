@@ -17,13 +17,13 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Switch { target, flake } => {
-            commands::switch::execute(&target, Path::new(&flake)).await?;
+            commands::switch::execute(&target, Path::new(&flake), cli.verbose, cli.quiet).await?;
         }
         Commands::Check { flake } => {
             commands::check::execute(Path::new(&flake)).await?;
         }
         Commands::Status { flake } => {
-            commands::status::execute(Path::new(&flake)).await?;
+            commands::status::execute(Path::new(&flake), cli.verbose).await?;
         }
         Commands::Diff { target: _, flake: _ } => {
             println!("Diff engine reserved for nvd integration.");

@@ -6,11 +6,11 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 use std::path::Path;
 
-pub async fn execute(target: &str, flake_path: &Path) -> Result<()> {
+pub async fn execute(target: &str, flake_path: &Path, verbose: bool, quiet: bool) -> Result<()> {
     let evaluator = NixCliEvaluator::new();
     let deployer = TokioSshDeployer::new();
 
-    let hosts = evaluator.discover_hosts(flake_path).await?;
+    let hosts = evaluator.discover_hosts(flake_path, verbose).await?;
 
     let targets = if target == "all" {
         hosts
@@ -28,12 +28,20 @@ pub async fn execute(target: &str, flake_path: &Path) -> Result<()> {
     }
 
     for host in targets {
-        println!("\n{}", format!("=== Deploying target: {} ===", host.name).bold().magenta());
-        let closure = evaluator.build_toplevel(flake_path, &host.name).await?;
-        println!("{}", format!("Built top-level closure: {}", closure.display()).dimmed());
+        if !quiet {
+            println!("{}", format!("> Deploying {}", host.name).bold().cyan());
+        }
 
-        deployer.deploy_and_activate(&host, &closure).await?;
-        println!("{}", format!("✓ Target {} switched successfully!", host.name).bold().green());
+        let closure = evaluator.build_toplevel(flake_path, &host.name, verbose).await?;
+        if verbose {
+            println!("  {}", format!("Closure: {}", closure.display()).dimmed());
+        }
+
+        deployer.deploy_and_activate(&host, &closure, verbose).await?;
+
+        if !quiet {
+            println!("  {}", format!("✓ Switched {}", host.name).bold().green());
+        }
     }
 
     Ok(())

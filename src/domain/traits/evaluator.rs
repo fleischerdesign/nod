@@ -5,6 +5,6 @@ use std::path::{Path, PathBuf};
 
 #[async_trait]
 pub trait NixEvaluator: Send + Sync {
-    async fn discover_hosts(&self, flake_path: &Path) -> Result<Vec<HostEntity>>;
-    async fn build_toplevel(&self, flake_path: &Path, host_name: &str) -> Result<PathBuf>;
+    async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>>;
+    async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf>;
 }
