@@ -2,6 +2,7 @@ use crate::domain::host::{HostEntity, HostRole};
 use crate::domain::traits::evaluator::NixEvaluator;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use colored::Colorize;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -16,6 +17,8 @@ impl NixCliEvaluator {
 #[async_trait]
 impl NixEvaluator for NixCliEvaluator {
     async fn discover_hosts(&self, flake_path: &Path) -> Result<Vec<HostEntity>> {
+        println!("{}", "Evaluating flake host matrix...".dimmed());
+
         let output = Command::new("nix")
             .args([
                 "eval",
@@ -73,6 +76,8 @@ impl NixEvaluator for NixCliEvaluator {
             flake_path.display(),
             host_name
         );
+
+        println!("{}", format!("Building NixOS closure for {}...", host_name).bold().blue());
 
         let output = Command::new("nix")
             .args(["build", "--json", &flake_attr, "--no-link"])
