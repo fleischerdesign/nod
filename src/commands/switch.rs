@@ -1,7 +1,7 @@
 use crate::commands::check;
 use crate::domain::traits::deployer::RemoteDeployer;
 use crate::domain::traits::evaluator::NixEvaluator;
-use crate::infrastructure::lix_evaluator::LixEvaluator;
+use crate::infrastructure::nix_evaluator::NixCliEvaluator;
 use crate::infrastructure::tokio_ssh::TokioSshDeployer;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
@@ -12,7 +12,7 @@ pub async fn execute(target: &str, no_check: bool, flake_path: &Path) -> Result<
         check::execute(flake_path).await?;
     }
 
-    let evaluator = LixEvaluator::new();
+    let evaluator = NixCliEvaluator::new();
     let deployer = TokioSshDeployer::new();
 
     let hosts = evaluator.discover_hosts(flake_path).await?;

@@ -1,13 +1,13 @@
 use crate::domain::traits::deployer::RemoteDeployer;
 use crate::domain::traits::evaluator::NixEvaluator;
-use crate::infrastructure::lix_evaluator::LixEvaluator;
+use crate::infrastructure::nix_evaluator::NixCliEvaluator;
 use crate::infrastructure::tokio_ssh::TokioSshDeployer;
 use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 
 pub async fn execute(flake_path: &Path) -> Result<()> {
-    let evaluator = LixEvaluator::new();
+    let evaluator = NixCliEvaluator::new();
     let deployer = TokioSshDeployer::new();
 
     println!("{}", "Discovering hosts from Nix Flake...".bold().cyan());

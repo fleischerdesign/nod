@@ -5,16 +5,16 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-pub struct LixEvaluator;
+pub struct NixCliEvaluator;
 
-impl LixEvaluator {
+impl NixCliEvaluator {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl NixEvaluator for LixEvaluator {
+impl NixEvaluator for NixCliEvaluator {
     async fn discover_hosts(&self, flake_path: &Path) -> Result<Vec<HostEntity>> {
         let output = Command::new("nix")
             .args([
@@ -26,15 +26,15 @@ impl NixEvaluator for LixEvaluator {
             ])
             .output()
             .await
-            .context("Failed to execute Lix evaluation for host discovery")?;
+            .context("Failed to execute Nix evaluation for host discovery")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Lix host discovery evaluation failed: {}", stderr));
+            return Err(anyhow!("Nix host discovery evaluation failed: {}", stderr));
         }
 
         let host_names: Vec<String> = serde_json::from_slice(&output.stdout)
-            .context("Failed to parse Lix host discovery JSON output")?;
+            .context("Failed to parse Nix host discovery JSON output")?;
 
         let mut hosts = Vec::new();
         let local_hostname = hostname::get()
@@ -43,7 +43,23 @@ impl NixEvaluator for LixEvaluator {
 
         for name in host_names {
             let is_local = name == local_hostname;
-            let mut entity = HostEntity::new(&name, &name, is_local);
+
+            let target_host_expr = format!(
+                "let c = (import {}).nixosConfigurations.{}.config; in if c ? deployment && c.deployment ? targetHost then c.deployment.targetHost else (if c ? networking && c.networking ? hostName then c.networking.hostName else \"{}\")",
+                flake_path.display(),
+                name,
+                name
+            );
+
+            let host_target = Command::new("nix")
+                .args(["eval", "--json", "--expr", &target_host_expr])
+                .output()
+                .await
+                .ok()
+                .and_then(|o| serde_json::from_slice::<String>(&o.stdout).ok())
+                .unwrap_or_else(|| name.clone());
+
+            let mut entity = HostEntity::new(&name, &host_target, is_local);
             entity.role = HostRole::Server;
             hosts.push(entity);
         }
@@ -62,15 +78,15 @@ impl NixEvaluator for LixEvaluator {
             .args(["build", "--json", &flake_attr, "--no-link"])
             .output()
             .await
-            .context("Failed to build NixOS system closure with Lix")?;
+            .context("Failed to build NixOS system closure")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Lix build failed for host {}: {}", host_name, stderr));
+            return Err(anyhow!("Nix build failed for host {}: {}", host_name, stderr));
         }
 
         let build_json: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .context("Failed to parse Lix build JSON output")?;
+            .context("Failed to parse Nix build JSON output")?;
 
         let out_path = build_json[0]["outputs"]["out"]
             .as_str()
