@@ -9,14 +9,22 @@ impl QualityGate {
     pub async fn run_all(flake_path: &Path) -> Result<()> {
         println!("{}", "Running repository quality gates...".bold().cyan());
 
-        let fmt_status = Command::new("nixfmt")
-            .args(["--check", &flake_path.display().to_string()])
-            .status()
-            .await;
+        let target_file = if flake_path.is_dir() {
+            flake_path.join("flake.nix")
+        } else {
+            flake_path.to_path_buf()
+        };
 
-        if let Ok(status) = fmt_status {
-            if !status.success() {
-                println!("{}", "⚠ nixfmt check reported formatting issues.".yellow());
+        if target_file.exists() {
+            let fmt_status = Command::new("nixfmt")
+                .args(["--check", target_file.to_str().unwrap()])
+                .status()
+                .await;
+
+            if let Ok(status) = fmt_status {
+                if !status.success() {
+                    println!("{}", "⚠ nixfmt check reported formatting issues.".yellow());
+                }
             }
         }
 
