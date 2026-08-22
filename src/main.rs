@@ -25,8 +25,8 @@ async fn main() -> Result<()> {
         Commands::Status { flake } => {
             commands::status::execute(Path::new(&flake), cli.verbose).await?;
         }
-        Commands::Diff { target: _, flake: _ } => {
-            println!("Diff engine reserved for nvd integration.");
+        Commands::Diff { target, flake } => {
+            commands::diff::execute(&target, Path::new(&flake), cli.verbose).await?;
         }
         Commands::Rollback { target: _ } => {
             println!("Rollback engine reserved for generation profile rollback.");
