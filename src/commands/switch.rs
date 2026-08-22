@@ -1,4 +1,3 @@
-use crate::commands::check;
 use crate::domain::traits::deployer::RemoteDeployer;
 use crate::domain::traits::evaluator::NixEvaluator;
 use crate::infrastructure::nix_evaluator::NixCliEvaluator;
@@ -7,11 +6,7 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 use std::path::Path;
 
-pub async fn execute(target: &str, no_check: bool, flake_path: &Path) -> Result<()> {
-    if !no_check {
-        check::execute(flake_path).await?;
-    }
-
+pub async fn execute(target: &str, flake_path: &Path) -> Result<()> {
     let evaluator = NixCliEvaluator::new();
     let deployer = TokioSshDeployer::new();
 

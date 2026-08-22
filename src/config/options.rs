@@ -20,16 +20,12 @@ pub enum Commands {
         #[arg(default_value = "local")]
         target: String,
 
-        /// Skip pre-flight quality checks (nixfmt, statix, deadnix)
-        #[arg(long)]
-        no_check: bool,
-
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
     },
 
-    /// Run strict repository quality gates (nixfmt + deadnix + statix + lix check)
+    /// Run strict repository quality gates (nixfmt + deadnix + statix)
     Check {
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]

@@ -16,12 +16,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Switch {
-            target,
-            no_check,
-            flake,
-        } => {
-            commands::switch::execute(&target, no_check, Path::new(&flake)).await?;
+        Commands::Switch { target, flake } => {
+            commands::switch::execute(&target, Path::new(&flake)).await?;
         }
         Commands::Check { flake } => {
             commands::check::execute(Path::new(&flake)).await?;
