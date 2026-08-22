@@ -3,7 +3,9 @@ use crate::domain::traits::evaluator::NixEvaluator;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -13,15 +15,26 @@ impl NixCliEvaluator {
     pub fn new() -> Self {
         Self
     }
+
+    fn create_braille_spinner(msg: &str) -> ProgressBar {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .template("  {spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        pb.set_message(msg.to_string());
+        pb.enable_steady_tick(Duration::from_millis(80));
+        pb
+    }
 }
 
 #[async_trait]
 impl NixEvaluator for NixCliEvaluator {
     async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>> {
+        let pb = Self::create_braille_spinner("Evaluating host matrix...");
         let start = Instant::now();
-        if verbose {
-            println!("  {}", format!("Evaluating host matrix for {}...", flake_path.display()).dimmed());
-        }
 
         let output = Command::new("nix")
             .args([
@@ -34,6 +47,8 @@ impl NixEvaluator for NixCliEvaluator {
             .output()
             .await
             .context("Failed to execute Nix evaluation for host discovery")?;
+
+        pb.finish_and_clear();
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -79,6 +94,8 @@ impl NixEvaluator for NixCliEvaluator {
     }
 
     async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf> {
+        let pb = Self::create_braille_spinner(&format!("Building closure for {}...", host_name));
+
         let flake_attr = format!(
             "{}#nixosConfigurations.{}.config.system.build.toplevel",
             flake_path.display(),
@@ -86,13 +103,14 @@ impl NixEvaluator for NixCliEvaluator {
         );
 
         let start = Instant::now();
-        println!("  {}", format!("Building closure for {}...", host_name).dimmed());
 
         let output = Command::new("nix")
             .args(["build", "--json", &flake_attr, "--no-link"])
             .output()
             .await
             .context("Failed to build NixOS system closure")?;
+
+        pb.finish_and_clear();
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
