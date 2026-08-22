@@ -1,0 +1,44 @@
+mod commands;
+mod config;
+mod domain;
+mod infrastructure;
+mod telemetry;
+mod ui;
+
+use anyhow::Result;
+use clap::Parser;
+use config::options::{Cli, Commands};
+use std::path::Path;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    telemetry::init_tracing();
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Switch {
+            target,
+            no_check,
+            flake,
+        } => {
+            commands::switch::execute(&target, no_check, Path::new(&flake)).await?;
+        }
+        Commands::Check { flake } => {
+            commands::check::execute(Path::new(&flake)).await?;
+        }
+        Commands::Status { flake } => {
+            commands::status::execute(Path::new(&flake)).await?;
+        }
+        Commands::Diff { target: _, flake: _ } => {
+            println!("Diff engine reserved for nvd integration.");
+        }
+        Commands::Rollback { target: _ } => {
+            println!("Rollback engine reserved for generation profile rollback.");
+        }
+        Commands::Dashboard { flake: _ } => {
+            println!("Ratatui interactive dashboard reserved for full-screen TUI.");
+        }
+    }
+
+    Ok(())
+}
