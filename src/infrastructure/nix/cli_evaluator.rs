@@ -7,13 +7,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
+use crate::domain::config::NodConfig;
 use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, HostRole};
 use crate::domain::ports::evaluator::EvaluatorPort;
 use serde::Deserialize;
 
 /// Parsed per-host flake metadata (`config.nod`) with graceful fallbacks
-/// (ADR-004 tier 3). JSON keys are camelCase via serde renaming.
+/// (ADR-004 tier 3). JSON keys are camelCase via serde renaming; the nested
+/// `nod` object carries the whole module surface (ssh / build / rollout /
+/// health / hooks) and is materialized onto the `HostEntity`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FlakeMeta {
@@ -23,6 +26,10 @@ struct FlakeMeta {
     tags: Vec<String>,
     user: Option<String>,
     port: Option<u16>,
+    /// The raw `config.nod` object; `null` when the host does not use the
+    /// nod module.
+    #[serde(default)]
+    nod: Option<NodConfig>,
 }
 
 /// Evaluates the flake via the Nix CLI to discover hosts and build closures.
@@ -95,9 +102,12 @@ impl EvaluatorPort for NixCliEvaluator {
             let is_local = name == local_hostname;
 
             // Per-host metadata from flake `config.nod` (tier 3) with graceful
-            // fallback to `deployment.*` / `networking.hostName` (ADR-004).
+            // fallback to `deployment.*` / `networking.hostName` (ADR-004). The
+            // whole `nod` object is emitted so every granular option
+            // (ssh/build/rollout/healthChecks/hooks) deserializes onto the
+            // `HostEntity`.
             let meta_expr = format!(
-                "let x = (import {}).nixosConfigurations.{}.config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? user then x.nod.user else null; port = if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null }}",
+                "let x = (import {}).nixosConfigurations.{}.config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null }} ",
                 flake_path.display(),
                 name,
                 name
@@ -115,6 +125,7 @@ impl EvaluatorPort for NixCliEvaluator {
                     tags: vec![],
                     user: None,
                     port: None,
+                    nod: None,
                 });
 
             let mut entity = HostEntity::new(&name, &meta.target_host, is_local);
@@ -125,6 +136,11 @@ impl EvaluatorPort for NixCliEvaluator {
             }
             if let Some(port) = meta.port {
                 entity.target_port = port;
+            }
+            // Materialize the full `config.nod` surface (tier 3) so downstream
+            // adapters read the granular ssh/build/rollout/health/hooks values.
+            if let Some(nod) = meta.nod {
+                entity.nod_config = nod;
             }
             hosts.push(entity);
         }

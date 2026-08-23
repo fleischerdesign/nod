@@ -14,7 +14,18 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::domain::config::{CliOverrides, FleetDefaults, HostOverrides};
+use crate::domain::config::{
+    BuildConfig,
+    CliOverrides,
+    CustomProbeConfig,
+    FleetDefaults,
+    HealthCheckConfig,
+    HostOverrides,
+    HooksConfig,
+    HttpProbeConfig,
+    RolloutConfig,
+    SystemdHealthConfig,
+};
 use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::config_store::ConfigStorePort;
@@ -22,29 +33,127 @@ use crate::domain::ports::config_store::ConfigStorePort;
 /// File names searched bottom-up from the flake root / cwd.
 const CONFIG_FILE_NAMES: [&str; 2] = [".nod.toml", "nod.toml"];
 
-/// SSH settings shared by the `[defaults]` and `[fleet]` sections.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// SSH settings shared by the `[defaults]`, `[fleet]` and nested
+/// `[hosts.<name>.ssh]` sections. Fields are optional so an absent section
+/// leaves the tier unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct SshOverrides {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub identity_file: Option<PathBuf>,
     pub proxy_jump: Option<String>,
+    pub proxy_command: Option<String>,
     pub sudo: Option<bool>,
+    pub timeout_secs: Option<u32>,
+    pub connect_timeout_secs: Option<u32>,
+    #[serde(default)]
+    pub extra_ssh_args: Option<Vec<String>>,
+    pub allow_insecure: Option<bool>,
 }
 
-/// A `[hosts.<name>]` section: the shared SSH settings plus host-specific
-/// topology values (`target_host`, `role`, `tags`).
+/// A `[hosts.<name>]` section: shared SSH settings plus host-specific
+/// topology values (`target_host`, `role`, `tags`, `description`) and the
+/// granular group tables (`ssh`, `build`, `rollout`, `health_checks`, `hooks`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TomlHost {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub identity_file: Option<PathBuf>,
     pub proxy_jump: Option<String>,
+    pub proxy_command: Option<String>,
     pub sudo: Option<bool>,
+    pub timeout_secs: Option<u32>,
+    pub connect_timeout_secs: Option<u32>,
+    #[serde(default)]
+    pub extra_ssh_args: Option<Vec<String>>,
+    pub allow_insecure: Option<bool>,
     pub target_host: Option<String>,
     pub role: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub ssh: Option<SshOverrides>,
+    #[serde(default)]
+    pub build: Option<TomlBuild>,
+    #[serde(default)]
+    pub rollout: Option<TomlRollout>,
+    #[serde(default)]
+    pub health_checks: Option<TomlHealth>,
+    #[serde(default)]
+    pub hooks: Option<TomlHooks>,
+}
+
+/// `[hosts.<name>.build]` — 1:1 with `options.nod.build`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlBuild {
+    pub build_host: Option<String>,
+    #[serde(default)]
+    pub substituters: Option<Vec<String>>,
+    #[serde(default)]
+    pub trusted_public_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub eval_flags: Option<Vec<String>>,
+    pub show_trace: Option<bool>,
+    pub impure: Option<bool>,
+}
+
+/// `[hosts.<name>.rollout]` — 1:1 with `options.nod.rollout`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlRollout {
+    pub priority: Option<u32>,
+    pub action: Option<String>,
+    pub auto_rollback: Option<bool>,
+    pub reboot: Option<bool>,
+    pub magic_rollback: Option<bool>,
+    pub magic_rollback_timeout_secs: Option<u32>,
+}
+
+/// `[hosts.<name>.health_checks.systemd]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlSystemd {
+    pub check_running: Option<bool>,
+    pub check_failed_units: Option<bool>,
+    #[serde(default)]
+    pub required_units: Option<Vec<String>>,
+}
+
+/// One `[hosts.<name>.health_checks.http_probes]` entry.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlHttp {
+    pub url: Option<String>,
+    pub expected_status: Option<u16>,
+    pub timeout_secs: Option<u32>,
+}
+
+/// One `[hosts.<name>.health_checks.custom_probes]` entry.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlCustom {
+    pub name: Option<String>,
+    pub command: Option<String>,
+    pub timeout_secs: Option<u32>,
+}
+
+/// `[hosts.<name>.health_checks]` — 1:1 with `options.nod.healthChecks`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlHealth {
+    pub enable: Option<bool>,
+    pub timeout_secs: Option<u32>,
+    #[serde(default)]
+    pub systemd: Option<TomlSystemd>,
+    #[serde(default)]
+    pub tcp_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    pub http_probes: Option<Vec<TomlHttp>>,
+    #[serde(default)]
+    pub custom_probes: Option<Vec<TomlCustom>>,
+}
+
+/// `[hosts.<name>.hooks]` — 1:1 with `options.nod.hooks`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlHooks {
+    pub pre_switch_hook: Option<String>,
+    pub post_switch_hook: Option<String>,
 }
 
 /// Parsed shape of `.nod.toml`.
@@ -58,40 +167,46 @@ pub struct TomlConfig {
     pub hosts: HashMap<String, TomlHost>,
 }
 
-/// Fully merged overrides for one host across the TOML and CLI tiers.
+/// Fully merged SSH overrides for one host across the TOML and CLI tiers.
+/// `ssh` carries every granular `options.nod.ssh` value after cascading
+/// defaults → fleet → host → CLI.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Merged {
-    user: Option<String>,
-    port: Option<u16>,
-    identity_file: Option<PathBuf>,
-    proxy_jump: Option<String>,
-    sudo: Option<bool>,
+    ssh: SshOverrides,
 }
 
 impl Merged {
-    /// Overlays one section's SSH values (later calls win).
-    fn overlay(
-        &mut self,
-        user: Option<String>,
-        port: Option<u16>,
-        identity_file: Option<PathBuf>,
-        proxy_jump: Option<String>,
-        sudo: Option<bool>,
-    ) {
-        if user.is_some() {
-            self.user = user;
+    /// Overlays one source's SSH values onto the merge (later calls win).
+    fn overlay(&mut self, src: &SshOverrides) {
+        if src.user.is_some() {
+            self.ssh.user = src.user.clone();
         }
-        if port.is_some() {
-            self.port = port;
+        if src.port.is_some() {
+            self.ssh.port = src.port;
         }
-        if identity_file.is_some() {
-            self.identity_file = identity_file;
+        if src.identity_file.is_some() {
+            self.ssh.identity_file = src.identity_file.clone();
         }
-        if proxy_jump.is_some() {
-            self.proxy_jump = proxy_jump;
+        if src.proxy_jump.is_some() {
+            self.ssh.proxy_jump = src.proxy_jump.clone();
         }
-        if sudo.is_some() {
-            self.sudo = sudo;
+        if src.proxy_command.is_some() {
+            self.ssh.proxy_command = src.proxy_command.clone();
+        }
+        if src.sudo.is_some() {
+            self.ssh.sudo = src.sudo;
+        }
+        if src.timeout_secs.is_some() {
+            self.ssh.timeout_secs = src.timeout_secs;
+        }
+        if src.connect_timeout_secs.is_some() {
+            self.ssh.connect_timeout_secs = src.connect_timeout_secs;
+        }
+        if src.extra_ssh_args.is_some() {
+            self.ssh.extra_ssh_args = src.extra_ssh_args.clone();
+        }
+        if src.allow_insecure.is_some() {
+            self.ssh.allow_insecure = src.allow_insecure;
         }
     }
 }
@@ -99,13 +214,13 @@ impl Merged {
 /// Overlays the CLI tier (always wins) onto a merge.
 fn merge_cli_into(merged: &mut Merged, cli: &CliOverrides) {
     if cli.user.is_some() {
-        merged.user = cli.user.clone();
+        merged.ssh.user = cli.user.clone();
     }
     if cli.port.is_some() {
-        merged.port = cli.port;
+        merged.ssh.port = cli.port;
     }
     if cli.identity_file.is_some() {
-        merged.identity_file = cli.identity_file.clone();
+        merged.ssh.identity_file = cli.identity_file.clone();
     }
 }
 
@@ -157,48 +272,126 @@ impl TomlConfigStore {
     fn base_merged(&self) -> Merged {
         let mut merged = Merged::default();
         if let Some(d) = &self.toml.defaults {
-            merged.overlay(
-                d.user.clone(),
-                d.port,
-                d.identity_file.clone(),
-                d.proxy_jump.clone(),
-                d.sudo,
-            );
+            merged.overlay(d);
         }
         if let Some(f) = &self.toml.fleet {
-            merged.overlay(
-                f.user.clone(),
-                f.port,
-                f.identity_file.clone(),
-                f.proxy_jump.clone(),
-                f.sudo,
-            );
+            merged.overlay(f);
         }
         merged
     }
 
     /// Merges every tier except the host entity itself (tiers 3/4 live on
-    /// the entity) into one override set for `name`.
+    /// the entity) into one override set for `name`. Flat `[hosts.<name>]`
+    /// ssh values are overlaid before the nested `[hosts.<name>.ssh]` table,
+    /// then the CLI tier wins.
     fn merged_for(&self, name: &str) -> Merged {
         let mut merged = self.base_merged();
         if let Some(h) = self.toml.hosts.get(name) {
-            merged.overlay(
-                h.user.clone(),
-                h.port,
-                h.identity_file.clone(),
-                h.proxy_jump.clone(),
-                h.sudo,
-            );
+            let flat = SshOverrides {
+                user: h.user.clone(),
+                port: h.port,
+                identity_file: h.identity_file.clone(),
+                proxy_jump: h.proxy_jump.clone(),
+                proxy_command: h.proxy_command.clone(),
+                sudo: h.sudo,
+                timeout_secs: h.timeout_secs,
+                connect_timeout_secs: h.connect_timeout_secs,
+                extra_ssh_args: h.extra_ssh_args.clone(),
+                allow_insecure: h.allow_insecure,
+            };
+            merged.overlay(&flat);
+            if let Some(ssh) = &h.ssh {
+                merged.overlay(ssh);
+            }
         }
         merge_cli_into(&mut merged, &self.cli);
         merged
     }
 }
 
+/// Maps a parsed `[hosts.<name>.build]` table onto the domain `BuildConfig`.
+fn to_build_config(b: &TomlBuild) -> BuildConfig {
+    BuildConfig {
+        build_host: b.build_host.clone(),
+        substituters: b.substituters.clone(),
+        trusted_public_keys: b.trusted_public_keys.clone(),
+        eval_flags: b.eval_flags.clone(),
+        show_trace: b.show_trace,
+        impure: b.impure,
+    }
+}
+
+/// Maps a parsed `[hosts.<name>.rollout]` table onto the domain `RolloutConfig`.
+fn to_rollout_config(r: &TomlRollout) -> RolloutConfig {
+    RolloutConfig {
+        priority: r.priority,
+        action: r.action.clone(),
+        auto_rollback: r.auto_rollback,
+        reboot: r.reboot,
+        magic_rollback: r.magic_rollback,
+        magic_rollback_timeout_secs: r.magic_rollback_timeout_secs,
+    }
+}
+
+/// Maps a parsed `[hosts.<name>.hooks]` table onto the domain `HooksConfig`.
+fn to_hooks_config(h: &TomlHooks) -> HooksConfig {
+    HooksConfig {
+        pre_switch_hook: h.pre_switch_hook.clone(),
+        post_switch_hook: h.post_switch_hook.clone(),
+    }
+}
+
+/// Maps a parsed `[hosts.<name>.health_checks]` table onto the domain
+/// `HealthCheckConfig`.
+fn to_health_config(h: &TomlHealth) -> HealthCheckConfig {
+    let systemd = match &h.systemd {
+        Some(s) => SystemdHealthConfig {
+            check_running: s.check_running,
+            check_failed_units: s.check_failed_units,
+            required_units: s.required_units.clone(),
+        },
+        None => SystemdHealthConfig::default(),
+    };
+    let http_probes = h
+        .http_probes
+        .as_ref()
+        .map(|probes| {
+            probes
+                .iter()
+                .map(|p| HttpProbeConfig {
+                    url: p.url.clone(),
+                    expected_status: p.expected_status,
+                    timeout_secs: p.timeout_secs,
+                })
+                .collect()
+        });
+    let custom_probes = h
+        .custom_probes
+        .as_ref()
+        .map(|probes| {
+            probes
+                .iter()
+                .map(|p| CustomProbeConfig {
+                    name: p.name.clone(),
+                    command: p.command.clone(),
+                    timeout_secs: p.timeout_secs,
+                })
+                .collect()
+        });
+    HealthCheckConfig {
+        enable: h.enable,
+        timeout_secs: h.timeout_secs,
+        systemd,
+        tcp_ports: h.tcp_ports.clone(),
+        http_probes,
+        custom_probes,
+    }
+}
+
 #[async_trait]
 impl ConfigStorePort for TomlConfigStore {
     async fn resolve(&self, host: &HostEntity) -> Result<SshProfile, NodError> {
-        let merged = self.merged_for(&host.name);
+        let merged = self.merged_for(&host.name).ssh;
         let mut profile = SshProfile::for_host(host);
         if let Some(user) = merged.user {
             profile = profile.with_user(user);
@@ -212,14 +405,31 @@ impl ConfigStorePort for TomlConfigStore {
         if let Some(proxy) = merged.proxy_jump {
             profile = profile.with_proxy_jump(proxy);
         }
+        if let Some(proxy) = merged.proxy_command {
+            profile = profile.with_proxy_command(proxy);
+        }
         if let Some(sudo) = merged.sudo {
             profile = profile.with_sudo(sudo);
+        }
+        if let Some(timeout) = merged.timeout_secs {
+            profile = profile.with_timeout_secs(timeout);
+        }
+        if let Some(connect) = merged.connect_timeout_secs {
+            profile = profile.with_connect_timeout_secs(connect);
+        }
+        if let Some(args) = merged.extra_ssh_args {
+            for arg in args {
+                profile = profile.with_extra_ssh_arg(arg);
+            }
+        }
+        if let Some(insecure) = merged.allow_insecure {
+            profile = profile.with_allow_insecure(insecure);
         }
         Ok(profile)
     }
 
     async fn host_overrides(&self, name: &str) -> Result<HostOverrides, NodError> {
-        let merged = self.merged_for(name);
+        let merged = self.merged_for(name).ssh;
         let host = self.toml.hosts.get(name);
         Ok(HostOverrides {
             target_host: host.and_then(|h| h.target_host.clone()),
@@ -227,21 +437,41 @@ impl ConfigStorePort for TomlConfigStore {
             port: merged.port,
             identity_file: merged.identity_file,
             proxy_jump: merged.proxy_jump,
+            proxy_command: merged.proxy_command,
             sudo: merged.sudo,
+            timeout_secs: merged.timeout_secs,
+            connect_timeout_secs: merged.connect_timeout_secs,
+            extra_ssh_args: merged.extra_ssh_args,
+            allow_insecure: merged.allow_insecure,
+            description: host.and_then(|h| h.description.clone()),
             role: host.and_then(|h| h.role.clone()),
             tags: host.and_then(|h| h.tags.clone()),
+            build: host.and_then(|h| h.build.as_ref()).map(to_build_config),
+            rollout: host.and_then(|h| h.rollout.as_ref()).map(to_rollout_config),
+            health_checks: host.and_then(|h| h.health_checks.as_ref()).map(to_health_config),
+            hooks: host.and_then(|h| h.hooks.as_ref()).map(to_hooks_config),
         })
     }
 
     async fn fleet_defaults(&self) -> Result<FleetDefaults, NodError> {
-        let merged = self.base_merged();
+        let merged = self.base_merged().ssh;
         // CLI overrides are per-run, not fleet defaults.
         Ok(FleetDefaults {
             user: merged.user,
             port: merged.port,
             identity_file: merged.identity_file,
             proxy_jump: merged.proxy_jump,
+            proxy_command: merged.proxy_command,
             sudo: merged.sudo,
+            timeout_secs: merged.timeout_secs,
+            connect_timeout_secs: merged.connect_timeout_secs,
+            extra_ssh_args: merged.extra_ssh_args,
+            allow_insecure: merged.allow_insecure,
+            description: None,
+            build: None,
+            rollout: None,
+            health_checks: None,
+            hooks: None,
         })
     }
 

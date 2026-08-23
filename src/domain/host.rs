@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::domain::config::NodConfig;
+
 /// The functional role of a host within a fleet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostRole {
@@ -52,6 +54,10 @@ pub struct HostEntity {
     /// Operator-assignable tags for fleet filtering (`--tag`).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Full `config.nod` surface deserialized from the flake (tier 3) and the
+    /// `.nod.toml` overrides: ssh / build / rollout / health / hooks.
+    #[serde(default)]
+    pub nod_config: NodConfig,
 }
 
 impl HostEntity {
@@ -67,6 +73,7 @@ impl HostEntity {
             is_local,
             active_closure: None,
             tags: Vec::new(),
+            nod_config: NodConfig::default(),
         }
     }
 
@@ -117,8 +124,12 @@ pub struct SshProfile {
     port: u16,
     identity_file: Option<PathBuf>,
     proxy_jump: Option<String>,
+    proxy_command: Option<String>,
     timeout_secs: u32,
+    connect_timeout_secs: u32,
+    extra_ssh_args: Vec<String>,
     sudo: bool,
+    allow_insecure: bool,
 }
 
 impl SshProfile {
@@ -130,8 +141,12 @@ impl SshProfile {
             port: host.target_port,
             identity_file: None,
             proxy_jump: None,
+            proxy_command: None,
             timeout_secs: 30,
+            connect_timeout_secs: 10,
+            extra_ssh_args: Vec::new(),
             sudo: host.is_local,
+            allow_insecure: false,
         }
     }
 
@@ -142,8 +157,12 @@ impl SshProfile {
             port,
             identity_file: None,
             proxy_jump: None,
+            proxy_command: None,
             timeout_secs: 30,
+            connect_timeout_secs: 10,
+            extra_ssh_args: Vec::new(),
             sudo: true,
+            allow_insecure: false,
         }
     }
 
@@ -167,9 +186,29 @@ impl SshProfile {
         self.proxy_jump.as_deref()
     }
 
+    /// Returns an explicit proxy command (e.g. `ssh -W %d:%p bastion`).
+    pub fn proxy_command(&self) -> Option<&str> {
+        self.proxy_command.as_deref()
+    }
+
     /// Returns the connection timeout in seconds.
     pub fn timeout_secs(&self) -> u32 {
         self.timeout_secs
+    }
+
+    /// Returns the SSH connect timeout in seconds.
+    pub fn connect_timeout_secs(&self) -> u32 {
+        self.connect_timeout_secs
+    }
+
+    /// Returns the additional SSH arguments.
+    pub fn extra_ssh_args(&self) -> &Vec<String> {
+        &self.extra_ssh_args
+    }
+
+    /// Returns whether to allow insecure-but-needed SSH session options.
+    pub fn allow_insecure(&self) -> bool {
+        self.allow_insecure
     }
 
     /// Returns whether the switch command should be escalated with sudo.
@@ -207,9 +246,33 @@ impl SshProfile {
         self
     }
 
+    /// Returns a copy with a different proxy command.
+    pub fn with_proxy_command(mut self, proxy_command: impl Into<String>) -> Self {
+        self.proxy_command = Some(proxy_command.into());
+        self
+    }
+
     /// Returns a copy with a different connection timeout.
     pub fn with_timeout_secs(mut self, timeout_secs: u32) -> Self {
         self.timeout_secs = timeout_secs;
+        self
+    }
+
+    /// Returns a copy with a different SSH connect timeout.
+    pub fn with_connect_timeout_secs(mut self, connect_timeout_secs: u32) -> Self {
+        self.connect_timeout_secs = connect_timeout_secs;
+        self
+    }
+
+    /// Returns a copy with one more extra SSH argument appended.
+    pub fn with_extra_ssh_arg(mut self, arg: impl Into<String>) -> Self {
+        self.extra_ssh_args.push(arg.into());
+        self
+    }
+
+    /// Returns a copy with the allow-insecure flag set.
+    pub fn with_allow_insecure(mut self, allow_insecure: bool) -> Self {
+        self.allow_insecure = allow_insecure;
         self
     }
 }
