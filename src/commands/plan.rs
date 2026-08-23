@@ -85,9 +85,9 @@ pub async fn execute(
         println!("\n{}", "Closure diffs (preview):".bold());
         for diff in diffs {
             let flag = if diff.changed {
-                format!("changed").yellow()
+                "changed".to_string().yellow()
             } else {
-                format!("unchanged").dimmed()
+                "unchanged".to_string().dimmed()
             };
             println!("  - {}: {}", diff.host_name, flag);
         }

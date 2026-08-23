@@ -28,7 +28,15 @@ impl JsonHistoryStore {
             path: Self::default_path(),
         }
     }
+}
 
+impl Default for JsonHistoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JsonHistoryStore {
     /// Builds a store pointed at an explicit `path` (for tests and callers
     /// that override the location).
     pub fn at(path: PathBuf) -> Self {
@@ -100,7 +108,7 @@ impl HistoryStorePort for JsonHistoryStore {
         let mut all = self.read()?;
 
         if let Some(host_filter) = &host {
-            all = all.into_iter().filter(|e| &e.host_name == host_filter).collect();
+            all.retain(|e| &e.host_name == host_filter);
         }
 
         // Newest-first (the file is append-ordered oldest-first).
@@ -112,13 +120,11 @@ impl HistoryStorePort for JsonHistoryStore {
 
         if let Some(limit) = limit {
             let mut capped = Vec::<HistoryEntry>::with_capacity(limit);
-            let mut taken = 0;
-            for entry in all {
+            for (taken, entry) in all.into_iter().enumerate() {
                 if taken >= limit {
                     break;
                 }
                 capped.push(entry);
-                taken += 1;
             }
             Ok(capped)
         } else {

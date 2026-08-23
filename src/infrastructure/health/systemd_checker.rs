@@ -21,10 +21,19 @@ pub struct SystemdHealthChecker;
 
 impl SystemdHealthChecker {
     /// Builds the adapter.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
+}
 
+impl Default for SystemdHealthChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SystemdHealthChecker {
     /// Reaches a health verdict from a reported systemd state and the
     /// failed-unit rows. `running`/`degraded` count as "the system is up";
     /// any failed unit flips the verdict to unhealthy.
@@ -79,7 +88,7 @@ impl HealthCheckerPort for SystemdHealthChecker {
         let failed = failed.unwrap();
         let failed_output = String::from_utf8_lossy(&failed.stdout);
 
-        Ok(Self::healthy(&state, &Self::failed_units(&failed_output)))
+        Ok(Self::healthy(state, &Self::failed_units(&failed_output)))
     }
 }
 
@@ -89,8 +98,8 @@ mod tests {
 
     #[test]
     fn running_system_without_failed_units_is_healthy() {
-        assert!(SystemdHealthChecker::healthy("running", &vec![]));
-        assert!(SystemdHealthChecker::healthy("degraded", &vec![]));
+        assert!(SystemdHealthChecker::healthy("running", &[]));
+        assert!(SystemdHealthChecker::healthy("degraded", &[]));
     }
 
     #[test]
@@ -104,7 +113,7 @@ mod tests {
     fn non_running_states_are_unhealthy() {
         for state in ["offline", "maintenance", "stopping", "unknown", ""] {
             assert!(
-                !SystemdHealthChecker::healthy(state, &vec![]),
+                !SystemdHealthChecker::healthy(state, &[]),
                 "state={}",
                 state
             );

@@ -21,7 +21,6 @@ impl GeneratePlanUseCase {
     }
 
     /// Reuses the fleet planner for rollout wave ordering semantics.
-
     /// Builds every host's toplevel closure and returns a plan that has not
     /// activated anything.
     pub async fn plan(

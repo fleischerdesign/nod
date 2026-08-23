@@ -165,8 +165,7 @@ impl DeploymentPlan {
                 if count == 0 {
                     return waves;
                 }
-                let mut canary = Vec::<usize>::with_capacity(1);
-                canary.push(0);
+                let canary = vec![0];
                 waves.push(canary);
                 if count > 1 {
                     let size = if batch_size == 0 { count - 1 } else { batch_size };

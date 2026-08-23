@@ -13,7 +13,7 @@ use crate::domain::host::HostEntity;
 use crate::ui::app::{DashboardApp, Tab};
 
 /// Draws one full dashboard frame: header, body pane and footer help.
-pub fn draw(f: &mut Frame, app: &DashboardApp, online: &Vec<bool>) {
+pub fn draw(f: &mut Frame, app: &DashboardApp, online: &[bool]) {
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
@@ -27,7 +27,7 @@ pub fn draw(f: &mut Frame, app: &DashboardApp, online: &Vec<bool>) {
 }
 
 /// Header: brand identity, total host count and the online/offline split.
-fn draw_header(f: &mut Frame, area: Rect, app: &DashboardApp, online: &Vec<bool>) {
+fn draw_header(f: &mut Frame, area: Rect, app: &DashboardApp, online: &[bool]) {
     let online_n = count_online(online);
     let offline_n = online.len() - online_n;
 
@@ -61,7 +61,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &DashboardApp, online: &Vec<bool>
 }
 
 /// Dispatches the body pane by the active tab.
-fn draw_body(f: &mut Frame, area: Rect, app: &DashboardApp, online: &Vec<bool>) {
+fn draw_body(f: &mut Frame, area: Rect, app: &DashboardApp, online: &[bool]) {
     match app.active_tab {
         Tab::Matrix => render_matrix(f, area, app, online),
         Tab::Details => render_details(f, area, app),
@@ -70,7 +70,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &DashboardApp, online: &Vec<bool>) 
 }
 
 /// Host reachability matrix table.
-fn render_matrix(f: &mut Frame, area: Rect, app: &DashboardApp, online: &Vec<bool>) {
+fn render_matrix(f: &mut Frame, area: Rect, app: &DashboardApp, online: &[bool]) {
     let header = Row::new(vec![
         Cell::new("Name"),
         Cell::new("Role"),
@@ -233,7 +233,7 @@ fn locality_text(host: &HostEntity) -> String {
 }
 
 /// Counts the reachable hosts in a reachability snapshot.
-fn count_online(online: &Vec<bool>) -> usize {
+fn count_online(online: &[bool]) -> usize {
     let mut n: usize = 0;
     for up in online.iter() {
         if *up {
@@ -261,7 +261,7 @@ mod tests {
         ]
     }
 
-    fn render(app: &DashboardApp, online: &Vec<bool>) -> Buffer {
+    fn render(app: &DashboardApp, online: &[bool]) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| draw(frame, app, online)).unwrap();
         terminal.backend().buffer().clone()
@@ -284,7 +284,7 @@ mod tests {
         s
     }
 
-    fn contains_text(board: &String, needle: &str) -> bool {
+    fn contains_text(board: &str, needle: &str) -> bool {
         board.find(needle).is_some()
     }
 

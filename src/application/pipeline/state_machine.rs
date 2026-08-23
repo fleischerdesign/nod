@@ -102,11 +102,13 @@ impl DeploymentStateMachine {
     }
 
     /// Stable lower-case label for observability / persistence.
+    #[allow(dead_code)]
     pub fn name(&self) -> String {
         self.state.to_str()
     }
 
     /// True when `event` is the legal successor of the current state.
+    #[allow(dead_code)]
     pub fn can(&self, event: DeploymentEvent) -> bool {
         Self::target_of(self.state.clone(), event.clone()).is_some()
     }
@@ -130,12 +132,7 @@ impl DeploymentStateMachine {
 
     /// Pure transition table: `Some(next)` when `state + event` is legal.
     fn is_not_terminal(state: &DeploymentState) -> bool {
-        match state {
-            DeploymentState::Completed
-            | DeploymentState::RolledBack
-            | DeploymentState::Failed => false,
-            _ => true,
-        }
+        !matches!(state, DeploymentState::Completed | DeploymentState::RolledBack | DeploymentState::Failed)
     }
 
     fn target_of(state: DeploymentState, event: DeploymentEvent) -> Option<DeploymentState> {
@@ -242,7 +239,7 @@ impl DeploymentState {
 mod tests {
     use super::*;
 
-    fn assert_state(mut machine: &mut DeploymentStateMachine, event: DeploymentEvent) -> DeploymentState {
+    fn assert_state(machine: &mut DeploymentStateMachine, event: DeploymentEvent) -> DeploymentState {
         machine.tick(event).unwrap()
     }
 
@@ -342,8 +339,8 @@ mod tests {
     }
 
     /// Advances the machine to a given non-terminal stage.
-    fn step_assert(mut machine: &mut DeploymentStateMachine, to: DeploymentState) {
-        let mut m = machine;
+    fn step_assert(machine: &mut DeploymentStateMachine, to: DeploymentState) {
+        let m = machine;
         match to {
             DeploymentState::Evaluating => {
                 m.tick(DeploymentEvent::Begin).unwrap();

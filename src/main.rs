@@ -1,20 +1,12 @@
-mod application;
-mod commands;
-mod config;
-mod domain;
-mod infrastructure;
-mod telemetry;
-mod ui;
-
 use anyhow::Result;
 use clap::Parser;
-use config::options::{Cli, Commands};
-use domain::config::CliOverrides;
+use nod::config::options::{Cli, Commands};
+use nod::domain::config::CliOverrides;
 use std::path::{Path, PathBuf};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    telemetry::init_tracing();
+    nod::telemetry::init_tracing();
     let cli = Cli::parse();
 
     match cli.command {
@@ -40,7 +32,7 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: identity_file.map(PathBuf::from),
             };
-            commands::switch::execute(
+            nod::commands::switch::execute(
                 &target,
                 Path::new(&flake),
                 cli.verbose,
@@ -59,10 +51,10 @@ async fn main() -> Result<()> {
             ).await?;
         }
         Commands::Check { flake } => {
-            commands::check::execute(Path::new(&flake)).await?;
+            nod::commands::check::execute(Path::new(&flake)).await?;
         }
         Commands::Status { flake, tag, role } => {
-            commands::status::execute(
+            nod::commands::status::execute(
                 Path::new(&flake),
                 cli.verbose,
                 tag.as_deref(),
@@ -83,7 +75,7 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: identity_file.map(PathBuf::from),
             };
-            commands::diff::execute(
+            nod::commands::diff::execute(
                 &target,
                 Path::new(&flake),
                 cli.verbose,
@@ -106,7 +98,7 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: identity_file.map(PathBuf::from),
             };
-            commands::plan::execute(
+            nod::commands::plan::execute(
                 &target,
                 Path::new(&flake),
                 cli.verbose,
@@ -122,7 +114,7 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: None,
             };
-            commands::rollback::execute(
+            nod::commands::rollback::execute(
                 &effective,
                 Path::new(&flake),
                 cli.verbose,
@@ -130,7 +122,7 @@ async fn main() -> Result<()> {
             ).await?;
         }
         Commands::Drift { target, tag, json } => {
-            commands::drift::execute(
+            nod::commands::drift::execute(
                 Path::new("."),
                 cli.verbose,
                 target.as_deref(),
@@ -139,10 +131,10 @@ async fn main() -> Result<()> {
             ).await?;
         }
         Commands::History { target, limit, json } => {
-            commands::history::execute(target.as_deref(), limit, json).await?;
+            nod::commands::history::execute(target.as_deref(), limit, json).await?;
         }
         Commands::Dashboard { flake } => {
-            commands::dashboard::execute(Path::new(&flake)).await?;
+            nod::commands::dashboard::execute(Path::new(&flake)).await?;
         }
     }
 

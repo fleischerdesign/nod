@@ -187,6 +187,7 @@ impl SshProfile {
     }
 
     /// Returns an explicit proxy command (e.g. `ssh -W %d:%p bastion`).
+    #[allow(dead_code)]
     pub fn proxy_command(&self) -> Option<&str> {
         self.proxy_command.as_deref()
     }
@@ -197,16 +198,19 @@ impl SshProfile {
     }
 
     /// Returns the SSH connect timeout in seconds.
+    #[allow(dead_code)]
     pub fn connect_timeout_secs(&self) -> u32 {
         self.connect_timeout_secs
     }
 
     /// Returns the additional SSH arguments.
+    #[allow(dead_code)]
     pub fn extra_ssh_args(&self) -> &Vec<String> {
         &self.extra_ssh_args
     }
 
     /// Returns whether to allow insecure-but-needed SSH session options.
+    #[allow(dead_code)]
     pub fn allow_insecure(&self) -> bool {
         self.allow_insecure
     }

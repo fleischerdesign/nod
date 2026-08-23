@@ -22,6 +22,12 @@ impl LocalDeployer {
     }
 }
 
+impl Default for LocalDeployer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl DeployerPort for LocalDeployer {
     async fn check_reachability(&self, _host: &HostEntity) -> Result<bool, NodError> {

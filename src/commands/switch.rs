@@ -17,6 +17,7 @@ use crate::infrastructure::deployment::local_deployer::LocalDeployer;
 use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
 use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     target: &str,
     flake_path: &Path,

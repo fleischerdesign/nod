@@ -39,7 +39,15 @@ impl NixCliEvaluator {
     pub fn new() -> Self {
         Self
     }
+}
 
+impl Default for NixCliEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NixCliEvaluator {
     fn create_braille_spinner(msg: &str) -> ProgressBar {
         let pb = ProgressBar::new_spinner();
         pb.set_style(

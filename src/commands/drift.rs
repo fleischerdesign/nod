@@ -71,10 +71,10 @@ pub async fn execute(
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
     let effective = target.unwrap_or("local");
-    let targets = TargetSelection::select_filtered(hosts, &effective, &local_hostname, tag, None);
+    let targets = TargetSelection::select_filtered(hosts, effective, &local_hostname, tag, None);
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(&effective, tag, None));
+        return Err(TargetSelection::unmatched(effective, tag, None));
     }
 
     let use_case = DetectDriftUseCase::new(Arc::new(ctx));

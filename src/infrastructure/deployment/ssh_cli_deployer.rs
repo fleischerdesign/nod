@@ -21,6 +21,12 @@ impl SshCliDeployer {
     }
 }
 
+impl Default for SshCliDeployer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl DeployerPort for SshCliDeployer {
     async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError> {
