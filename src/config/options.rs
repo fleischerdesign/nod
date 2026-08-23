@@ -423,6 +423,48 @@ pub enum Commands {
         command: Vec<String>,
     },
 
+    /// Execute an arbitrary shell command across resolved target hosts
+    Exec {
+        /// Target host name or glob pattern
+        target: Option<String>,
+
+        /// Path to flake directory
+        #[arg(short, long)]
+        flake: Option<PathBuf>,
+
+        /// Filter by tag
+        #[arg(short, long)]
+        tag: Option<String>,
+
+        /// Filter by role
+        #[arg(short, long)]
+        role: Option<String>,
+
+        /// Execute across all discovered hosts
+        #[arg(short, long)]
+        all: bool,
+
+        /// Run command with sudo on remote host
+        #[arg(long)]
+        sudo: bool,
+
+        /// Maximum concurrent remote executions
+        #[arg(short, long)]
+        concurrency: Option<usize>,
+
+        /// Abort remaining executions on first failure
+        #[arg(long)]
+        fail_fast: bool,
+
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Shell command and trailing arguments to execute
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+
     /// Launch interactive Ratatui TUI dashboard for fleet management
     Dashboard {
         /// Custom path to flake root directory
@@ -934,6 +976,108 @@ mod tests {
                 assert_eq!(concurrency, Some(2));
             }
             _ => panic!("expected a build command"),
+        }
+    }
+
+    #[test]
+    fn parses_exec_target_tag_role_all_filters_and_command() {
+        let cli = Cli::try_parse_from(vec![
+            "nod", "exec", "web-*", "--flake", "/tmp/flake", "--tag", "prod",
+            "--role", "server", "--all", "--sudo", "--concurrency", "2",
+            "--fail-fast", "--json", "--", "uptime", "-p",
+        ])
+        .expect("valid exec invocation should parse");
+        match cli.command {
+            Commands::Exec {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                sudo,
+                concurrency,
+                fail_fast,
+                json,
+                command,
+            } => {
+                assert_eq!(target, Some("web-*".to_string()));
+                assert_eq!(flake, Some(PathBuf::from("/tmp/flake")));
+                assert_eq!(tag, Some("prod".to_string()));
+                assert_eq!(role, Some("server".to_string()));
+                assert!(all);
+                assert!(sudo);
+                assert_eq!(concurrency, Some(2));
+                assert!(fail_fast);
+                assert!(json);
+                assert_eq!(command, ["uptime", "-p"]);
+            }
+            _ => panic!("expected an exec command"),
+        }
+    }
+
+    #[test]
+    fn parses_bare_exec_with_defaults() {
+        let cli = Cli::parse_from(vec!["nod", "exec", "--", "echo", "hi"]);
+        match cli.command {
+            Commands::Exec {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                sudo,
+                concurrency,
+                fail_fast,
+                json,
+                command,
+            } => {
+                assert_eq!(target, None);
+                assert_eq!(flake, None);
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
+                assert!(!all);
+                assert!(!sudo);
+                assert_eq!(concurrency, None);
+                assert!(!fail_fast);
+                assert!(!json);
+                assert_eq!(command, ["echo", "hi"]);
+            }
+            _ => panic!("expected an exec command"),
+        }
+    }
+
+    #[test]
+    fn parses_exec_short_flags_and_globbing_target() {
+        let cli = Cli::try_parse_from(vec![
+            "nod", "exec", "db-*", "-t", "prod", "-r", "db", "-a", "-f", "/tmp/flake",
+            "-c", "3", "--", "systemctl", "status", "postgres",
+        ])
+        .expect("valid exec short flags should parse");
+        match cli.command {
+            Commands::Exec {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                sudo,
+                concurrency,
+                fail_fast,
+                json,
+                command,
+            } => {
+                assert_eq!(target, Some("db-*".to_string()));
+                assert_eq!(flake, Some(PathBuf::from("/tmp/flake")));
+                assert_eq!(tag, Some("prod".to_string()));
+                assert_eq!(role, Some("db".to_string()));
+                assert!(all);
+                assert!(!sudo);
+                assert_eq!(concurrency, Some(3));
+                assert!(!fail_fast);
+                assert!(!json);
+                assert_eq!(command, ["systemctl", "status", "postgres"]);
+            }
+            _ => panic!("expected an exec command"),
         }
     }
 }

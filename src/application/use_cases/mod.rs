@@ -4,6 +4,7 @@
 pub mod audit_log;
 pub mod deploy_fleet;
 pub mod detect_drift;
+pub mod exec_fleet;
 pub mod generate_plan;
 pub mod health_check;
 pub mod rollback;

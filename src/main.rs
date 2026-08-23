@@ -260,6 +260,37 @@ async fn main() -> Result<()> {
                 &command,
             ).await?;
         }
+        Commands::Exec {
+            target,
+            flake,
+            tag,
+            role,
+            all,
+            sudo,
+            concurrency,
+            fail_fast,
+            json,
+            command,
+        } => {
+            let ctx = AppContext::new(
+                Arc::new(NixCliEvaluator::new()),
+                Arc::new(LocalDeployer::new()),
+                Arc::new(SshCliDeployer::new()),
+            );
+            nod::commands::exec::execute(
+                ctx,
+                flake.as_deref(),
+                target.as_deref(),
+                tag.as_deref(),
+                role.as_deref(),
+                all,
+                sudo,
+                concurrency,
+                fail_fast,
+                json,
+                &command,
+            ).await?;
+        }
         Commands::Dashboard { flake } => {
             nod::commands::dashboard::execute(Path::new(&flake)).await?;
         }
