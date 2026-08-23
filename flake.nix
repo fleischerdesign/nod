@@ -15,6 +15,9 @@
       };
     in
     {
+      nixosModules.default = import ./modules/nixos/default.nix;
+      nixosModules.nod = self.nixosModules.default;
+
       packages.${system} = {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "nod";
