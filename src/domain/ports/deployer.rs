@@ -22,10 +22,13 @@ pub trait DeployerPort: Send + Sync {
     async fn current_closure(&self, host: &HostEntity) -> Result<Option<PathBuf>, NodError>;
 
     /// Transfers the closure and activates the new system configuration.
+    /// `action` is the switch-to-configuration subcommand: `switch`, `test`
+    /// or `boot`.
     async fn deploy_and_activate(
         &self,
         host: &HostEntity,
         closure: &Path,
+        action: &str,
         verbose: bool,
     ) -> Result<(), NodError>;
 

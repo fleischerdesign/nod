@@ -16,8 +16,10 @@ pub enum DeploymentAction {
     Boot,
     /// Run post-activation verification only.
     Test,
-    /// Build & inspect the new closure without activating it.
+    /// Build & deploy the new closure without activating it.
     DryRun,
+    /// Build closures and create out-links without transferring or activating.
+    Build,
 }
 
 impl DeploymentAction {
@@ -28,6 +30,7 @@ impl DeploymentAction {
             DeploymentAction::Boot => String::from("boot"),
             DeploymentAction::Test => String::from("test"),
             DeploymentAction::DryRun => String::from("dry-run"),
+            DeploymentAction::Build => String::from("build"),
         }
     }
 
@@ -38,6 +41,7 @@ impl DeploymentAction {
             "boot" => Some(DeploymentAction::Boot),
             "test" => Some(DeploymentAction::Test),
             "dry-run" => Some(DeploymentAction::DryRun),
+            "build" => Some(DeploymentAction::Build),
             _ => None,
         }
     }
@@ -85,6 +89,8 @@ pub struct DeploymentOptions {
     pub action: DeploymentAction,
     /// Emit per-step detail.
     pub verbose: bool,
+    /// Optional symlink target for build closures (`nod build --out-link`).
+    pub out_link: Option<PathBuf>,
 }
 
 impl DeploymentOptions {
@@ -99,6 +105,7 @@ impl DeploymentOptions {
             dry_run: false,
             action: DeploymentAction::Switch,
             verbose: false,
+            out_link: None,
         }
     }
 
@@ -295,6 +302,7 @@ mod tests {
         assert_eq!(DeploymentAction::parse("Boot"), Some(DeploymentAction::Boot));
         assert_eq!(DeploymentAction::parse("test"), Some(DeploymentAction::Test));
         assert_eq!(DeploymentAction::parse("dry-run"), Some(DeploymentAction::DryRun));
+        assert_eq!(DeploymentAction::parse("build"), Some(DeploymentAction::Build));
         assert_eq!(DeploymentAction::parse("nope"), None);
     }
 

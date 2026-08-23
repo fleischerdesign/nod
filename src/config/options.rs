@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -87,6 +88,144 @@ pub enum Commands {
         /// Deployment action: switch, boot or test
         #[arg(long, value_name = "ACTION", default_value = "switch")]
         action: String,
+    },
+
+    /// Run `switch-to-configuration test` on one host or a fleet
+    Test {
+        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
+        target: Option<String>,
+
+        /// Custom path to flake root directory
+        #[arg(long)]
+        flake: Option<PathBuf>,
+
+        /// Filter the fleet to hosts carrying this tag
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
+
+        /// Filter the fleet to hosts with this role (e.g. 'server')
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
+
+        /// Override the SSH user for every targeted host
+        #[arg(long, value_name = "USER")]
+        user: Option<String>,
+
+        /// Override the SSH port for every targeted host
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+
+        /// Override the SSH identity file for every targeted host
+        #[arg(long, value_name = "PATH")]
+        identity_file: Option<PathBuf>,
+
+        /// Maximum hosts processed in-flight at once
+        #[arg(long, value_name = "N")]
+        concurrency: Option<usize>,
+
+        /// Rollout strategy: 'all', 'canary' or 'batch'
+        #[arg(long, value_name = "STRATEGY")]
+        strategy: Option<String>,
+
+        /// Wave size for --strategy batch
+        #[arg(long, value_name = "N")]
+        batch_size: Option<usize>,
+
+        /// Abort the whole run on the first host failure
+        #[arg(long)]
+        fail_fast: bool,
+
+        /// Attempt a rollback before failing a host
+        #[arg(long)]
+        auto_rollback: bool,
+    },
+
+    /// Run `switch-to-configuration boot` on one host or a fleet
+    Boot {
+        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
+        target: Option<String>,
+
+        /// Custom path to flake root directory
+        #[arg(long)]
+        flake: Option<PathBuf>,
+
+        /// Filter the fleet to hosts carrying this tag
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
+
+        /// Filter the fleet to hosts with this role (e.g. 'server')
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
+
+        /// Override the SSH user for every targeted host
+        #[arg(long, value_name = "USER")]
+        user: Option<String>,
+
+        /// Override the SSH port for every targeted host
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+
+        /// Override the SSH identity file for every targeted host
+        #[arg(long, value_name = "PATH")]
+        identity_file: Option<PathBuf>,
+
+        /// Maximum hosts processed in-flight at once
+        #[arg(long, value_name = "N")]
+        concurrency: Option<usize>,
+
+        /// Rollout strategy: 'all', 'canary' or 'batch'
+        #[arg(long, value_name = "STRATEGY")]
+        strategy: Option<String>,
+
+        /// Wave size for --strategy batch
+        #[arg(long, value_name = "N")]
+        batch_size: Option<usize>,
+
+        /// Abort the whole run on the first host failure
+        #[arg(long)]
+        fail_fast: bool,
+
+        /// Attempt a rollback before failing a host
+        #[arg(long)]
+        auto_rollback: bool,
+    },
+
+    /// Build a host or fleet's toplevel closure without transferring it
+    Build {
+        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
+        target: Option<String>,
+
+        /// Custom path to flake root directory
+        #[arg(long)]
+        flake: Option<PathBuf>,
+
+        /// Filter the fleet to hosts carrying this tag
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
+
+        /// Filter the fleet to hosts with this role (e.g. 'server')
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
+
+        /// Symlink the built closure to this path
+        #[arg(long, value_name = "PATH")]
+        out_link: Option<PathBuf>,
+
+        /// Maximum hosts built in-flight at once
+        #[arg(long, value_name = "N")]
+        concurrency: Option<usize>,
     },
 
     /// Run strict repository quality gates (nixfmt + deadnix + statix)
@@ -644,6 +783,157 @@ mod tests {
                 assert_eq!(command, ["uname", "-a"]);
             }
             _ => panic!("expected an ssh command"),
+        }
+    }
+
+    #[test]
+    fn parses_test_target_tag_role_and_all() {
+        let cli = Cli::try_parse_from(vec![
+            "nod", "test", "atlas", "--flake", "/tmp/flake", "--tag", "server",
+            "--role", "desktop", "--all", "--user", "root", "--port", "2222",
+            "--identity-file", "/tmp/key", "--concurrency", "2",
+            "--strategy", "canary", "--batch-size", "3", "--fail-fast",
+            "--auto-rollback",
+        ])
+            .expect("valid test invocation should parse");
+        match cli.command {
+            Commands::Test {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                user,
+                port,
+                identity_file,
+                concurrency,
+                strategy,
+                batch_size,
+                fail_fast,
+                auto_rollback,
+            } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(flake, Some(PathBuf::from("/tmp/flake")));
+                assert_eq!(tag, Some("server".to_string()));
+                assert_eq!(role, Some("desktop".to_string()));
+                assert!(all);
+                assert_eq!(user, Some("root".to_string()));
+                assert_eq!(port, Some(2222));
+                assert_eq!(identity_file, Some(PathBuf::from("/tmp/key")));
+                assert_eq!(concurrency, Some(2));
+                assert_eq!(strategy, Some("canary".to_string()));
+                assert_eq!(batch_size, Some(3));
+                assert!(fail_fast);
+                assert!(auto_rollback);
+            }
+            _ => panic!("expected a test command"),
+        }
+    }
+
+    #[test]
+    fn parses_bare_test_with_defaults() {
+        let cli = Cli::parse_from(vec!["nod", "test"]);
+        match cli.command {
+            Commands::Test {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                user,
+                port,
+                identity_file,
+                concurrency,
+                strategy,
+                batch_size,
+                fail_fast,
+                auto_rollback,
+            } => {
+                assert_eq!(target, None);
+                assert_eq!(flake, None);
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
+                assert!(!all);
+                assert_eq!(user, None);
+                assert_eq!(port, None);
+                assert_eq!(identity_file, None);
+                assert_eq!(concurrency, None);
+                assert_eq!(strategy, None);
+                assert_eq!(batch_size, None);
+                assert!(!fail_fast);
+                assert!(!auto_rollback);
+            }
+            _ => panic!("expected a test command"),
+        }
+    }
+
+    #[test]
+    fn parses_boot_target_tag_role_and_all() {
+        let cli = Cli::try_parse_from(vec![
+            "nod", "boot", "atlas", "--flake", "/tmp/flake", "--tag", "server",
+            "--role", "desktop", "--all",
+        ])
+            .expect("valid boot invocation should parse");
+        match cli.command {
+            Commands::Boot {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                user,
+                port,
+                identity_file,
+                concurrency,
+                strategy,
+                batch_size,
+                fail_fast,
+                auto_rollback,
+            } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(flake, Some(PathBuf::from("/tmp/flake")));
+                assert_eq!(tag, Some("server".to_string()));
+                assert_eq!(role, Some("desktop".to_string()));
+                assert!(all);
+                assert_eq!(user, None);
+                assert_eq!(port, None);
+                assert_eq!(identity_file, None);
+                assert_eq!(concurrency, None);
+                assert_eq!(strategy, None);
+                assert_eq!(batch_size, None);
+                assert!(!fail_fast);
+                assert!(!auto_rollback);
+            }
+            _ => panic!("expected a boot command"),
+        }
+    }
+
+    #[test]
+    fn parses_build_target_out_link_and_concurrency() {
+        let cli = Cli::try_parse_from(vec![
+            "nod", "build", "web-*", "--tag", "prod", "--role", "server", "--all",
+            "--out-link", "/tmp/result", "--concurrency", "2",
+        ])
+            .expect("valid build invocation should parse");
+        match cli.command {
+            Commands::Build {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                out_link,
+                concurrency,
+            } => {
+                assert_eq!(target, Some("web-*".to_string()));
+                assert_eq!(flake, None);
+                assert_eq!(tag, Some("prod".to_string()));
+                assert_eq!(role, Some("server".to_string()));
+                assert!(all);
+                assert_eq!(out_link, Some(PathBuf::from("/tmp/result")));
+                assert_eq!(concurrency, Some(2));
+            }
+            _ => panic!("expected a build command"),
         }
     }
 }

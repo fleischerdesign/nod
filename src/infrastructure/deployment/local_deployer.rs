@@ -52,6 +52,7 @@ impl DeployerPort for LocalDeployer {
         &self,
         host: &HostEntity,
         closure: &Path,
+        action: &str,
         verbose: bool,
     ) -> Result<(), NodError> {
         let start = Instant::now();
@@ -59,7 +60,7 @@ impl DeployerPort for LocalDeployer {
 
         let switch_bin = closure.join("bin/switch-to-configuration");
         let status = Command::new("sudo")
-            .args([switch_bin.to_str().unwrap(), "switch"])
+            .args([switch_bin.to_str().unwrap(), action])
             .status()
             .await;
 

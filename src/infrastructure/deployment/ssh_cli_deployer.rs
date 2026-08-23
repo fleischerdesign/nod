@@ -78,6 +78,7 @@ impl DeployerPort for SshCliDeployer {
         &self,
         host: &HostEntity,
         closure: &Path,
+        action: &str,
         verbose: bool,
     ) -> Result<(), NodError> {
         let profile = SshProfile::for_host(host);
@@ -123,7 +124,7 @@ impl DeployerPort for SshCliDeployer {
         );
 
         let switch_bin = closure.join("bin/switch-to-configuration");
-        let remote_cmd = format!("{} switch", switch_bin.display());
+        let remote_cmd = format!("{} {}", switch_bin.display(), action);
 
         let ssh_target = format!("{}@{}", profile.user(), host.target_host);
         let ssh_status = Command::new("ssh")

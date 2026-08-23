@@ -1,3 +1,5 @@
+pub mod boot;
+pub mod build;
 pub mod check;
 pub mod dashboard;
 pub mod diff;
@@ -8,3 +10,4 @@ pub mod rollback;
 pub mod ssh;
 pub mod status;
 pub mod switch;
+pub mod test;

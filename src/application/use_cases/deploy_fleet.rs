@@ -102,8 +102,8 @@ impl DeployFleetUseCase {
             return Err(NodError::config("--concurrency must be at least 1"));
         }
 
-        if options.action == DeploymentAction::Test {
-            return Ok(self.verify_only(hosts, options).await);
+        if options.action == DeploymentAction::Build {
+            return Ok(self.build_only(hosts, options, flake_path).await);
         }
 
         let plan = self.plan_for(hosts.clone(), options.clone());
@@ -155,12 +155,49 @@ impl DeployFleetUseCase {
         set.join_all().await
     }
 
-    /// `--action test`: verify health without running the switch step.
-    async fn verify_only(&self, hosts: Vec<HostEntity>, _options: DeploymentOptions) -> FleetSummary {
-        let mut outcomes = Vec::<HostOutcome>::with_capacity(hosts.len());
+    /// `--action build`: evaluate and build each host's toplevel closure,
+    /// creating the out-link symlink when requested, and never transferring or
+    /// activating (ADR-006 lifecycle commands). Builds run concurrently under
+    /// the same semaphore budget as activation waves (ADR-005).
+    async fn build_only(
+        &self,
+        hosts: Vec<HostEntity>,
+        options: DeploymentOptions,
+        flake_path: &Path,
+    ) -> FleetSummary {
+        let sem = Arc::new(Semaphore::new(options.concurrency));
+        let mut set = JoinSet::<HostOutcome>::new();
+        let flake = flake_path.display().to_string();
+        let out_link = options.out_link.clone();
+        let verbose = options.verbose;
+        let evaluator = self.ctx.evaluator();
+
         for host in hosts {
-            outcomes.push(HostOutcome::new(host.name, DeploymentState::Prepared));
+            let sem_c = sem.clone();
+            let evaluator_c = evaluator.clone();
+            let flake_c = flake.clone();
+            let out_link_c = out_link.clone();
+            let name_c = host.name.clone();
+            set.spawn(async move {
+                let _permit = sem_c.acquire().await.ok();
+                let built = evaluator_c
+                    .build_toplevel(Path::new(&flake_c), &name_c, verbose)
+                    .await;
+                match built {
+                    Ok(closure) => {
+                        if let Some(link) = out_link_c {
+                            // Best-effort: a symlink failure does not fail
+                            // the build (the closure was already built).
+                            std::os::unix::fs::symlink(&closure, &link).ok();
+                        }
+                        HostOutcome::new(name_c, DeploymentState::Prepared)
+                    }
+                    Err(_) => HostOutcome::new(name_c, DeploymentState::Failed),
+                }
+            });
         }
+
+        let outcomes = set.join_all().await;
         FleetSummary { outcomes, aborted: false }
     }
 
@@ -222,7 +259,10 @@ async fn run_host(
     machine.tick(DeploymentEvent::TransferOk).unwrap();
 
     let deployer = ctx.deployer_for(&host);
-    let activation = deployer.deploy_and_activate(&host, &closure.unwrap(), options.verbose).await;
+    let activation_action = options.action.to_str();
+    let activation = deployer
+        .deploy_and_activate(&host, &closure.unwrap(), &activation_action, options.verbose)
+        .await;
     if activation.is_err() {
         return end_host(&mut machine, DeploymentEvent::SwitchFail, &host, &options, &ctx).await;
     }
@@ -259,4 +299,191 @@ async fn end_host(
     }
     machine.tick(DeploymentEvent::RollbackFail).unwrap();
     HostOutcome::new(host.name.clone(), machine.state())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::ports::deployer::DeployerPort;
+    use crate::domain::ports::evaluator::EvaluatorPort;
+    use async_trait::async_trait;
+    use mockall::mock;
+    use std::path::PathBuf;
+
+    mock! {
+        FakeDeployer {}
+        #[async_trait]
+        impl DeployerPort for FakeDeployer {
+            async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
+            async fn current_closure(&self, host: &HostEntity) -> Result<Option<PathBuf>, NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn rollback(&self, host: &HostEntity) -> Result<(), NodError>;
+        }
+    }
+
+    mock! {
+        FakeEvaluator {}
+        #[async_trait]
+        impl EvaluatorPort for FakeEvaluator {
+            async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
+            async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf, NodError>;
+        }
+    }
+
+    /// Context with the evaluator and both deployer slots bound to mocks.
+    fn ctx_with(
+        eval: MockFakeEvaluator,
+        local: MockFakeDeployer,
+        ssh: MockFakeDeployer,
+    ) -> Arc<AppContext> {
+        Arc::new(AppContext::new(
+            Arc::new(eval),
+            Arc::new(local),
+            Arc::new(ssh),
+        ))
+    }
+
+    fn options_with(action: DeploymentAction) -> DeploymentOptions {
+        let mut options = DeploymentOptions::default_policy();
+        options.action = action;
+        options.concurrency = 1;
+        options.fail_fast = false;
+        options.auto_rollback = false;
+        options
+    }
+
+    #[tokio::test]
+    async fn test_action_runs_switch_to_configuration_test() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-test")));
+
+        let mut local = MockFakeDeployer::new();
+        local
+            .expect_deploy_and_activate()
+            .times(1)
+            .withf(|_, _, action, _| action == "test")
+            .returning(|_, _, _, _| Ok(()));
+
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        let summary = use_case
+            .execute(vec![host], options_with(DeploymentAction::Test), Path::new("/tmp/flake"))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.outcomes.len(), 1);
+        assert_eq!(summary.outcomes[0].state, DeploymentState::Completed);
+        assert!(summary.outcomes[0].ok);
+        assert!(!summary.aborted);
+    }
+
+    #[tokio::test]
+    async fn boot_action_runs_switch_to_configuration_boot() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-boot")));
+
+        let mut local = MockFakeDeployer::new();
+        local
+            .expect_deploy_and_activate()
+            .times(1)
+            .withf(|_, _, action, _| action == "boot")
+            .returning(|_, _, _, _| Ok(()));
+
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        let summary = use_case
+            .execute(vec![host], options_with(DeploymentAction::Boot), Path::new("/tmp/flake"))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.outcomes.len(), 1);
+        assert_eq!(summary.outcomes[0].state, DeploymentState::Completed);
+        assert!(summary.outcomes[0].ok);
+    }
+
+    #[tokio::test]
+    async fn build_action_builds_without_transferring() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-build")));
+
+        // The build action must never reach a deployer (no transfer, no
+        // activation, no rollback).
+        let mut local = MockFakeDeployer::new();
+        local.expect_deploy_and_activate().times(0);
+        local.expect_rollback().times(0);
+
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        let summary = use_case
+            .execute(vec![host], options_with(DeploymentAction::Build), Path::new("/tmp/flake"))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.outcomes.len(), 1);
+        assert_eq!(summary.outcomes[0].state, DeploymentState::Prepared);
+        assert!(summary.outcomes[0].ok);
+    }
+
+    #[tokio::test]
+    async fn build_action_creates_the_out_link_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let closure = dir.path().join("closure");
+        std::fs::write(&closure, b"toplevel").unwrap();
+        let link = dir.path().join("result");
+
+        let mut eval = MockFakeEvaluator::new();
+        let closure_c = closure.clone();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(move |_, _, _| Ok(closure_c.clone()));
+
+        let local = MockFakeDeployer::new();
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let mut options = options_with(DeploymentAction::Build);
+        options.out_link = Some(link.clone());
+
+        let use_case = DeployFleetUseCase::new(ctx);
+        let summary = use_case
+            .execute(vec![host], options, Path::new("/tmp/flake"))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.outcomes.len(), 1);
+        assert!(summary.outcomes[0].ok);
+        assert!(link.exists(), "out-link symlink must be created");
+    }
+
+    #[tokio::test]
+    async fn build_failure_marks_the_host_failed() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _| Err(NodError::build_failure("jello", "eval failed")));
+
+        let local = MockFakeDeployer::new();
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        let summary = use_case
+            .execute(vec![host], options_with(DeploymentAction::Build), Path::new("/tmp/flake"))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.outcomes.len(), 1);
+        assert_eq!(summary.outcomes[0].state, DeploymentState::Failed);
+        assert!(!summary.outcomes[0].ok);
+    }
 }

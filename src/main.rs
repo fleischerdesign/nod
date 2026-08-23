@@ -57,6 +57,100 @@ async fn main() -> Result<()> {
                 &action,
             ).await?;
         }
+        Commands::Test {
+            target,
+            flake,
+            tag,
+            role,
+            all,
+            user,
+            port,
+            identity_file,
+            concurrency,
+            strategy,
+            batch_size,
+            fail_fast,
+            auto_rollback,
+        } => {
+            let overrides = CliOverrides {
+                user,
+                port,
+                identity_file,
+            };
+            nod::commands::test::execute(
+                target.as_deref(),
+                flake.as_deref(),
+                cli.verbose,
+                cli.quiet,
+                overrides,
+                tag.as_deref(),
+                role.as_deref(),
+                all,
+                concurrency,
+                strategy.as_deref(),
+                batch_size,
+                fail_fast,
+                auto_rollback,
+            ).await?;
+        }
+        Commands::Boot {
+            target,
+            flake,
+            tag,
+            role,
+            all,
+            user,
+            port,
+            identity_file,
+            concurrency,
+            strategy,
+            batch_size,
+            fail_fast,
+            auto_rollback,
+        } => {
+            let overrides = CliOverrides {
+                user,
+                port,
+                identity_file,
+            };
+            nod::commands::boot::execute(
+                target.as_deref(),
+                flake.as_deref(),
+                cli.verbose,
+                cli.quiet,
+                overrides,
+                tag.as_deref(),
+                role.as_deref(),
+                all,
+                concurrency,
+                strategy.as_deref(),
+                batch_size,
+                fail_fast,
+                auto_rollback,
+            ).await?;
+        }
+        Commands::Build {
+            target,
+            flake,
+            tag,
+            role,
+            all,
+            out_link,
+            concurrency,
+        } => {
+            nod::commands::build::execute(
+                target.as_deref(),
+                flake.as_deref(),
+                cli.verbose,
+                cli.quiet,
+                CliOverrides::default(),
+                tag.as_deref(),
+                role.as_deref(),
+                all,
+                out_link.as_deref(),
+                concurrency,
+            ).await?;
+        }
         Commands::Check { flake } => {
             nod::commands::check::execute(Path::new(&flake)).await?;
         }
