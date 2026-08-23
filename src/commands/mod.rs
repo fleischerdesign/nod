@@ -1,4 +1,9 @@
 pub mod check;
+pub mod dashboard;
 pub mod diff;
+pub mod drift;
+pub mod history;
+pub mod plan;
+pub mod rollback;
 pub mod status;
 pub mod switch;
