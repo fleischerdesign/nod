@@ -37,15 +37,27 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (effective_target, effective_all) = if !all && target.is_none() && tag.is_none() && role.is_none() {
-        (Some("local"), false)
-    } else {
-        (target, all)
-    };
-    let targets = TargetSelection::select(hosts, effective_target, tag, role, effective_all, &local_hostname);
+    let (effective_target, effective_all) =
+        if !all && target.is_none() && tag.is_none() && role.is_none() {
+            (Some("local"), false)
+        } else {
+            (target, all)
+        };
+    let targets = TargetSelection::select(
+        hosts,
+        effective_target,
+        tag,
+        role,
+        effective_all,
+        &local_hostname,
+    );
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(effective_target.unwrap_or("all"), tag, role));
+        return Err(TargetSelection::unmatched(
+            effective_target.unwrap_or("all"),
+            tag,
+            role,
+        ));
     }
 
     for host in targets {
@@ -60,29 +72,20 @@ pub async fn execute(
                 .cyan()
         );
 
-        let new_closure =
-            evaluator
-                .build_toplevel(flake_path, &host.name, verbose)
-                .await?;
+        let new_closure = evaluator
+            .build_toplevel(flake_path, &host.name, None, verbose)
+            .await?;
 
         if host.is_local {
             let current_closure = Path::new("/run/current-system");
             if current_closure.exists() {
                 println!(
                     "  {}",
-                    format!(
-                        "Comparing /run/current-system vs {}",
-                        new_closure.display()
-                    )
-                    .dimmed()
+                    format!("Comparing /run/current-system vs {}", new_closure.display()).dimmed()
                 );
 
                 let nvd_status = Command::new("nvd")
-                    .args([
-                        "diff",
-                        "/run/current-system",
-                        new_closure.to_str().unwrap(),
-                    ])
+                    .args(["diff", "/run/current-system", new_closure.to_str().unwrap()])
                     .status()
                     .await;
 
@@ -101,10 +104,7 @@ pub async fn execute(
             }
         } else {
             let deployer = ctx.deployer_for(&host);
-            let is_up = deployer
-                .check_reachability(&host)
-                .await
-                .unwrap_or(false);
+            let is_up = deployer.check_reachability(&host).await.unwrap_or(false);
             if is_up {
                 println!(
                     "  {}",

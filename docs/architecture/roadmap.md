@@ -2,7 +2,8 @@
 
 > **Status:** Foundation (target-state) — a forward-looking feature backlog for `nod` v2,
 > tracked against the ADRs under [`../adr`](../adr) and the Gherkin specs under
-> [`../spec`](../spec). Every entry is a *planned* capability, not yet shipped.
+> [`../spec`](../spec). Entries marked **✅ shipped** are implemented; the rest
+> are *planned* capabilities, not yet shipped.
 
 ## Overview & Purpose
 
@@ -70,7 +71,7 @@ Interactive and bulk remote management: an established, deployed fleet.
 | `nod eval <TARGET> <ATTRIBUTE>` | Evaluate an arbitrary NixOS option for the target **without building**: resolve the closure, read the attribute, and print it. Exactly-one target. | P2 | Medium | Medium | App use case over the evaluator; single-terminal invariant. |
 | `nod repl <TARGET>` | Interactive `nix repl` with the **host's configuration preloaded**; reuse the normal selector with the exactly-1 invariant. | P2 | Medium | Medium | App: reuses the ADR-006 single-terminal invariant. |
 | `nod reboot [TARGET/GLOB] [--tag] [--role] [--all] [--wait]` | **Coordinated rolling reboots**: drain, reboot, and (with `--wait`) poll reachability + post-reboot health checks — the ADR-005 rolling rollout shape. | P2 | High | Medium | App: reuses ADR-003 state machine + ADR-005 fleet rollout. |
-| `nod dashboard` | An interactive **Ratatui TUI**: streams the fleet status matrix, generation, and history in a terminal UI | P1 | High | Small | Presentation layer over the existing status + history use cases; no domain change. |
+| `nod dashboard` ✅ shipped | An interactive **Ratatui TUI**: streams the fleet status matrix, generation, and audit history in a terminal UI. | P1 | High | Small | Presentation layer over the existing status + audit use cases; no domain change. |
 
 ## Theme 5 — Secrets & Security
 
@@ -81,7 +82,7 @@ fleet's recipients, and keep an append-only history of deployments and rollbacks
 |---|---|---|---|---|---|
 | `nod secret check [TARGET/GLOB] [--tag] [--role] [--all]` | Pre-flight secret **decryptability** verification: every secret on the target must decrypt with the present/current sops or age key. | P1 | High | Medium | Infra: sops/age store adapter; failures surface as ADR-002 typed errors. |
 | `nod secret rekey [TARGET/GLOB] [--tag] [--role] [--all]` | **Fleet-wide age recipient rotation**: rotate the recipient set and re-encrypt all secrets through the ADR-005 rollout plan. | P2 | High | Medium | Infra: same store adapter; a rolling operation. |
-| `nod audit [TARGET] [--limit N]` | **Append-only** deployment & rollback audit log per host (existing `AuditLogUseCase`); cap the rendered window with `--limit N`. | P2 | Medium | Small | Application use case + history store; rendered in the TUI matrix. |
+| `nod audit [TARGET] [--limit N]` ✅ shipped | **Append-only** deployment & rollback audit log per host (renamed from `nod history`; existing `AuditLogUseCase`); cap the rendered window with `--limit N`. | P2 | Medium | Small | Application use case + audit store; rendered in the TUI matrix. |
 
 ## Theme 6 — Day-0 Provisioning & Scaffolding
 
@@ -98,7 +99,7 @@ Bootstrap a bare machine or scaffold a fresh flake from the repo's own configura
 | Command | Behavior | Priority | Impact | Effort | Architectural fit |
 |---|---|---|---|---|---|
 | `nod cache push [TARGET/GLOB] [--tag] [--role] [--all] [--cache URL]` | Push already-built closures to a **binary cache** (cache.nixos.org or a self-hosted substituter). | P1 | High | Medium | Infra: binary-cache adapter; the build produces closures, this exports them. |
-| `nod build --builder <HOST>` | Through a builder host: the flake's builders or an explicit `--builder <host>` for distributed remote compilation — single-host build, no activation. | P1 | High | Medium | App: builder selection through the build port; fits the ADR-005 one-host-at-a-time shape. |
+| `nod build --builder <HOST>` ✅ shipped | Through a builder host: an explicit `--builder <host>` for distributed remote compilation (flake `config.nod.build.buildHost` as the lower cascade tier) — single-host build, no activation. | P1 | High | Medium | App: builder selection through the build port; fits the ADR-005 one-host-at-a-time shape. |
 
 ## Theme 8 — GitOps & Developer Experience
 
@@ -154,6 +155,7 @@ come next. Then the P1 selector-heavy trio `exec`/`secret check`/`update`, `test
 - Impact/effort is unchanged unless review proves otherwise; a claimed priority is
   not shipped until the above hold.
 
-> **Status:** Foundation — each entry is a planned capability, not yet shipped.
-> Everything above is slated for `nod v2` milestones in the order suggested by the
-> impact-vs-effort matrix; this file is the single tracking document for the roadmap.
+> **Status:** Foundation — entries marked ✅ shipped are shipped; each other
+> entry is a planned capability, not yet shipped. Everything above is slated for
+> `nod v2` milestones in the order suggested by the impact-vs-effort matrix; this
+> file is the single tracking document for the roadmap.

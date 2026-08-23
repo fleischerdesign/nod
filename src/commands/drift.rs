@@ -31,8 +31,14 @@ impl DriftRow {
     fn ok(host: &str, report: &DriftReport) -> Self {
         Self {
             host: host.to_string(),
-            active: report.active_closure.as_ref().map(|p| p.display().to_string()),
-            flake: report.flake_closure.as_ref().map(|p| p.display().to_string()),
+            active: report
+                .active_closure
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            flake: report
+                .flake_closure
+                .as_ref()
+                .map(|p| p.display().to_string()),
             drifted: report.drifted,
             error: None,
         }
@@ -72,15 +78,27 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (effective_target, effective_all) = if !all && target.is_none() && tag.is_none() && role.is_none() {
-        (Some("local"), false)
-    } else {
-        (target, all)
-    };
-    let targets = TargetSelection::select(hosts, effective_target, tag, role, effective_all, &local_hostname);
+    let (effective_target, effective_all) =
+        if !all && target.is_none() && tag.is_none() && role.is_none() {
+            (Some("local"), false)
+        } else {
+            (target, all)
+        };
+    let targets = TargetSelection::select(
+        hosts,
+        effective_target,
+        tag,
+        role,
+        effective_all,
+        &local_hostname,
+    );
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(effective_target.unwrap_or("all"), tag, role));
+        return Err(TargetSelection::unmatched(
+            effective_target.unwrap_or("all"),
+            tag,
+            role,
+        ));
     }
 
     let use_case = DetectDriftUseCase::new(Arc::new(ctx));
@@ -115,12 +133,7 @@ fn render_text(rows: &Vec<DriftRow>) {
     );
     for row in rows {
         if let Some(err) = &row.error {
-            println!(
-                "{:<20} {:<10} {}",
-                row.host,
-                "check-failed".red(),
-                err
-            );
+            println!("{:<20} {:<10} {}", row.host, "check-failed".red(), err);
             continue;
         }
         let flag = if row.drifted {

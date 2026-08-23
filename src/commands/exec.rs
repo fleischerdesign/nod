@@ -81,8 +81,7 @@ pub async fn execute(
     }
 
     let results: Vec<ExecResult> =
-        ExecFleetUseCase::execute(targets, command.to_vec(), concurrency, sudo, fail_fast)
-            .await?;
+        ExecFleetUseCase::execute(targets, command.to_vec(), concurrency, sudo, fail_fast).await?;
 
     if json {
         let rows: Vec<ExecRow> = results.iter().map(ExecRow::from_result).collect();
@@ -148,7 +147,11 @@ fn render_text(results: &Vec<ExecResult>, command: &[String]) {
     let failed = results.len() - succeeded - skipped;
     println!(
         "\n  {}",
-        format!("{} succeeded, {} failed, {} skipped", succeeded, failed, skipped).dimmed()
+        format!(
+            "{} succeeded, {} failed, {} skipped",
+            succeeded, failed, skipped
+        )
+        .dimmed()
     );
 }
 

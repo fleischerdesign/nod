@@ -1,3 +1,3 @@
-//! History adapters: persistent deployment-outcome audit log.
+//! Audit store adapters: persistent deployment-outcome audit log.
 
-pub mod json_history_store;
+pub mod json_audit_store;

@@ -55,7 +55,8 @@ async fn main() -> Result<()> {
                 auto_rollback,
                 on_error.as_deref(),
                 &action,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Test {
             target,
@@ -91,7 +92,8 @@ async fn main() -> Result<()> {
                 batch_size,
                 fail_fast,
                 auto_rollback,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Boot {
             target,
@@ -127,7 +129,8 @@ async fn main() -> Result<()> {
                 batch_size,
                 fail_fast,
                 auto_rollback,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Build {
             target,
@@ -135,6 +138,7 @@ async fn main() -> Result<()> {
             tag,
             role,
             all,
+            builder,
             out_link,
             concurrency,
         } => {
@@ -148,13 +152,21 @@ async fn main() -> Result<()> {
                 role.as_deref(),
                 all,
                 out_link.as_deref(),
+                builder.as_deref(),
                 concurrency,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Check { flake } => {
             nod::commands::check::execute(Path::new(&flake)).await?;
         }
-        Commands::Status { target, flake, tag, role, all } => {
+        Commands::Status {
+            target,
+            flake,
+            tag,
+            role,
+            all,
+        } => {
             nod::commands::status::execute(
                 Path::new(&flake),
                 cli.verbose,
@@ -162,7 +174,8 @@ async fn main() -> Result<()> {
                 role.as_deref(),
                 target.as_deref(),
                 all,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Diff {
             target,
@@ -187,7 +200,8 @@ async fn main() -> Result<()> {
                 tag.as_deref(),
                 role.as_deref(),
                 all,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Plan {
             target,
@@ -212,9 +226,19 @@ async fn main() -> Result<()> {
                 tag.as_deref(),
                 role.as_deref(),
                 all,
-            ).await?;
+            )
+            .await?;
         }
-        Commands::Rollback { target, flake, tag, role, all, user, port, generation: _ } => {
+        Commands::Rollback {
+            target,
+            flake,
+            tag,
+            role,
+            all,
+            user,
+            port,
+            generation: _,
+        } => {
             let overrides = CliOverrides {
                 user,
                 port,
@@ -228,9 +252,16 @@ async fn main() -> Result<()> {
                 tag.as_deref(),
                 role.as_deref(),
                 all,
-            ).await?;
+            )
+            .await?;
         }
-        Commands::Drift { target, tag, role, all, json } => {
+        Commands::Drift {
+            target,
+            tag,
+            role,
+            all,
+            json,
+        } => {
             nod::commands::drift::execute(
                 Path::new("."),
                 cli.verbose,
@@ -239,12 +270,23 @@ async fn main() -> Result<()> {
                 role.as_deref(),
                 all,
                 json,
-            ).await?;
+            )
+            .await?;
         }
-        Commands::History { target, limit, json } => {
-            nod::commands::history::execute(target.as_deref(), limit, json).await?;
+        Commands::Audit {
+            target,
+            limit,
+            json,
+        } => {
+            nod::commands::audit::execute(target.as_deref(), limit, json).await?;
         }
-        Commands::Ssh { target, tag, role, sudo, command } => {
+        Commands::Ssh {
+            target,
+            tag,
+            role,
+            sudo,
+            command,
+        } => {
             let ctx = AppContext::new(
                 Arc::new(NixCliEvaluator::new()),
                 Arc::new(LocalDeployer::new()),
@@ -258,7 +300,8 @@ async fn main() -> Result<()> {
                 role.as_deref(),
                 sudo,
                 &command,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Exec {
             target,
@@ -289,7 +332,8 @@ async fn main() -> Result<()> {
                 fail_fast,
                 json,
                 &command,
-            ).await?;
+            )
+            .await?;
         }
         Commands::Dashboard { flake } => {
             nod::commands::dashboard::execute(Path::new(&flake)).await?;

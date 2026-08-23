@@ -119,9 +119,9 @@ impl ExecFleetUseCase {
             let sem_c = sem.clone();
             let abort_c = abort.clone();
             let command_c = command.clone();
-            set.spawn(async move {
-                run_one(host, command_c, sudo, fail_fast, sem_c, abort_c).await
-            });
+            set.spawn(
+                async move { run_one(host, command_c, sudo, fail_fast, sem_c, abort_c).await },
+            );
         }
 
         Ok(set.join_all().await)
@@ -229,7 +229,12 @@ fn build_ssh_args(
 /// Runs the local invocation: `sh -c <command>` (with `sudo` inside the
 /// shell line when requested), keeping the program/args split for the
 /// process spawn.
-async fn run_local(host: &HostEntity, command: &[String], sudo: bool, start: Instant) -> ExecResult {
+async fn run_local(
+    host: &HostEntity,
+    command: &[String],
+    sudo: bool,
+    start: Instant,
+) -> ExecResult {
     let exec = build_local_args(command, sudo);
     let program = exec[0].clone();
     let mut args = Vec::<String>::new();
@@ -244,7 +249,12 @@ async fn run_local(host: &HostEntity, command: &[String], sudo: bool, start: Ins
 /// Spawns `program` with `args`, capturing stdout/stderr and the numeric
 /// exit status into an [`ExecResult`]. A spawn failure surfaces as a
 /// per-host failure with a launch message (`docs/spec/exec-command.spec.md`).
-async fn run_process(host: &HostEntity, program: &str, args: &[String], start: Instant) -> ExecResult {
+async fn run_process(
+    host: &HostEntity,
+    program: &str,
+    args: &[String],
+    start: Instant,
+) -> ExecResult {
     let mut process = Command::new(program);
     process.args(args);
     let output = process.output().await;
@@ -319,14 +329,24 @@ mod tests {
     #[test]
     fn build_ssh_args_defaults_to_user_host() {
         let profile = SshProfile::for_host(&host("atlas", false));
-        let args = build_ssh_args(&profile, "atlas", false, &["uname".to_string(), "-a".to_string()]);
+        let args = build_ssh_args(
+            &profile,
+            "atlas",
+            false,
+            &["uname".to_string(), "-a".to_string()],
+        );
         assert_eq!(args, ["root@atlas", "uname", "-a"]);
     }
 
     #[test]
     fn build_ssh_args_prepends_sudo_before_the_command() {
         let profile = SshProfile::for_host(&host("atlas", false));
-        let args = build_ssh_args(&profile, "atlas", true, &["apt-get".to_string(), "update".to_string()]);
+        let args = build_ssh_args(
+            &profile,
+            "atlas",
+            true,
+            &["apt-get".to_string(), "update".to_string()],
+        );
         assert_eq!(args, ["root@atlas", "sudo", "apt-get", "update"]);
     }
 
@@ -335,7 +355,10 @@ mod tests {
         let mut profile = SshProfile::for_host(&host("atlas", false));
         profile = profile.with_port(2200).with_proxy_jump("bastion");
         let args = build_ssh_args(&profile, "atlas", false, &["uptime".to_string()]);
-        assert_eq!(args, ["-p", "2200", "-J", "bastion", "root@atlas", "uptime"]);
+        assert_eq!(
+            args,
+            ["-p", "2200", "-J", "bastion", "root@atlas", "uptime"]
+        );
     }
 
     #[tokio::test]
@@ -377,29 +400,17 @@ mod tests {
 
     #[tokio::test]
     async fn empty_fleet_is_a_config_error() {
-        let err = ExecFleetUseCase::execute(
-            vec![],
-            vec!["true".to_string()],
-            4,
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let err = ExecFleetUseCase::execute(vec![], vec!["true".to_string()], 4, false, false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
     }
 
     #[tokio::test]
     async fn empty_command_is_a_config_error() {
-        let err = ExecFleetUseCase::execute(
-            vec![host("jello", true)],
-            vec![],
-            4,
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let err = ExecFleetUseCase::execute(vec![host("jello", true)], vec![], 4, false, false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
     }
 
@@ -439,7 +450,11 @@ mod tests {
         // 6 x 200ms with 2 workers runs in ~3 waves (~600ms total); a serial
         // run would take ~1200ms. The 1s bar proves the semaphore bounded
         // in-flight hosts well below serial.
-        assert!(elapsed < 1000, "expected bounded concurrency, took {}ms", elapsed);
+        assert!(
+            elapsed < 1000,
+            "expected bounded concurrency, took {}ms",
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -464,7 +479,11 @@ mod tests {
         assert!(!results[0].success);
         assert_eq!(results[0].exit_code, 2);
         for skipped in &results[1..] {
-            assert!(skipped.is_skipped(), "{} should have been skipped", skipped.host_name);
+            assert!(
+                skipped.is_skipped(),
+                "{} should have been skipped",
+                skipped.host_name
+            );
             assert_eq!(skipped.exit_code, EXEC_SKIPPED_EXIT_CODE);
         }
     }
@@ -485,7 +504,11 @@ mod tests {
         assert_eq!(results.len(), 3);
         for result in &results {
             // Every host ran the failing command; none was skipped.
-            assert!(!result.is_skipped(), "{} must not be skipped", result.host_name);
+            assert!(
+                !result.is_skipped(),
+                "{} must not be skipped",
+                result.host_name
+            );
             assert_eq!(result.exit_code, 1);
             assert!(!result.success);
         }

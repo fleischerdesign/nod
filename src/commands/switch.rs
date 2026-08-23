@@ -57,7 +57,9 @@ pub async fn execute(
 
     let parsed_strategy = RolloutStrategy::parse(strategy);
     if parsed_strategy.is_none() {
-        return Err(NodError::config(format!("unknown rollout strategy '{strategy}'")));
+        return Err(NodError::config(format!(
+            "unknown rollout strategy '{strategy}'"
+        )));
     }
 
     let options = DeploymentOptions {
@@ -70,21 +72,34 @@ pub async fn execute(
         action: DeploymentAction::parse(action).unwrap_or(DeploymentAction::Switch),
         verbose,
         out_link: None,
+        builder: None,
     };
 
     let hosts = evaluator.discover_hosts(flake_path, verbose).await?;
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (effective_target, effective_all) = if !all && target.is_none() && tag.is_none() && role.is_none() {
-        (Some("local"), false)
-    } else {
-        (target, all)
-    };
-    let targets = TargetSelection::select(hosts, effective_target, tag, role, effective_all, &local_hostname);
+    let (effective_target, effective_all) =
+        if !all && target.is_none() && tag.is_none() && role.is_none() {
+            (Some("local"), false)
+        } else {
+            (target, all)
+        };
+    let targets = TargetSelection::select(
+        hosts,
+        effective_target,
+        tag,
+        role,
+        effective_all,
+        &local_hostname,
+    );
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(effective_target.unwrap_or("all"), tag, role));
+        return Err(TargetSelection::unmatched(
+            effective_target.unwrap_or("all"),
+            tag,
+            role,
+        ));
     }
 
     // Materialize merged TOML/CLI user+port onto each staged host (ADR-004).
@@ -118,7 +133,10 @@ fn render_summary(summary: &FleetSummary, _verbose: bool) {
         "\n  {}",
         format!(
             "{} succeeded, {} rolled back, {} failed (aborted: {})",
-            summary.succeeded(), summary.rolled_back(), summary.failed(), summary.aborted
+            summary.succeeded(),
+            summary.rolled_back(),
+            summary.failed(),
+            summary.aborted
         )
         .dimmed()
     );

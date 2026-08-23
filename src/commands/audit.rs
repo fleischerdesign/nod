@@ -1,5 +1,5 @@
-//! `nod history` command: read the recorded deployment audit trail (ADR-003
-//! observability). Backed by `AuditLogUseCase` over `HistoryStorePort`.
+//! `nod audit` command: read the recorded deployment audit trail (ADR-003
+//! observability). Backed by `AuditLogUseCase` over `AuditStorePort`.
 
 use colored::Colorize;
 use std::sync::Arc;
@@ -10,15 +10,19 @@ use crate::domain::errors::NodError;
 use crate::infrastructure::deployment::local_deployer::LocalDeployer;
 use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
 use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
-use crate::infrastructure::storage::json_history_store::JsonHistoryStore;
+use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 
-pub async fn execute(target: Option<&str>, limit: Option<usize>, json: bool) -> Result<(), NodError> {
+pub async fn execute(
+    target: Option<&str>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<(), NodError> {
     let ctx = AppContext::new(
         Arc::new(NixCliEvaluator::new()),
         Arc::new(LocalDeployer::new()),
         Arc::new(SshCliDeployer::new()),
     )
-    .with_history_store(Arc::new(JsonHistoryStore::new()));
+    .with_audit_store(Arc::new(JsonAuditStore::new()));
 
     let use_case = AuditLogUseCase::new(Arc::new(ctx));
     let entries = use_case.execute(target, limit).await?;
@@ -46,7 +50,10 @@ pub async fn execute(target: Option<&str>, limit: Option<usize>, json: bool) -> 
         } else {
             outcome.yellow()
         };
-        println!("{:<20} {:<14} {}", entry.host_name, colored, entry.recorded_at);
+        println!(
+            "{:<20} {:<14} {}",
+            entry.host_name, colored, entry.recorded_at
+        );
     }
 
     Ok(())

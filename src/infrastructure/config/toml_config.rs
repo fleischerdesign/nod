@@ -15,16 +15,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::domain::config::{
-    BuildConfig,
-    CliOverrides,
-    CustomProbeConfig,
-    FleetDefaults,
-    HealthCheckConfig,
-    HostOverrides,
-    HooksConfig,
-    HttpProbeConfig,
-    RolloutConfig,
-    SystemdHealthConfig,
+    BuildConfig, CliOverrides, CustomProbeConfig, FleetDefaults, HealthCheckConfig, HooksConfig,
+    HostOverrides, HttpProbeConfig, RolloutConfig, SystemdHealthConfig,
 };
 use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, SshProfile};
@@ -239,10 +231,7 @@ impl TomlConfigStore {
             Some(path) => Self::parse(&path)?,
             None => TomlConfig::default(),
         };
-        Ok(Self {
-            cli,
-            toml,
-        })
+        Ok(Self { cli, toml })
     }
 
     /// Finds the nearest config file at or above `start`.
@@ -262,8 +251,9 @@ impl TomlConfigStore {
 
     /// Parses the config file, surfacing malformed TOML as `NodError::config`.
     fn parse(path: &Path) -> Result<TomlConfig, NodError> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| NodError::config_parse(format!("cannot read {}: {}", path.display(), e)))?;
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            NodError::config_parse(format!("cannot read {}: {}", path.display(), e))
+        })?;
         toml::from_str::<TomlConfig>(&raw)
             .map_err(|e| NodError::config_parse(format!("invalid {}: {}", path.display(), e)))
     }
@@ -352,32 +342,26 @@ fn to_health_config(h: &TomlHealth) -> HealthCheckConfig {
         },
         None => SystemdHealthConfig::default(),
     };
-    let http_probes = h
-        .http_probes
-        .as_ref()
-        .map(|probes| {
-            probes
-                .iter()
-                .map(|p| HttpProbeConfig {
-                    url: p.url.clone(),
-                    expected_status: p.expected_status,
-                    timeout_secs: p.timeout_secs,
-                })
-                .collect()
-        });
-    let custom_probes = h
-        .custom_probes
-        .as_ref()
-        .map(|probes| {
-            probes
-                .iter()
-                .map(|p| CustomProbeConfig {
-                    name: p.name.clone(),
-                    command: p.command.clone(),
-                    timeout_secs: p.timeout_secs,
-                })
-                .collect()
-        });
+    let http_probes = h.http_probes.as_ref().map(|probes| {
+        probes
+            .iter()
+            .map(|p| HttpProbeConfig {
+                url: p.url.clone(),
+                expected_status: p.expected_status,
+                timeout_secs: p.timeout_secs,
+            })
+            .collect()
+    });
+    let custom_probes = h.custom_probes.as_ref().map(|probes| {
+        probes
+            .iter()
+            .map(|p| CustomProbeConfig {
+                name: p.name.clone(),
+                command: p.command.clone(),
+                timeout_secs: p.timeout_secs,
+            })
+            .collect()
+    });
     HealthCheckConfig {
         enable: h.enable,
         timeout_secs: h.timeout_secs,
@@ -448,7 +432,9 @@ impl ConfigStorePort for TomlConfigStore {
             tags: host.and_then(|h| h.tags.clone()),
             build: host.and_then(|h| h.build.as_ref()).map(to_build_config),
             rollout: host.and_then(|h| h.rollout.as_ref()).map(to_rollout_config),
-            health_checks: host.and_then(|h| h.health_checks.as_ref()).map(to_health_config),
+            health_checks: host
+                .and_then(|h| h.health_checks.as_ref())
+                .map(to_health_config),
             hooks: host.and_then(|h| h.hooks.as_ref()).map(to_hooks_config),
         })
     }
@@ -528,7 +514,10 @@ mod tests {
     async fn fleet_section_overrides_defaults() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        write_toml(root, "[defaults]\nuser = \"deploy\"\n[fleet]\nuser = \"fleet\"\n");
+        write_toml(
+            root,
+            "[defaults]\nuser = \"deploy\"\n[fleet]\nuser = \"fleet\"\n",
+        );
         let s = store(root, CliOverrides::default());
         let profile = s.resolve(&host("atlas")).await.unwrap();
         assert_eq!(profile.user(), "fleet");
@@ -558,7 +547,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         write_toml(root, "[hosts.atlas]\nuser = \"toml\"\n");
-        let cli = CliOverrides { user: Some("cli-user".to_string()), port: None, identity_file: None };
+        let cli = CliOverrides {
+            user: Some("cli-user".to_string()),
+            port: None,
+            identity_file: None,
+        };
         let s = store(root, cli);
         let profile = s.resolve(&host("atlas")).await.unwrap();
         assert_eq!(profile.user(), "cli-user");
@@ -569,7 +562,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         write_toml(root, "[hosts.atlas]\nport = 2222\n");
-        let cli = CliOverrides { user: None, port: Some(2200), identity_file: None };
+        let cli = CliOverrides {
+            user: None,
+            port: Some(2200),
+            identity_file: None,
+        };
         let s = store(root, cli);
         let profile = s.resolve(&host("atlas")).await.unwrap();
         assert_eq!(profile.user(), "root");
@@ -587,13 +584,19 @@ mod tests {
         let s = store(root, CliOverrides::default());
 
         let atlas = s.resolve(&host("atlas")).await.unwrap();
-        assert_eq!(atlas.identity_file(), Some(PathBuf::from("/var/lib/nod/id")).as_ref());
+        assert_eq!(
+            atlas.identity_file(),
+            Some(PathBuf::from("/var/lib/nod/id")).as_ref()
+        );
         assert_eq!(atlas.proxy_jump(), Some("bastion.example.org"));
         assert!(atlas.sudo());
 
         // A host without its own section inherits the fleet identity file.
         let orbit = s.resolve(&host("orbit")).await.unwrap();
-        assert_eq!(orbit.identity_file(), Some(PathBuf::from("/var/lib/nod/id")).as_ref());
+        assert_eq!(
+            orbit.identity_file(),
+            Some(PathBuf::from("/var/lib/nod/id")).as_ref()
+        );
     }
 
     #[tokio::test]
@@ -608,7 +611,10 @@ mod tests {
         let overrides = s.host_overrides("atlas").await.unwrap();
         assert_eq!(overrides.user, Some("philipp".to_string()));
         assert_eq!(overrides.role, Some("server".to_string()));
-        assert_eq!(overrides.tags, Some(vec!["prod".to_string(), "web".to_string()]));
+        assert_eq!(
+            overrides.tags,
+            Some(vec!["prod".to_string(), "web".to_string()])
+        );
     }
 
     #[tokio::test]
@@ -616,7 +622,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         write_toml(root, "[fleet]\nuser = \"fleet\"\nport = 2222\n");
-        let cli = CliOverrides { user: Some("cli".to_string()), port: Some(99), identity_file: None };
+        let cli = CliOverrides {
+            user: Some("cli".to_string()),
+            port: Some(99),
+            identity_file: None,
+        };
         let s = store(root, cli);
         let defaults = s.fleet_defaults().await.unwrap();
         assert_eq!(defaults.user, Some("fleet".to_string()));
@@ -641,7 +651,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         write_toml(root, "this is not = [valid toml");
-        let err = TomlConfigStore::new(root, CliOverrides::default()).err().unwrap();
+        let err = TomlConfigStore::new(root, CliOverrides::default())
+            .err()
+            .unwrap();
         assert!(matches!(err, NodError::Config { .. }));
     }
 

@@ -19,7 +19,7 @@ pub fn draw(f: &mut Frame, app: &DashboardApp, online: &[bool]) {
         Constraint::Min(3),
         Constraint::Length(1),
     ])
-        .split(f.size());
+    .split(f.size());
 
     draw_header(f, areas[0], app, online);
     draw_body(f, areas[1], app, online);
@@ -38,14 +38,22 @@ fn draw_header(f: &mut Frame, area: Rect, app: &DashboardApp, online: &[bool]) {
         ),
         Span::styled(
             " Nix Orchestration & Deployment Dashboard ",
-            Style::new().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" {} hosts ", app.hosts.len()),
             Style::new().fg(Color::Gray),
         ),
-        Span::styled(format!(" online {} ", online_n), Style::new().fg(Color::Green)),
-        Span::styled(format!(" offline {} ", offline_n), Style::new().fg(Color::Red)),
+        Span::styled(
+            format!(" online {} ", online_n),
+            Style::new().fg(Color::Green),
+        ),
+        Span::styled(
+            format!(" offline {} ", offline_n),
+            Style::new().fg(Color::Red),
+        ),
     ]);
 
     let paragraph = Paragraph::new(line)
@@ -79,15 +87,17 @@ fn render_matrix(f: &mut Frame, area: Rect, app: &DashboardApp, online: &[bool])
         Cell::new("Reachability"),
         Cell::new("Active Closure"),
     ])
-        .style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Black))
-        .height(1);
+    .style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Black))
+    .height(1);
 
     let mut rows = Vec::new();
     for i in 0..app.hosts.len() {
         let host = &app.hosts[i];
         let highlighted = i == app.selected_index;
         let row_style = if highlighted {
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::REVERSED)
+            Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED)
         } else {
             Style::new().fg(Color::Gray)
         };
@@ -102,26 +112,29 @@ fn render_matrix(f: &mut Frame, area: Rect, app: &DashboardApp, online: &[bool])
                 Cell::new(status),
                 Cell::new(closure_text(host)),
             ])
-                .style(row_style)
-                .height(1),
+            .style(row_style)
+            .height(1),
         );
     }
 
-    let table = Table::new(rows, [
-        Constraint::Length(16),
-        Constraint::Length(10),
-        Constraint::Min(18),
-        Constraint::Min(10),
-        Constraint::Length(12),
-        Constraint::Min(14),
-    ])
-        .header(header)
-        .column_spacing(1)
-        .block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .title(" Host Matrix "),
-        );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(16),
+            Constraint::Length(10),
+            Constraint::Min(18),
+            Constraint::Min(10),
+            Constraint::Length(12),
+            Constraint::Min(14),
+        ],
+    )
+    .header(header)
+    .column_spacing(1)
+    .block(
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(" Host Matrix "),
+    );
 
     f.render_widget(table, area);
 }
@@ -188,13 +201,11 @@ fn render_logs(f: &mut Frame, area: Rect, app: &DashboardApp) {
 
 /// Keybinding help along the bottom edge.
 fn draw_footer(f: &mut Frame, area: Rect) {
-    let paragraph = Paragraph::new(
-        Line::from(
-            "[q] Quit | [j/k] Navigate | [s] Switch | [d] Diff | [r] Rollback | [Tab] Switch Pane",
-        ),
-    )
-        .style(Style::new().fg(Color::DarkGray))
-        .centered();
+    let paragraph = Paragraph::new(Line::from(
+        "[q] Quit | [j/k] Navigate | [s] Switch | [d] Diff | [r] Rollback | [Tab] Switch Pane",
+    ))
+    .style(Style::new().fg(Color::DarkGray))
+    .centered();
 
     f.render_widget(paragraph, area);
 }
@@ -245,10 +256,10 @@ fn count_online(online: &[bool]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::draw;
     use crate::domain::host::{HostEntity, HostRole};
     use crate::ui::app::{DashboardApp, DashboardKey};
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
-    use super::draw;
 
     fn fleet() -> Vec<HostEntity> {
         let mut jello = HostEntity::new("jello", "jello-machine", true);

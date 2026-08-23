@@ -45,7 +45,9 @@ impl DetectDriftUseCase {
         verbose: bool,
     ) -> Result<DriftReport, NodError> {
         let evaluator = self.ctx.evaluator();
-        let flake_closure = evaluator.build_toplevel(flake_path, &host.name, verbose).await?;
+        let flake_closure = evaluator
+            .build_toplevel(flake_path, &host.name, None, verbose)
+            .await?;
 
         let deployer = self.ctx.deployer_for(host);
         let active_closure = deployer.current_closure(host).await?;
@@ -66,6 +68,7 @@ impl DetectDriftUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::host::BuilderHost;
     use crate::domain::ports::deployer::DeployerPort;
     use crate::domain::ports::evaluator::EvaluatorPort;
     use async_trait::async_trait;
@@ -87,7 +90,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -109,7 +112,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -121,10 +124,19 @@ mod tests {
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DetectDriftUseCase::new(ctx);
 
-        let report = use_case.execute(&host, Path::new("/tmp/flake"), false).await.unwrap();
+        let report = use_case
+            .execute(&host, Path::new("/tmp/flake"), false)
+            .await
+            .unwrap();
         assert!(report.drifted);
-        assert_eq!(report.active_closure, Some(PathBuf::from("/nix/store/bbb-live")));
-        assert_eq!(report.flake_closure, Some(PathBuf::from("/nix/store/aaa-flake")));
+        assert_eq!(
+            report.active_closure,
+            Some(PathBuf::from("/nix/store/bbb-live"))
+        );
+        assert_eq!(
+            report.flake_closure,
+            Some(PathBuf::from("/nix/store/aaa-flake"))
+        );
     }
 
     #[tokio::test]
@@ -132,7 +144,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -144,7 +156,10 @@ mod tests {
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DetectDriftUseCase::new(ctx);
 
-        let report = use_case.execute(&host, Path::new("/tmp/flake"), false).await.unwrap();
+        let report = use_case
+            .execute(&host, Path::new("/tmp/flake"), false)
+            .await
+            .unwrap();
         assert!(!report.drifted);
     }
 
@@ -153,16 +168,22 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
-        local.expect_current_closure().times(1).returning(|_| Ok(None));
+        local
+            .expect_current_closure()
+            .times(1)
+            .returning(|_| Ok(None));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DetectDriftUseCase::new(ctx);
 
-        let report = use_case.execute(&host, Path::new("/tmp/flake"), false).await.unwrap();
+        let report = use_case
+            .execute(&host, Path::new("/tmp/flake"), false)
+            .await
+            .unwrap();
         assert!(report.drifted);
         assert_eq!(report.active_closure, None);
     }
@@ -172,7 +193,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut ssh = MockFakeDeployer::new();
         ssh.expect_current_closure()
@@ -183,7 +204,10 @@ mod tests {
         let host = HostEntity::new("atlas", "10.0.0.8", false);
         let use_case = DetectDriftUseCase::new(ctx);
 
-        let report = use_case.execute(&host, Path::new("/tmp/flake"), false).await.unwrap();
+        let report = use_case
+            .execute(&host, Path::new("/tmp/flake"), false)
+            .await
+            .unwrap();
         assert!(report.drifted);
     }
 
@@ -192,7 +216,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -204,7 +228,11 @@ mod tests {
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DetectDriftUseCase::new(ctx);
 
-        let err = use_case.execute(&host, Path::new("/tmp/flake"), false).await.err().unwrap();
+        let err = use_case
+            .execute(&host, Path::new("/tmp/flake"), false)
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(err, NodError::Deployment { .. }));
     }
 }

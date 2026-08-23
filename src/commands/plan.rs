@@ -41,15 +41,27 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (effective_target, effective_all) = if !all && target.is_none() && tag.is_none() && role.is_none() {
-        (Some("local"), false)
-    } else {
-        (target, all)
-    };
-    let targets = TargetSelection::select(hosts, effective_target, tag, role, effective_all, &local_hostname);
+    let (effective_target, effective_all) =
+        if !all && target.is_none() && tag.is_none() && role.is_none() {
+            (Some("local"), false)
+        } else {
+            (target, all)
+        };
+    let targets = TargetSelection::select(
+        hosts,
+        effective_target,
+        tag,
+        role,
+        effective_all,
+        &local_hostname,
+    );
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(effective_target.unwrap_or("all"), tag, role));
+        return Err(TargetSelection::unmatched(
+            effective_target.unwrap_or("all"),
+            tag,
+            role,
+        ));
     }
 
     let mut staged = Vec::<HostEntity>::with_capacity(targets.len());
@@ -67,6 +79,7 @@ pub async fn execute(
         action: DeploymentAction::Switch,
         verbose,
         out_link: None,
+        builder: None,
     };
 
     let use_case = GeneratePlanUseCase::new(Arc::new(ctx));

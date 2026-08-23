@@ -94,10 +94,14 @@ async fn run_process(program: &str, args: &[String]) -> Result<(), NodError> {
     process.args(args);
     let status = process.status().await;
     if status.is_err() {
-        return Err(NodError::deployment(format!("failed to launch `{program}`")));
+        return Err(NodError::deployment(format!(
+            "failed to launch `{program}`"
+        )));
     }
     if !status.unwrap().success() {
-        return Err(NodError::deployment(format!("`{program}` reported failure")));
+        return Err(NodError::deployment(format!(
+            "`{program}` reported failure"
+        )));
     }
     Ok(())
 }
@@ -190,7 +194,15 @@ mod tests {
         let args = build_ssh_args(&profile, "atlas", false, &[]);
         assert_eq!(
             args,
-            ["-p", "2200", "-i", "/tmp/id_rsa", "-J", "bastion", "philipp@atlas"]
+            [
+                "-p",
+                "2200",
+                "-i",
+                "/tmp/id_rsa",
+                "-J",
+                "bastion",
+                "philipp@atlas"
+            ]
         );
     }
 
@@ -211,14 +223,24 @@ mod tests {
     #[test]
     fn sudo_with_trailing_command_prepends_sudo() {
         let profile = SshProfile::for_host(&HostEntity::new("atlas", "atlas", false));
-        let args = build_ssh_args(&profile, "atlas", true, &["apt-get".to_string(), "update".to_string()]);
+        let args = build_ssh_args(
+            &profile,
+            "atlas",
+            true,
+            &["apt-get".to_string(), "update".to_string()],
+        );
         assert_eq!(args, ["root@atlas", "sudo", "apt-get", "update"]);
     }
 
     #[test]
     fn remote_command_is_append_without_sudo() {
         let profile = SshProfile::for_host(&HostEntity::new("atlas", "atlas", false));
-        let args = build_ssh_args(&profile, "atlas", false, &["uname".to_string(), "-a".to_string()]);
+        let args = build_ssh_args(
+            &profile,
+            "atlas",
+            false,
+            &["uname".to_string(), "-a".to_string()],
+        );
         assert_eq!(args, ["root@atlas", "uname", "-a"]);
     }
 }

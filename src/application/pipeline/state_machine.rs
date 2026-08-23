@@ -93,7 +93,9 @@ pub struct DeploymentStateMachine {
 impl DeploymentStateMachine {
     /// Builds a machine rooted in `Prepared`.
     pub fn prepared() -> Self {
-        Self { state: DeploymentState::Prepared }
+        Self {
+            state: DeploymentState::Prepared,
+        }
     }
 
     /// The current state.
@@ -132,7 +134,10 @@ impl DeploymentStateMachine {
 
     /// Pure transition table: `Some(next)` when `state + event` is legal.
     fn is_not_terminal(state: &DeploymentState) -> bool {
-        !matches!(state, DeploymentState::Completed | DeploymentState::RolledBack | DeploymentState::Failed)
+        !matches!(
+            state,
+            DeploymentState::Completed | DeploymentState::RolledBack | DeploymentState::Failed
+        )
     }
 
     fn target_of(state: DeploymentState, event: DeploymentEvent) -> Option<DeploymentState> {
@@ -239,7 +244,10 @@ impl DeploymentState {
 mod tests {
     use super::*;
 
-    fn assert_state(machine: &mut DeploymentStateMachine, event: DeploymentEvent) -> DeploymentState {
+    fn assert_state(
+        machine: &mut DeploymentStateMachine,
+        event: DeploymentEvent,
+    ) -> DeploymentState {
         machine.tick(event).unwrap()
     }
 
@@ -248,8 +256,14 @@ mod tests {
         let mut machine = DeploymentStateMachine::prepared();
         assert_eq!(machine.state(), DeploymentState::Prepared);
 
-        assert_eq!(assert_state(&mut machine, DeploymentEvent::Begin), DeploymentState::Evaluating);
-        assert_eq!(assert_state(&mut machine, DeploymentEvent::EvalOk), DeploymentState::Building);
+        assert_eq!(
+            assert_state(&mut machine, DeploymentEvent::Begin),
+            DeploymentState::Evaluating
+        );
+        assert_eq!(
+            assert_state(&mut machine, DeploymentEvent::EvalOk),
+            DeploymentState::Building
+        );
         assert_eq!(
             assert_state(&mut machine, DeploymentEvent::BuildOk),
             DeploymentState::Transferring

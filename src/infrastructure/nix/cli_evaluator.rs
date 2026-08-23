@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 use crate::domain::config::NodConfig;
 use crate::domain::errors::NodError;
-use crate::domain::host::{HostEntity, HostRole};
+use crate::domain::host::{BuilderHost, HostEntity, HostRole};
 use crate::domain::ports::evaluator::EvaluatorPort;
 use serde::Deserialize;
 
@@ -163,10 +163,11 @@ impl EvaluatorPort for NixCliEvaluator {
         Ok(hosts)
     }
 
-    async fn build_toplevel(
+    async fn build_toplevel<'a>(
         &self,
         flake_path: &Path,
         host_name: &str,
+        builder: Option<&'a BuilderHost>,
         verbose: bool,
     ) -> Result<PathBuf, NodError> {
         let pb = Self::create_braille_spinner(&format!("Building closure for {}...", host_name));
@@ -179,15 +180,28 @@ impl EvaluatorPort for NixCliEvaluator {
 
         let start = Instant::now();
 
-        let output = Command::new("nix")
-            .args(["build", "--json", &flake_attr, "--no-link"])
-            .output()
-            .await;
+        // Remote build: compile the closure on the selected builder host over
+        // the Nix `--builders` SSH transport (`ssh://<user>@<host>[:<port>]`).
+        // A plain local build keeps the SSH-specific flags out of the vector.
+        let mut args = Vec::<String>::new();
+        args.push("build".to_string());
+        args.push("--json".to_string());
+        args.push(flake_attr.clone());
+        if let Some(b) = builder {
+            args.push("--builders".to_string());
+            args.push(build_builder_uri(b));
+        }
+        args.push("--no-link".to_string());
+
+        let output = Command::new("nix").args(&args).output().await;
 
         pb.finish_and_clear();
 
         if output.is_err() {
-            return Err(NodError::build_failure(host_name, "failed to launch `nix build`"));
+            return Err(NodError::build_failure(
+                host_name,
+                "failed to launch `nix build`",
+            ));
         }
         let output = output.unwrap();
 
@@ -209,12 +223,7 @@ impl EvaluatorPort for NixCliEvaluator {
         if verbose {
             println!(
                 "  {}",
-                format!(
-                    "Build completed in {:?} -> {}",
-                    start.elapsed(),
-                    out_path
-                )
-                .dimmed()
+                format!("Build completed in {:?} -> {}", start.elapsed(), out_path).dimmed()
             );
         }
 
@@ -222,9 +231,22 @@ impl EvaluatorPort for NixCliEvaluator {
     }
 }
 
+/// Builds the Nix `--builders` SSH transport URI for a builder host
+/// (`ssh://<user>@<target_host>`, appending `:<port>` when not 22).
+fn build_builder_uri(b: &BuilderHost) -> String {
+    let port = b.profile.port();
+    let authority = if port == 22 {
+        format!("{}@{}", b.profile.user(), b.target_host)
+    } else {
+        format!("{}@{}:{}", b.profile.user(), b.target_host, port)
+    };
+    format!("ssh://{}", authority)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::host::SshProfile;
 
     #[test]
     fn unit_struct_is_constructible_and_send_sync() {
@@ -254,5 +276,53 @@ mod tests {
         assert!(meta.tags.is_empty());
         assert!(meta.user.is_none());
         assert!(meta.port.is_none());
+    }
+
+    #[test]
+    fn builder_uri_defaults_to_root_user_and_no_port() {
+        let host = HostEntity::new("atlas", "10.0.0.8", false);
+        let builder = BuilderHost {
+            target_host: host.target_host.clone(),
+            profile: SshProfile::for_host(&host),
+        };
+        assert_eq!(build_builder_uri(&builder), "ssh://root@10.0.0.8");
+    }
+
+    #[test]
+    fn builder_uri_appends_port_when_custom() {
+        let builder = BuilderHost {
+            target_host: "buildy".to_string(),
+            profile: SshProfile::new("root", 2222),
+        };
+        assert_eq!(build_builder_uri(&builder), "ssh://root@buildy:2222");
+    }
+
+    #[test]
+    fn builder_uri_custom_user_without_port() {
+        let builder = BuilderHost {
+            target_host: "atlas".to_string(),
+            profile: SshProfile::new("deploy", 22),
+        };
+        assert_eq!(build_builder_uri(&builder), "ssh://deploy@atlas");
+    }
+
+    #[test]
+    fn builder_uri_custom_user_and_port_combined() {
+        let builder = BuilderHost {
+            target_host: "buildy".to_string(),
+            profile: SshProfile::new("deploy", 2200),
+        };
+        assert_eq!(build_builder_uri(&builder), "ssh://deploy@buildy:2200");
+    }
+
+    #[test]
+    fn builder_uri_identity_uses_default_ssh_scheme() {
+        // The identity-to-local path leaves the builder unset (flag-only
+        // handling in the command); the URI form itself always carries a host.
+        let builder = BuilderHost {
+            target_host: "jello".to_string(),
+            profile: SshProfile::for_host(&HostEntity::new("jello", "jello-machine", true)),
+        };
+        assert_eq!(build_builder_uri(&builder), "ssh://root@jello");
     }
 }

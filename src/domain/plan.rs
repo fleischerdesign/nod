@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::domain::host::BuilderHost;
+
 /// What an individual target plan asks the pipeline to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeploymentAction {
@@ -91,6 +93,9 @@ pub struct DeploymentOptions {
     pub verbose: bool,
     /// Optional symlink target for build closures (`nod build --out-link`).
     pub out_link: Option<PathBuf>,
+    /// Optional builder fleet host on which to compile closures remotely
+    /// (`nod build --builder`). Empty for a plain local build.
+    pub builder: Option<BuilderHost>,
 }
 
 impl DeploymentOptions {
@@ -106,6 +111,7 @@ impl DeploymentOptions {
             action: DeploymentAction::Switch,
             verbose: false,
             out_link: None,
+            builder: None,
         }
     }
 
@@ -175,7 +181,11 @@ impl DeploymentPlan {
                 let canary = vec![0];
                 waves.push(canary);
                 if count > 1 {
-                    let size = if batch_size == 0 { count - 1 } else { batch_size };
+                    let size = if batch_size == 0 {
+                        count - 1
+                    } else {
+                        batch_size
+                    };
                     Self::append_slices(&mut waves, 1, count, size);
                 }
             }
@@ -249,7 +259,11 @@ mod tests {
 
     #[test]
     fn empty_plan_has_no_waves() {
-        for strategy in [RolloutStrategy::All, RolloutStrategy::Canary, RolloutStrategy::Batch] {
+        for strategy in [
+            RolloutStrategy::All,
+            RolloutStrategy::Canary,
+            RolloutStrategy::Batch,
+        ] {
             let mut options = DeploymentOptions::default_policy();
             options.strategy = strategy;
             let plan = DeploymentPlan {
@@ -298,12 +312,52 @@ mod tests {
 
     #[test]
     fn action_round_trips() {
-        assert_eq!(DeploymentAction::parse("switch"), Some(DeploymentAction::Switch));
-        assert_eq!(DeploymentAction::parse("Boot"), Some(DeploymentAction::Boot));
-        assert_eq!(DeploymentAction::parse("test"), Some(DeploymentAction::Test));
-        assert_eq!(DeploymentAction::parse("dry-run"), Some(DeploymentAction::DryRun));
-        assert_eq!(DeploymentAction::parse("build"), Some(DeploymentAction::Build));
+        assert_eq!(
+            DeploymentAction::parse("switch"),
+            Some(DeploymentAction::Switch)
+        );
+        assert_eq!(
+            DeploymentAction::parse("Boot"),
+            Some(DeploymentAction::Boot)
+        );
+        assert_eq!(
+            DeploymentAction::parse("test"),
+            Some(DeploymentAction::Test)
+        );
+        assert_eq!(
+            DeploymentAction::parse("dry-run"),
+            Some(DeploymentAction::DryRun)
+        );
+        assert_eq!(
+            DeploymentAction::parse("build"),
+            Some(DeploymentAction::Build)
+        );
         assert_eq!(DeploymentAction::parse("nope"), None);
+    }
+
+    #[test]
+    fn default_policy_has_no_builder() {
+        let options = DeploymentOptions::default_policy();
+        assert!(options.builder.is_none());
+        assert!(options.out_link.is_none());
+    }
+
+    #[test]
+    fn deployment_options_round_trip_with_builder() {
+        let mut options = DeploymentOptions::default_policy();
+        options.builder = Some(BuilderHost {
+            target_host: "buildy".to_string(),
+            profile: crate::domain::host::SshProfile::new("dep", 2200),
+        });
+        let json = serde_json::to_string(&options).unwrap();
+        let back: DeploymentOptions = serde_json::from_str(&json).unwrap();
+        if let Some(builder) = back.builder {
+            assert_eq!(builder.target_host, "buildy");
+            assert_eq!(builder.profile.user(), "dep");
+            assert_eq!(builder.profile.port(), 2200);
+        } else {
+            panic!("expected the builder to survive serialization");
+        }
     }
 
     #[test]

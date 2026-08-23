@@ -355,7 +355,10 @@ mod tests {
 
         let probes = nod.health_checks.http_probes.unwrap();
         assert_eq!(probes.len(), 1);
-        assert_eq!(probes[0].url, Some("https://edge.example.org/health".to_string()));
+        assert_eq!(
+            probes[0].url,
+            Some("https://edge.example.org/health".to_string())
+        );
         assert_eq!(probes[0].expected_status, Some(200));
         assert_eq!(probes[0].timeout_secs, Some(15));
 
@@ -380,7 +383,10 @@ mod tests {
         assert_eq!(entity.nod_config.target_host, Some("10.0.0.8".to_string()));
         assert_eq!(entity.nod_config.ssh.port, Some(2222));
         assert_eq!(entity.nod_config.rollout.action, Some("switch".to_string()));
-        assert_eq!(entity.nod_config.health_checks.tcp_ports, Some(vec![443, 8443]));
+        assert_eq!(
+            entity.nod_config.health_checks.tcp_ports,
+            Some(vec![443, 8443])
+        );
         assert!(entity.nod_config.hooks.pre_switch_hook.is_some());
     }
 }

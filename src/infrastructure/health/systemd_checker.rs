@@ -83,7 +83,9 @@ impl HealthCheckerPort for SystemdHealthChecker {
             .output()
             .await;
         if failed.is_err() {
-            return Err(NodError::healthcheck("failed to launch `systemctl --failed`"));
+            return Err(NodError::healthcheck(
+                "failed to launch `systemctl --failed`",
+            ));
         }
         let failed = failed.unwrap();
         let failed_output = String::from_utf8_lossy(&failed.stdout);

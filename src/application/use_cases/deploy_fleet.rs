@@ -31,6 +31,9 @@ pub struct HostOutcome {
     pub ok: bool,
     /// True when the host was recovered via a rollback.
     pub rolled_back: bool,
+    /// Optional diagnostics from the failing build step; `None` when the host
+    /// reached a terminal state without a build-level error to surface.
+    pub failure: Option<String>,
 }
 
 impl HostOutcome {
@@ -42,6 +45,7 @@ impl HostOutcome {
             state: state.clone(),
             ok,
             rolled_back: state == DeploymentState::RolledBack,
+            failure: None,
         }
     }
 }
@@ -58,17 +62,26 @@ pub struct FleetSummary {
 impl FleetSummary {
     /// Number of hosts that reached `Completed`.
     pub fn succeeded(&self) -> usize {
-        self.outcomes.iter().filter(|o| o.state == DeploymentState::Completed).count()
+        self.outcomes
+            .iter()
+            .filter(|o| o.state == DeploymentState::Completed)
+            .count()
     }
 
     /// Number of hosts recovered through `RolledBack`.
     pub fn rolled_back(&self) -> usize {
-        self.outcomes.iter().filter(|o| o.state == DeploymentState::RolledBack).count()
+        self.outcomes
+            .iter()
+            .filter(|o| o.state == DeploymentState::RolledBack)
+            .count()
     }
 
     /// Number of hosts that ended `Failed`.
     pub fn failed(&self) -> usize {
-        self.outcomes.iter().filter(|o| o.state == DeploymentState::Failed).count()
+        self.outcomes
+            .iter()
+            .filter(|o| o.state == DeploymentState::Failed)
+            .count()
     }
 }
 
@@ -108,10 +121,15 @@ impl DeployFleetUseCase {
 
         let plan = self.plan_for(hosts.clone(), options.clone());
         let sem = Arc::new(Semaphore::new(options.concurrency));
-        let mut summary = FleetSummary { outcomes: Vec::new(), aborted: false };
+        let mut summary = FleetSummary {
+            outcomes: Vec::new(),
+            aborted: false,
+        };
 
         for wave in plan.wave_indices() {
-            let wave_outcomes = self.run_wave(&hosts, &wave, options.clone(), sem.clone(), flake_path).await;
+            let wave_outcomes = self
+                .run_wave(&hosts, &wave, options.clone(), sem.clone(), flake_path)
+                .await;
             let mut failed = false;
             for outcome in wave_outcomes {
                 if !outcome.ok {
@@ -148,9 +166,7 @@ impl DeployFleetUseCase {
             let sem_c = sem.clone();
             let ctx_c = self.ctx.clone();
             let flake_c = flake.clone();
-            set.spawn(async move {
-                run_host(ctx_c, host_c, opts_c, sem_c, flake_c).await
-            });
+            set.spawn(async move { run_host(ctx_c, host_c, opts_c, sem_c, flake_c).await });
         }
         set.join_all().await
     }
@@ -170,6 +186,7 @@ impl DeployFleetUseCase {
         let flake = flake_path.display().to_string();
         let out_link = options.out_link.clone();
         let verbose = options.verbose;
+        let builder = options.builder.clone();
         let evaluator = self.ctx.evaluator();
 
         for host in hosts {
@@ -177,11 +194,12 @@ impl DeployFleetUseCase {
             let evaluator_c = evaluator.clone();
             let flake_c = flake.clone();
             let out_link_c = out_link.clone();
+            let builder_c = builder.clone();
             let name_c = host.name.clone();
             set.spawn(async move {
                 let _permit = sem_c.acquire().await.ok();
                 let built = evaluator_c
-                    .build_toplevel(Path::new(&flake_c), &name_c, verbose)
+                    .build_toplevel(Path::new(&flake_c), &name_c, builder_c.as_ref(), verbose)
                     .await;
                 match built {
                     Ok(closure) => {
@@ -192,24 +210,41 @@ impl DeployFleetUseCase {
                         }
                         HostOutcome::new(name_c, DeploymentState::Prepared)
                     }
-                    Err(_) => HostOutcome::new(name_c, DeploymentState::Failed),
+                    Err(err) => {
+                        let mut outcome = HostOutcome::new(name_c, DeploymentState::Failed);
+                        outcome.failure = Some(err.to_string());
+                        outcome
+                    }
                 }
             });
         }
 
         let outcomes = set.join_all().await;
-        FleetSummary { outcomes, aborted: false }
+        FleetSummary {
+            outcomes,
+            aborted: false,
+        }
     }
 
     /// Dry-run: stage every host as `Prepared`; the closures were built but no
     /// switch was ever issued.
-    async fn stage_preview(&self, hosts: Vec<HostEntity>, options: DeploymentOptions) -> FleetSummary {
+    async fn stage_preview(
+        &self,
+        hosts: Vec<HostEntity>,
+        options: DeploymentOptions,
+    ) -> FleetSummary {
         let plan = self.plan_for(hosts, options);
         let mut outcomes = Vec::<HostOutcome>::with_capacity(plan.targets.len());
         for target in plan.targets {
-            outcomes.push(HostOutcome::new(target.host_name, DeploymentState::Prepared));
+            outcomes.push(HostOutcome::new(
+                target.host_name,
+                DeploymentState::Prepared,
+            ));
         }
-        FleetSummary { outcomes, aborted: false }
+        FleetSummary {
+            outcomes,
+            aborted: false,
+        }
     }
 
     /// Builds a `DeploymentPlan` (ordered target list + policy).
@@ -247,11 +282,23 @@ async fn run_host(
 
     let evaluator = ctx.evaluator();
     let closure = evaluator
-        .build_toplevel(std::path::Path::new(&flake), &host.name, options.verbose)
+        .build_toplevel(
+            std::path::Path::new(&flake),
+            &host.name,
+            None,
+            options.verbose,
+        )
         .await;
 
     if closure.is_err() {
-        return end_host(&mut machine, DeploymentEvent::EvalFail, &host, &options, &ctx).await;
+        return end_host(
+            &mut machine,
+            DeploymentEvent::EvalFail,
+            &host,
+            &options,
+            &ctx,
+        )
+        .await;
     }
 
     machine.tick(DeploymentEvent::EvalOk).unwrap();
@@ -261,10 +308,22 @@ async fn run_host(
     let deployer = ctx.deployer_for(&host);
     let activation_action = options.action.to_str();
     let activation = deployer
-        .deploy_and_activate(&host, &closure.unwrap(), &activation_action, options.verbose)
+        .deploy_and_activate(
+            &host,
+            &closure.unwrap(),
+            &activation_action,
+            options.verbose,
+        )
         .await;
     if activation.is_err() {
-        return end_host(&mut machine, DeploymentEvent::SwitchFail, &host, &options, &ctx).await;
+        return end_host(
+            &mut machine,
+            DeploymentEvent::SwitchFail,
+            &host,
+            &options,
+            &ctx,
+        )
+        .await;
     }
 
     machine.tick(DeploymentEvent::SwitchOk).unwrap();
@@ -272,7 +331,14 @@ async fn run_host(
     if let Some(health) = ctx.health_checker_opt() {
         let verified = health.verify_health(&host).await;
         if verified.is_err() || !verified.unwrap() {
-            return end_host(&mut machine, DeploymentEvent::VerifyFail, &host, &options, &ctx).await;
+            return end_host(
+                &mut machine,
+                DeploymentEvent::VerifyFail,
+                &host,
+                &options,
+                &ctx,
+            )
+            .await;
         }
     }
 
@@ -303,6 +369,7 @@ async fn end_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::host::BuilderHost;
     use crate::domain::ports::deployer::DeployerPort;
     use crate::domain::ports::evaluator::EvaluatorPort;
     use async_trait::async_trait;
@@ -325,7 +392,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -356,7 +423,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-test")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-test")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -370,7 +437,11 @@ mod tests {
         let use_case = DeployFleetUseCase::new(ctx);
 
         let summary = use_case
-            .execute(vec![host], options_with(DeploymentAction::Test), Path::new("/tmp/flake"))
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Test),
+                Path::new("/tmp/flake"),
+            )
             .await
             .unwrap();
 
@@ -385,7 +456,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-boot")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-boot")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -399,7 +470,11 @@ mod tests {
         let use_case = DeployFleetUseCase::new(ctx);
 
         let summary = use_case
-            .execute(vec![host], options_with(DeploymentAction::Boot), Path::new("/tmp/flake"))
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Boot),
+                Path::new("/tmp/flake"),
+            )
             .await
             .unwrap();
 
@@ -413,7 +488,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Ok(PathBuf::from("/nix/store/aaa-build")));
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-build")));
 
         // The build action must never reach a deployer (no transfer, no
         // activation, no rollback).
@@ -426,7 +501,11 @@ mod tests {
         let use_case = DeployFleetUseCase::new(ctx);
 
         let summary = use_case
-            .execute(vec![host], options_with(DeploymentAction::Build), Path::new("/tmp/flake"))
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Build),
+                Path::new("/tmp/flake"),
+            )
             .await
             .unwrap();
 
@@ -446,7 +525,7 @@ mod tests {
         let closure_c = closure.clone();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(move |_, _, _| Ok(closure_c.clone()));
+            .returning(move |_, _, _, _| Ok(closure_c.clone()));
 
         let local = MockFakeDeployer::new();
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
@@ -470,7 +549,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _| Err(NodError::build_failure("jello", "eval failed")));
+            .returning(|_, _, _, _| Err(NodError::build_failure("jello", "eval failed")));
 
         let local = MockFakeDeployer::new();
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
@@ -478,12 +557,53 @@ mod tests {
         let use_case = DeployFleetUseCase::new(ctx);
 
         let summary = use_case
-            .execute(vec![host], options_with(DeploymentAction::Build), Path::new("/tmp/flake"))
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Build),
+                Path::new("/tmp/flake"),
+            )
             .await
             .unwrap();
 
         assert_eq!(summary.outcomes.len(), 1);
         assert_eq!(summary.outcomes[0].state, DeploymentState::Failed);
         assert!(!summary.outcomes[0].ok);
+        assert!(
+            summary.outcomes[0].failure.is_some(),
+            "build failure must carry diagnostics",
+        );
+        assert!(summary.outcomes[0]
+            .failure
+            .as_deref()
+            .unwrap_or("")
+            .contains("eval failed"),);
+    }
+
+    #[tokio::test]
+    async fn build_with_explicit_builder_forwards_builder_to_evaluator() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .withf(|_, _, builder, _| builder.map(|b| b.target_host == "buildy").unwrap_or(false))
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-remote")));
+
+        let local = MockFakeDeployer::new();
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let mut options = options_with(DeploymentAction::Build);
+        options.builder = Some(BuilderHost {
+            target_host: "buildy".to_string(),
+            profile: crate::domain::host::SshProfile::new("builder", 22),
+        });
+
+        let use_case = DeployFleetUseCase::new(ctx);
+        let summary = use_case
+            .execute(vec![host], options, Path::new("/tmp/flake"))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.outcomes.len(), 1);
+        assert_eq!(summary.outcomes[0].state, DeploymentState::Prepared);
+        assert!(summary.outcomes[0].ok);
     }
 }

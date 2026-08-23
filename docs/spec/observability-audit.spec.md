@@ -81,36 +81,36 @@ Feature: A host exposes drift when its live closure differs from the flake
 
 ---
 
-## Feature: Audit Logging (`nod history`)
+## Feature: Audit Logging (`nod audit`)
 
 ```gherkin
-@history @audit
-Feature: `nod history` reads back recorded deployment outcomes
+@audit
+Feature: `nod audit` reads back recorded deployment outcomes
 
   Scenario: a deployment outcome is recorded
-    Given a history store bound to a writable path
-    When `HistoryStorePort::record` is called for a host with outcome `completed`
+    Given an audit store bound to a writable path
+    When `AuditStorePort::record` is called for a host with outcome `completed`
     Then the entry is appended to the store
 
-  Scenario: history lists recorded entries newest-first
-    Given a history store with several recorded outcomes
-    When `HistoryStorePort::entries` is called without filters
+  Scenario: audit lists recorded entries newest-first
+    Given an audit store with several recorded outcomes
+    When `AuditStorePort::entries` is called without filters
     Then every recorded entry is returned, newest first
 
-  Scenario: history narrows by target host
-    Given a history store with outcomes for hosts `jello` and `atlas`
+  Scenario: audit narrows by target host
+    Given an audit store with outcomes recorded for hosts `jello` and `atlas`
     When `entries` is called with host filter `jello`
     Then only `jello` entries are returned
 
-  Scenario: history caps the returned count
-    Given a history store with more than `limit` entries
+  Scenario: audit caps the returned count
+    Given an audit store with more than `limit` entries
     When `entries` is called with `limit` set
     Then at most `limit` newest entries are returned
 
-  Scenario: missing history reads as empty, not an error
-    Given a history store whose backing file does not exist
+  Scenario: missing audit reads as empty, not an error
+    Given an audit store whose backing file does not exist
     When `entries` is called
-    Then an empty history is returned (no error)
+    Then an empty audit is returned (no error)
 ```
 
 ---
@@ -118,5 +118,5 @@ Feature: `nod history` reads back recorded deployment outcomes
 > **Conventions:** the health probe maps to `HealthCheckUseCase` over the
 > `HealthCheckerPort::verify_health` seam; drift maps to `DetectDriftUseCase`
 > over `EvaluatorPort::build_toplevel` + `DeployerPort::current_closure`; the
-> audit log maps to `AuditLogUseCase` over `HistoryStorePort::entries`.
-> Tag names (`@drift`, `@history`, `@health`) are stable anchors for the runner.
+> audit log maps to `AuditLogUseCase` over `AuditStorePort::entries`.
+> Tag names (`@drift`, `@audit`, `@health`) are stable anchors for the runner.

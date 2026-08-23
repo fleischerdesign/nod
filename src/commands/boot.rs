@@ -70,6 +70,7 @@ pub async fn execute(
         action: DeploymentAction::Boot,
         verbose,
         out_link: None,
+        builder: None,
     };
 
     let hosts = evaluator.discover_hosts(flake_path, verbose).await?;

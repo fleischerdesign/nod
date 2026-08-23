@@ -86,21 +86,12 @@ impl DeployerPort for SshCliDeployer {
 
         println!(
             "  {}",
-            format!(
-                "Copying closure to {} over SSH...",
-                host.target_host
-            )
-            .dimmed()
+            format!("Copying closure to {} over SSH...", host.target_host).dimmed()
         );
 
         let store_target = format!("ssh://{}@{}", profile.user(), host.target_host);
         let copy_status = Command::new("nix")
-            .args([
-                "copy",
-                "--to",
-                &store_target,
-                closure.to_str().unwrap(),
-            ])
+            .args(["copy", "--to", &store_target, closure.to_str().unwrap()])
             .status()
             .await;
 
@@ -116,11 +107,7 @@ impl DeployerPort for SshCliDeployer {
 
         println!(
             "  {}",
-            format!(
-                "Activating remote configuration on {}...",
-                host.target_host
-            )
-            .dimmed()
+            format!("Activating remote configuration on {}...", host.target_host).dimmed()
         );
 
         let switch_bin = closure.join("bin/switch-to-configuration");
@@ -157,7 +144,11 @@ impl DeployerPort for SshCliDeployer {
         let ssh_target = format!("{}@{}", profile.user(), host.target_host);
         println!(
             "  {}",
-            format!("Rolling back remote host {} to previous generation...", host.name).yellow()
+            format!(
+                "Rolling back remote host {} to previous generation...",
+                host.name
+            )
+            .yellow()
         );
 
         // Remote generation query: list the prior profile links available.

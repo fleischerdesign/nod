@@ -1,13 +1,13 @@
 //! `AuditLogUseCase`: read the deployment history (ADR-003 observability).
 //!
-//! Composes over `HistoryStorePort::entries`; the optional host filter and
+//! Composes over `AuditStorePort::entries`; the optional host filter and
 //! count cap flow straight through from the CLI.
 
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
+use crate::domain::audit::AuditEntry;
 use crate::domain::errors::NodError;
-use crate::domain::history::HistoryEntry;
 
 /// Reads the recorded deployment history.
 pub struct AuditLogUseCase {
@@ -26,8 +26,8 @@ impl AuditLogUseCase {
         &self,
         host: Option<&str>,
         limit: Option<usize>,
-    ) -> Result<Vec<HistoryEntry>, NodError> {
-        let store = self.ctx.history_store()?;
+    ) -> Result<Vec<AuditEntry>, NodError> {
+        let store = self.ctx.audit_store()?;
         store.entries(host.map(String::from), limit).await
     }
 }

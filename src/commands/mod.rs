@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod boot;
 pub mod build;
 pub mod check;
@@ -5,7 +6,6 @@ pub mod dashboard;
 pub mod diff;
 pub mod drift;
 pub mod exec;
-pub mod history;
 pub mod plan;
 pub mod rollback;
 pub mod ssh;

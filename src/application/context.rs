@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
+use crate::domain::ports::audit_store::AuditStorePort;
 use crate::domain::ports::config_store::ConfigStorePort;
 use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
-use crate::domain::ports::history_store::HistoryStorePort;
 
 /// Resolves every port a use case may need from one seeded container.
 pub struct AppContext {
@@ -21,7 +21,7 @@ pub struct AppContext {
     ssh_deployer: Arc<dyn DeployerPort>,
     health_checker: Option<Arc<dyn HealthCheckerPort>>,
     config_store: Option<Arc<dyn ConfigStorePort>>,
-    history_store: Option<Arc<dyn HistoryStorePort>>,
+    audit_store: Option<Arc<dyn AuditStorePort>>,
 }
 
 impl AppContext {
@@ -38,7 +38,7 @@ impl AppContext {
             ssh_deployer,
             health_checker: None,
             config_store: None,
-            history_store: None,
+            audit_store: None,
         }
     }
 
@@ -88,17 +88,17 @@ impl AppContext {
             .ok_or_else(|| NodError::missing_binding("ConfigStorePort"))
     }
 
-    /// Registers a history store.
-    pub fn with_history_store(mut self, value: Arc<dyn HistoryStorePort>) -> Self {
-        self.history_store = Some(value);
+    /// Registers an audit store.
+    pub fn with_audit_store(mut self, value: Arc<dyn AuditStorePort>) -> Self {
+        self.audit_store = Some(value);
         self
     }
 
-    /// Resolves the history store, or raises a config error when missing.
-    pub fn history_store(&self) -> Result<Arc<dyn HistoryStorePort>, NodError> {
-        self.history_store
+    /// Resolves the audit store, or raises a config error when missing.
+    pub fn audit_store(&self) -> Result<Arc<dyn AuditStorePort>, NodError> {
+        self.audit_store
             .clone()
-            .ok_or_else(|| NodError::missing_binding("HistoryStorePort"))
+            .ok_or_else(|| NodError::missing_binding("AuditStorePort"))
     }
 }
 
@@ -106,7 +106,7 @@ impl AppContext {
 mod tests {
     use super::*;
     use crate::domain::config::{FleetDefaults, HostOverrides};
-    use crate::domain::host::SshProfile;
+    use crate::domain::host::{BuilderHost, SshProfile};
     use crate::infrastructure::deployment::local_deployer::LocalDeployer;
     use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
     use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
@@ -119,7 +119,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel(&self, flake_path: &Path, host_name: &str, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -143,11 +143,11 @@ mod tests {
     }
 
     mock! {
-        FakeHistoryStore {}
+        FakeAuditStore {}
         #[async_trait]
-        impl HistoryStorePort for FakeHistoryStore {
+        impl AuditStorePort for FakeAuditStore {
             async fn record(&self, host: &HostEntity, outcome: &str) -> Result<(), NodError>;
-            async fn entries(&self, host: Option<String>, limit: Option<usize>) -> Result<Vec<crate::domain::history::HistoryEntry>, NodError>;
+            async fn entries(&self, host: Option<String>, limit: Option<usize>) -> Result<Vec<crate::domain::audit::AuditEntry>, NodError>;
         }
     }
 
@@ -234,11 +234,8 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(true));
 
-        let mut history = MockFakeHistoryStore::new();
-        history
-            .expect_record()
-            .times(1)
-            .returning(move |_, _| Ok(()));
+        let mut audit = MockFakeAuditStore::new();
+        audit.expect_record().times(1).returning(move |_, _| Ok(()));
 
         let ctx = AppContext::new(
             Arc::new(NixCliEvaluator::new()),
@@ -247,17 +244,22 @@ mod tests {
         )
         .with_config_store(Arc::new(config))
         .with_health_checker(Arc::new(health))
-        .with_history_store(Arc::new(history));
+        .with_audit_store(Arc::new(audit));
 
         let host = HostEntity::new("atlas", "10.0.0.8", false);
         let profile = ctx.config_store().unwrap().resolve(&host).await.unwrap();
         assert_eq!(profile.user(), "root");
         assert!(!profile.sudo());
 
-        let healthy = ctx.health_checker().unwrap().verify_health(&host).await.unwrap();
+        let healthy = ctx
+            .health_checker()
+            .unwrap()
+            .verify_health(&host)
+            .await
+            .unwrap();
         assert!(healthy);
 
-        let recorded = ctx.history_store().unwrap().record(&host, "completed").await;
+        let recorded = ctx.audit_store().unwrap().record(&host, "completed").await;
         assert!(recorded.is_ok());
     }
 }

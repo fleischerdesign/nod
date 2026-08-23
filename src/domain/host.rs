@@ -290,6 +290,17 @@ pub struct TargetHost {
     pub is_local: bool,
 }
 
+/// A builder fleet host: the CONNECT address of the single configured host on
+/// which the toplevel closure is compiled remotely, plus the SSH profile used
+/// to reach it (ADR-006 `nod build --builder`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuilderHost {
+    /// Connect address of the builder host (`ssh://<user>@<target_host>`).
+    pub target_host: String,
+    /// Connection profile for the builder host (carries the credentials).
+    pub profile: SshProfile,
+}
+
 impl TargetHost {
     /// Derives a target from a host entity.
     pub fn from_host(host: &HostEntity) -> Self {
@@ -344,8 +355,40 @@ mod tests {
         assert_eq!(HostRole::parse("desktop"), HostRole::Desktop);
         assert_eq!(HostRole::parse("notebook"), HostRole::Notebook);
         assert_eq!(HostRole::parse("server"), HostRole::Server);
-        assert_eq!(HostRole::parse("wobbly"), HostRole::Unknown("wobbly".to_string()));
+        assert_eq!(
+            HostRole::parse("wobbly"),
+            HostRole::Unknown("wobbly".to_string())
+        );
         assert_eq!(HostRole::parse("wobbly").to_str(), "wobbly");
+    }
+
+    #[test]
+    fn builder_host_round_trips_construction_and_serialization() {
+        let profile = SshProfile::new("builder", 2222)
+            .with_user("deploy")
+            .with_port(2200);
+        let builder = BuilderHost {
+            target_host: "buildy".to_string(),
+            profile,
+        };
+        let json = serde_json::to_string(&builder).unwrap();
+        let back: BuilderHost = serde_json::from_str(&json).unwrap();
+        assert_eq!(builder, back);
+        assert_eq!(back.target_host, "buildy");
+        assert_eq!(back.profile.user(), "deploy");
+        assert_eq!(back.profile.port(), 2200);
+    }
+
+    #[test]
+    fn builder_host_defaults_carry_root_user_and_port_22() {
+        let host = HostEntity::new("atlas", "10.0.0.8", false);
+        let builder = BuilderHost {
+            target_host: "10.0.0.8".to_string(),
+            profile: SshProfile::for_host(&host),
+        };
+        assert_eq!(builder.target_host, "10.0.0.8");
+        assert_eq!(builder.profile.user(), "root");
+        assert_eq!(builder.profile.port(), 22);
     }
 
     #[test]
@@ -422,7 +465,11 @@ mod tests {
     #[test]
     fn user_port_and_sudo_builders_return_new_profiles() {
         let base = SshProfile::new("philipp", 2222);
-        let changed = base.clone().with_user("deploy").with_port(2200).with_sudo(false);
+        let changed = base
+            .clone()
+            .with_user("deploy")
+            .with_port(2200)
+            .with_sudo(false);
         // The original is untouched; the new profile carries the overrides.
         assert_eq!(base.user(), "philipp");
         assert_eq!(base.port(), 2222);

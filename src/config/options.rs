@@ -219,6 +219,11 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
 
+        /// Build through a configured fleet host (exactly one; flake `buildHost`
+        /// default is the lower tier)
+        #[arg(long, value_name = "HOST")]
+        builder: Option<String>,
+
         /// Symlink the built closure to this path
         #[arg(long, value_name = "PATH")]
         out_link: Option<PathBuf>,
@@ -388,15 +393,15 @@ pub enum Commands {
     },
 
     /// Read the recorded deployment audit history
-    History {
-        /// Narrow the history to one host
+    Audit {
+        /// Narrow the audit to one host
         target: Option<String>,
 
         /// Cap the newest entries returned
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
 
-        /// Emit the history as JSON
+        /// Emit the audit as JSON
         #[arg(long)]
         json: bool,
     },
@@ -483,12 +488,15 @@ mod tests {
             "nod",
             "switch",
             "atlas",
-            "--flake", "/tmp/flake",
-            "--tag", "server",
-            "--role", "desktop",
+            "--flake",
+            "/tmp/flake",
+            "--tag",
+            "server",
+            "--role",
+            "desktop",
             "--all",
         ])
-            .expect("valid switch invocation should parse");
+        .expect("valid switch invocation should parse");
         match cli.command {
             Commands::Switch {
                 target,
@@ -556,8 +564,18 @@ mod tests {
                 assert_eq!(role, None);
                 assert!(!all);
                 let _ = (
-                    flake, user, port, identity_file, dry_run, concurrency, strategy, batch_size,
-                    fail_fast, auto_rollback, on_error, action,
+                    flake,
+                    user,
+                    port,
+                    identity_file,
+                    dry_run,
+                    concurrency,
+                    strategy,
+                    batch_size,
+                    fail_fast,
+                    auto_rollback,
+                    on_error,
+                    action,
                 );
             }
             _ => panic!("expected a switch command"),
@@ -570,12 +588,16 @@ mod tests {
             "nod",
             "switch",
             "--dry-run",
-            "--concurrency", "2",
-            "--strategy", "canary",
-            "--batch-size", "3",
+            "--concurrency",
+            "2",
+            "--strategy",
+            "canary",
+            "--batch-size",
+            "3",
             "--fail-fast",
             "--auto-rollback",
-            "--action", "boot",
+            "--action",
+            "boot",
         ]);
         match cli.command {
             Commands::Switch {
@@ -636,8 +658,20 @@ mod tests {
                 assert_eq!(on_error, Some("continue".to_string()));
                 assert!(!all);
                 let _ = (
-                    target, flake, tag, role, user, port, identity_file, dry_run, concurrency,
-                    strategy, batch_size, fail_fast, auto_rollback, action,
+                    target,
+                    flake,
+                    tag,
+                    role,
+                    user,
+                    port,
+                    identity_file,
+                    dry_run,
+                    concurrency,
+                    strategy,
+                    batch_size,
+                    fail_fast,
+                    auto_rollback,
+                    action,
                 );
             }
             _ => panic!("expected a switch command"),
@@ -648,9 +682,19 @@ mod tests {
     fn parses_plan_target_tag_role_and_all() {
         let plan = Cli::try_parse_from(vec![
             "nod", "plan", "atlas", "--tag", "server", "--role", "desktop", "--all",
-        ]).expect("valid plan invocation should parse");
+        ])
+        .expect("valid plan invocation should parse");
         match plan.command {
-            Commands::Plan { target, tag, role, all, flake, user, port, identity_file } => {
+            Commands::Plan {
+                target,
+                tag,
+                role,
+                all,
+                flake,
+                user,
+                port,
+                identity_file,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("desktop".to_string()));
@@ -665,9 +709,19 @@ mod tests {
     fn parses_diff_target_tag_role_and_all() {
         let diff = Cli::try_parse_from(vec![
             "nod", "diff", "web-*", "--tag", "prod", "--role", "server", "--all",
-        ]).expect("valid diff invocation should parse");
+        ])
+        .expect("valid diff invocation should parse");
         match diff.command {
-            Commands::Diff { target, tag, role, all, flake, user, port, identity_file } => {
+            Commands::Diff {
+                target,
+                tag,
+                role,
+                all,
+                flake,
+                user,
+                port,
+                identity_file,
+            } => {
                 assert_eq!(target, Some("web-*".to_string()));
                 assert_eq!(tag, Some("prod".to_string()));
                 assert_eq!(role, Some("server".to_string()));
@@ -682,9 +736,16 @@ mod tests {
     fn parses_status_target_tag_role_and_all() {
         let status = Cli::try_parse_from(vec![
             "nod", "status", "atlas", "--tag", "server", "--role", "desktop", "--all",
-        ]).expect("valid status invocation should parse");
+        ])
+        .expect("valid status invocation should parse");
         match status.command {
-            Commands::Status { target, tag, role, all, flake } => {
+            Commands::Status {
+                target,
+                tag,
+                role,
+                all,
+                flake,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("desktop".to_string()));
@@ -694,10 +755,15 @@ mod tests {
             _ => panic!("expected a status command"),
         }
 
-        let bare = Cli::try_parse_from(vec!["nod", "status"])
-            .expect("bare status should parse");
+        let bare = Cli::try_parse_from(vec!["nod", "status"]).expect("bare status should parse");
         match bare.command {
-            Commands::Status { target, tag, role, all, flake } => {
+            Commands::Status {
+                target,
+                tag,
+                role,
+                all,
+                flake,
+            } => {
                 assert_eq!(target, None);
                 assert_eq!(tag, None);
                 assert_eq!(role, None);
@@ -711,11 +777,29 @@ mod tests {
     #[test]
     fn parses_rollback_target_tag_role_all_and_generation() {
         let roll = Cli::try_parse_from(vec![
-            "nod", "rollback", "atlas", "--tag", "server", "--role", "db",
-            "--all", "--generation", "3",
-        ]).expect("valid rollback invocation should parse");
+            "nod",
+            "rollback",
+            "atlas",
+            "--tag",
+            "server",
+            "--role",
+            "db",
+            "--all",
+            "--generation",
+            "3",
+        ])
+        .expect("valid rollback invocation should parse");
         match roll.command {
-            Commands::Rollback { target, tag, role, all, generation: gen, flake, user, port } => {
+            Commands::Rollback {
+                target,
+                tag,
+                role,
+                all,
+                generation: gen,
+                flake,
+                user,
+                port,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("db".to_string()));
@@ -728,18 +812,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_history_limit_and_json() {
-        let history = Cli::try_parse_from(vec![
-            "nod", "history", "atlas", "--limit", "5", "--json",
-        ])
-            .expect("valid history invocation should parse");
-        match history.command {
-            Commands::History { target, limit, json } => {
+    fn parses_audit_limit_and_json() {
+        let audit = Cli::try_parse_from(vec!["nod", "audit", "atlas", "--limit", "5", "--json"])
+            .expect("valid audit invocation should parse");
+        match audit.command {
+            Commands::Audit {
+                target,
+                limit,
+                json,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(limit, Some(5));
                 assert!(json);
             }
-            _ => panic!("expected a history command"),
+            _ => panic!("expected an audit command"),
         }
     }
 
@@ -748,9 +834,15 @@ mod tests {
         let drift = Cli::try_parse_from(vec![
             "nod", "drift", "atlas", "--tag", "server", "--role", "db", "--all", "--json",
         ])
-            .expect("valid drift invocation should parse");
+        .expect("valid drift invocation should parse");
         match drift.command {
-            Commands::Drift { target, tag, role, all, json } => {
+            Commands::Drift {
+                target,
+                tag,
+                role,
+                all,
+                json,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("db".to_string()));
@@ -765,7 +857,13 @@ mod tests {
     fn parses_ssh_bare_with_defaults() {
         let ssh = Cli::parse_from(vec!["nod", "ssh"]);
         match ssh.command {
-            Commands::Ssh { target, tag, role, sudo, command } => {
+            Commands::Ssh {
+                target,
+                tag,
+                role,
+                sudo,
+                command,
+            } => {
                 assert_eq!(target, None);
                 assert_eq!(tag, None);
                 assert_eq!(role, None);
@@ -780,9 +878,16 @@ mod tests {
     fn parses_ssh_target_sudo_and_filters() {
         let ssh = Cli::try_parse_from(vec![
             "nod", "ssh", "atlas", "--sudo", "--tag", "prod", "--role", "api",
-        ]).expect("valid ssh invocation should parse");
+        ])
+        .expect("valid ssh invocation should parse");
         match ssh.command {
-            Commands::Ssh { target, tag, role, sudo, command } => {
+            Commands::Ssh {
+                target,
+                tag,
+                role,
+                sudo,
+                command,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("prod".to_string()));
                 assert_eq!(role, Some("api".to_string()));
@@ -798,9 +903,15 @@ mod tests {
         let ssh = Cli::try_parse_from(vec![
             "nod", "ssh", "atlas", "--", "uname", "-a", "-o", "flag",
         ])
-            .expect("valid ssh command should parse");
+        .expect("valid ssh command should parse");
         match ssh.command {
-            Commands::Ssh { target, tag, role, sudo, command } => {
+            Commands::Ssh {
+                target,
+                tag,
+                role,
+                sudo,
+                command,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(command, ["uname", "-a", "-o", "flag"]);
                 assert!(!sudo);
@@ -815,9 +926,15 @@ mod tests {
         let ssh = Cli::try_parse_from(vec![
             "nod", "ssh", "atlas", "-t", "prod", "-r", "db", "--sudo", "--", "uname", "-a",
         ])
-            .expect("valid ssh short flags should parse");
+        .expect("valid ssh short flags should parse");
         match ssh.command {
-            Commands::Ssh { target, tag, role, sudo, command } => {
+            Commands::Ssh {
+                target,
+                tag,
+                role,
+                sudo,
+                command,
+            } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("prod".to_string()));
                 assert_eq!(role, Some("db".to_string()));
@@ -831,13 +948,32 @@ mod tests {
     #[test]
     fn parses_test_target_tag_role_and_all() {
         let cli = Cli::try_parse_from(vec![
-            "nod", "test", "atlas", "--flake", "/tmp/flake", "--tag", "server",
-            "--role", "desktop", "--all", "--user", "root", "--port", "2222",
-            "--identity-file", "/tmp/key", "--concurrency", "2",
-            "--strategy", "canary", "--batch-size", "3", "--fail-fast",
+            "nod",
+            "test",
+            "atlas",
+            "--flake",
+            "/tmp/flake",
+            "--tag",
+            "server",
+            "--role",
+            "desktop",
+            "--all",
+            "--user",
+            "root",
+            "--port",
+            "2222",
+            "--identity-file",
+            "/tmp/key",
+            "--concurrency",
+            "2",
+            "--strategy",
+            "canary",
+            "--batch-size",
+            "3",
+            "--fail-fast",
             "--auto-rollback",
         ])
-            .expect("valid test invocation should parse");
+        .expect("valid test invocation should parse");
         match cli.command {
             Commands::Test {
                 target,
@@ -912,10 +1048,18 @@ mod tests {
     #[test]
     fn parses_boot_target_tag_role_and_all() {
         let cli = Cli::try_parse_from(vec![
-            "nod", "boot", "atlas", "--flake", "/tmp/flake", "--tag", "server",
-            "--role", "desktop", "--all",
+            "nod",
+            "boot",
+            "atlas",
+            "--flake",
+            "/tmp/flake",
+            "--tag",
+            "server",
+            "--role",
+            "desktop",
+            "--all",
         ])
-            .expect("valid boot invocation should parse");
+        .expect("valid boot invocation should parse");
         match cli.command {
             Commands::Boot {
                 target,
@@ -953,10 +1097,20 @@ mod tests {
     #[test]
     fn parses_build_target_out_link_and_concurrency() {
         let cli = Cli::try_parse_from(vec![
-            "nod", "build", "web-*", "--tag", "prod", "--role", "server", "--all",
-            "--out-link", "/tmp/result", "--concurrency", "2",
+            "nod",
+            "build",
+            "web-*",
+            "--tag",
+            "prod",
+            "--role",
+            "server",
+            "--all",
+            "--out-link",
+            "/tmp/result",
+            "--concurrency",
+            "2",
         ])
-            .expect("valid build invocation should parse");
+        .expect("valid build invocation should parse");
         match cli.command {
             Commands::Build {
                 target,
@@ -964,6 +1118,7 @@ mod tests {
                 tag,
                 role,
                 all,
+                builder,
                 out_link,
                 concurrency,
             } => {
@@ -972,6 +1127,7 @@ mod tests {
                 assert_eq!(tag, Some("prod".to_string()));
                 assert_eq!(role, Some("server".to_string()));
                 assert!(all);
+                assert_eq!(builder, None);
                 assert_eq!(out_link, Some(PathBuf::from("/tmp/result")));
                 assert_eq!(concurrency, Some(2));
             }
@@ -980,11 +1136,57 @@ mod tests {
     }
 
     #[test]
+    fn parses_build_with_builder() {
+        let cli = Cli::parse_from(vec![
+            "nod",
+            "build",
+            "web-01",
+            "--builder",
+            "buildy",
+            "--out-link",
+            "/tmp/result",
+        ]);
+        match cli.command {
+            Commands::Build {
+                target,
+                flake,
+                tag,
+                role,
+                all,
+                builder,
+                out_link,
+                concurrency,
+            } => {
+                assert_eq!(target, Some("web-01".to_string()));
+                assert_eq!(builder, Some("buildy".to_string()));
+                assert_eq!(out_link, Some(PathBuf::from("/tmp/result")));
+                let _ = (flake, tag, role, all, concurrency);
+            }
+            _ => panic!("expected a build command"),
+        }
+    }
+
+    #[test]
     fn parses_exec_target_tag_role_all_filters_and_command() {
         let cli = Cli::try_parse_from(vec![
-            "nod", "exec", "web-*", "--flake", "/tmp/flake", "--tag", "prod",
-            "--role", "server", "--all", "--sudo", "--concurrency", "2",
-            "--fail-fast", "--json", "--", "uptime", "-p",
+            "nod",
+            "exec",
+            "web-*",
+            "--flake",
+            "/tmp/flake",
+            "--tag",
+            "prod",
+            "--role",
+            "server",
+            "--all",
+            "--sudo",
+            "--concurrency",
+            "2",
+            "--fail-fast",
+            "--json",
+            "--",
+            "uptime",
+            "-p",
         ])
         .expect("valid exec invocation should parse");
         match cli.command {
@@ -1049,8 +1251,22 @@ mod tests {
     #[test]
     fn parses_exec_short_flags_and_globbing_target() {
         let cli = Cli::try_parse_from(vec![
-            "nod", "exec", "db-*", "-t", "prod", "-r", "db", "-a", "-f", "/tmp/flake",
-            "-c", "3", "--", "systemctl", "status", "postgres",
+            "nod",
+            "exec",
+            "db-*",
+            "-t",
+            "prod",
+            "-r",
+            "db",
+            "-a",
+            "-f",
+            "/tmp/flake",
+            "-c",
+            "3",
+            "--",
+            "systemctl",
+            "status",
+            "postgres",
         ])
         .expect("valid exec short flags should parse");
         match cli.command {

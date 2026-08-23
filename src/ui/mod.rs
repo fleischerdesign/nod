@@ -12,15 +12,15 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::{
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 
 use crate::application::context::AppContext;
 use crate::domain::errors::NodError;
 use crate::ui::app::{DashboardAction, DashboardApp};
-use crate::ui::event::{UiEvent, poll as poll_event};
+use crate::ui::event::{poll as poll_event, UiEvent};
 
 /// Boots the event loop for the interactive dashboard.
 ///
@@ -59,7 +59,9 @@ pub async fn run_dashboard(ctx: AppContext, flake: Option<PathBuf>) -> Result<()
     let mut terminal = init_terminal().map_err(io_err)?;
 
     loop {
-        terminal.draw(|frame| views::draw(frame, &app, &online)).map_err(io_err)?;
+        terminal
+            .draw(|frame| views::draw(frame, &app, &online))
+            .map_err(io_err)?;
         if app.should_quit {
             break;
         }
@@ -78,7 +80,9 @@ fn drive_events(
 ) -> Result<(), NodError> {
     match poll_event(Duration::from_millis(250)) {
         Some(UiEvent::Resize(width, height)) => {
-            terminal.resize(Rect::new(0, 0, width, height)).map_err(io_err)?;
+            terminal
+                .resize(Rect::new(0, 0, width, height))
+                .map_err(io_err)?;
         }
         Some(UiEvent::Key(key)) => {
             if let Some(action) = app.handle_key(key) {
@@ -98,13 +102,11 @@ fn run_action(action: DashboardAction, app: &mut DashboardApp, flake_path: &Path
         DashboardAction::Rollback => "rollback",
         DashboardAction::Diff => "diff",
     };
-    let detail = app.selected_host().map(|h| h.name.clone()).unwrap_or("unknown".to_string());
-    app.append_log(format!(
-        "{} {} → {}",
-        label,
-        detail,
-        flake_path.display()
-    ).as_str());
+    let detail = app
+        .selected_host()
+        .map(|h| h.name.clone())
+        .unwrap_or("unknown".to_string());
+    app.append_log(format!("{} {} → {}", label, detail, flake_path.display()).as_str());
 }
 
 /// Enters raw mode, switches to the alternate screen and hides the cursor.

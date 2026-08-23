@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
 use crate::domain::errors::NodError;
-use crate::domain::host::HostEntity;
+use crate::domain::host::{BuilderHost, HostEntity};
 
 /// Discovers `nixosConfigurations` hosts and builds toplevel closures.
 #[async_trait]
@@ -18,10 +18,11 @@ pub trait EvaluatorPort: Send + Sync {
 
     /// Builds the system toplevel closure for `host_name`, returning the
     /// store path.
-    async fn build_toplevel(
+    async fn build_toplevel<'a>(
         &self,
         flake_path: &Path,
         host_name: &str,
+        builder: Option<&'a BuilderHost>,
         verbose: bool,
     ) -> Result<PathBuf, NodError>;
 }

@@ -6,7 +6,6 @@
 //! recovery) matches the outer variant, while the operator-facing message
 //! lives in `detail`.
 
-
 use thiserror::Error;
 
 /// Root typed error class for every failed nod operation.
@@ -32,7 +31,10 @@ pub enum NodError {
 impl NodError {
     /// Raised when Nix host discovery evaluation fails.
     pub fn discovery_failure(detail: impl Into<String>) -> Self {
-        NodError::evaluation(format!("Nix host discovery evaluation failed: {}", detail.into()))
+        NodError::evaluation(format!(
+            "Nix host discovery evaluation failed: {}",
+            detail.into()
+        ))
     }
 
     /// Raised when parsing Nix evaluation / build output fails.
@@ -179,9 +181,7 @@ mod tests {
         assert!(NodError::missing_binding("ConfigStorePort")
             .to_string()
             .contains("ConfigStorePort"));
-        assert!(NodError::not_found("atlas")
-            .to_string()
-            .contains("atlas"));
+        assert!(NodError::not_found("atlas").to_string().contains("atlas"));
     }
 
     #[test]

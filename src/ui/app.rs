@@ -145,17 +145,26 @@ impl DashboardApp {
                 None
             }
             DashboardKey::Switch => {
-                let host = self.selected_host().map(|h| h.name.clone()).unwrap_or("?".to_string());
+                let host = self
+                    .selected_host()
+                    .map(|h| h.name.clone())
+                    .unwrap_or("?".to_string());
                 self.status_message = Some(format!("switch queued for {}", host));
                 Some(DashboardAction::Switch)
             }
             DashboardKey::Rollback => {
-                let host = self.selected_host().map(|h| h.name.clone()).unwrap_or("?".to_string());
+                let host = self
+                    .selected_host()
+                    .map(|h| h.name.clone())
+                    .unwrap_or("?".to_string());
                 self.status_message = Some(format!("rollback queued for {}", host));
                 Some(DashboardAction::Rollback)
             }
             DashboardKey::Diff => {
-                let host = self.selected_host().map(|h| h.name.clone()).unwrap_or("?".to_string());
+                let host = self
+                    .selected_host()
+                    .map(|h| h.name.clone())
+                    .unwrap_or("?".to_string());
                 self.status_message = Some(format!("diff queued for {}", host));
                 Some(DashboardAction::Diff)
             }
@@ -285,16 +294,25 @@ mod tests {
 
         let switched = app.handle_key(DashboardKey::Switch);
         assert_eq!(switched, Some(DashboardAction::Switch));
-        assert_eq!(app.status_message, Some("switch queued for jello".to_string()));
+        assert_eq!(
+            app.status_message,
+            Some("switch queued for jello".to_string())
+        );
 
         app.next_host();
 
         let rolled = app.handle_key(DashboardKey::Rollback);
         assert_eq!(rolled, Some(DashboardAction::Rollback));
-        assert_eq!(app.status_message, Some("rollback queued for atlas".to_string()));
+        assert_eq!(
+            app.status_message,
+            Some("rollback queued for atlas".to_string())
+        );
 
         let diffed = app.handle_key(DashboardKey::Diff);
         assert_eq!(diffed, Some(DashboardAction::Diff));
-        assert_eq!(app.status_message, Some("diff queued for atlas".to_string()));
+        assert_eq!(
+            app.status_message,
+            Some("diff queued for atlas".to_string())
+        );
     }
 }

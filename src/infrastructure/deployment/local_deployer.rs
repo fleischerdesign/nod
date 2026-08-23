@@ -65,10 +65,14 @@ impl DeployerPort for LocalDeployer {
             .await;
 
         if status.is_err() {
-            return Err(NodError::local_activate("failed to launch sudo switch-to-configuration"));
+            return Err(NodError::local_activate(
+                "failed to launch sudo switch-to-configuration",
+            ));
         }
         if !status.unwrap().success() {
-            return Err(NodError::local_activate("switch-to-configuration reported failure"));
+            return Err(NodError::local_activate(
+                "switch-to-configuration reported failure",
+            ));
         }
 
         if verbose {
@@ -84,7 +88,11 @@ impl DeployerPort for LocalDeployer {
     async fn rollback(&self, host: &HostEntity) -> Result<(), NodError> {
         println!(
             "  {}",
-            format!("Rolling back local host {} to previous generation...", host.name).yellow()
+            format!(
+                "Rolling back local host {} to previous generation...",
+                host.name
+            )
+            .yellow()
         );
         // Re-invoke the prior generation's profile or ask nixos-rebuild to
         // switch back to the previous known-good configuration (ADR-003).
@@ -94,12 +102,12 @@ impl DeployerPort for LocalDeployer {
             .await;
         if status.is_err() {
             return Err(NodError::rollback_failure(
-                "failed to launch `nixos-rebuild --rollback`"
+                "failed to launch `nixos-rebuild --rollback`",
             ));
         }
         if !status.unwrap().success() {
             return Err(NodError::rollback_failure(
-                "nixos-rebuild --rollback reported failure"
+                "nixos-rebuild --rollback reported failure",
             ));
         }
         Ok(())

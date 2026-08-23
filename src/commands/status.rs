@@ -34,11 +34,12 @@ pub async fn execute(
 
     // No target and no filters defaults to showing every discovered host.
     let all_effective = all || (target.is_none() && tag.is_none() && role.is_none());
-    let selected = TargetSelection::select(hosts, target, tag, role, all_effective, &local_hostname);
+    let selected =
+        TargetSelection::select(hosts, target, tag, role, all_effective, &local_hostname);
 
     if selected.is_empty() {
         return Err(NodError::config(
-            "no hosts matched the given target/tag/role filters"
+            "no hosts matched the given target/tag/role filters",
         ));
     }
 
@@ -53,10 +54,7 @@ pub async fn execute(
 
     for host in selected {
         let deployer = ctx.deployer_for(&host);
-        let is_up = deployer
-            .check_reachability(&host)
-            .await
-            .unwrap_or(false);
+        let is_up = deployer.check_reachability(&host).await.unwrap_or(false);
         let status_str = if is_up {
             "● Online".green()
         } else {
@@ -79,7 +77,11 @@ pub async fn execute(
         };
         println!(
             "{:<14} {:<22} {:<10} {:<16} {:<10}",
-            host.name, host.target_host, host.role.to_str(), tags, status_str
+            host.name,
+            host.target_host,
+            host.role.to_str(),
+            tags,
+            status_str
         );
     }
 

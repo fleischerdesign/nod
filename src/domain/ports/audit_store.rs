@@ -1,14 +1,14 @@
-//! History store port: persistence of per-host deployment outcomes.
+//! Audit store port: persistence of per-host deployment outcomes.
 
 use async_trait::async_trait;
 
+use crate::domain::audit::AuditEntry;
 use crate::domain::errors::NodError;
-use crate::domain::history::HistoryEntry;
 use crate::domain::host::HostEntity;
 
 /// Persists deployment outcomes for auditability and rollback recovery.
 #[async_trait]
-pub trait HistoryStorePort: Send + Sync {
+pub trait AuditStorePort: Send + Sync {
     /// Records the outcome (`completed`, `rolled_back`, ...) for `host`.
     async fn record(&self, host: &HostEntity, outcome: &str) -> Result<(), NodError>;
 
@@ -19,5 +19,5 @@ pub trait HistoryStorePort: Send + Sync {
         &self,
         host: Option<String>,
         limit: Option<usize>,
-    ) -> Result<Vec<HistoryEntry>, NodError>;
+    ) -> Result<Vec<AuditEntry>, NodError>;
 }
