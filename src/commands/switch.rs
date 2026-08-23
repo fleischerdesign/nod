@@ -69,6 +69,7 @@ pub async fn execute(
         auto_rollback,
         action: DeploymentAction::parse(action).unwrap_or(DeploymentAction::Switch),
         verbose,
+        out_link: None,
     };
 
     let hosts = evaluator.discover_hosts(flake_path, verbose).await?;

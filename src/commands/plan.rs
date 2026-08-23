@@ -66,6 +66,7 @@ pub async fn execute(
         auto_rollback: false,
         action: DeploymentAction::Switch,
         verbose,
+        out_link: None,
     };
 
     let use_case = GeneratePlanUseCase::new(Arc::new(ctx));

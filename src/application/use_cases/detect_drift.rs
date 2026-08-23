@@ -77,7 +77,7 @@ mod tests {
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
             async fn current_closure(&self, host: &HostEntity) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, closure: &Path, verbose: bool) -> Result<(), NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
             async fn rollback(&self, host: &HostEntity) -> Result<(), NodError>;
         }
     }
