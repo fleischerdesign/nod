@@ -24,9 +24,9 @@ pub struct Cli {
 pub enum Commands {
     /// Rebuild and activate NixOS configurations (local or remote)
     Switch {
-        /// Target host: 'local', host name (e.g. 'jello'), or 'all' for fleet deployment
-        #[arg(default_value = "local")]
-        target: String,
+        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
+        /// for fleet deployment (defaults to 'local')
+        target: Option<String>,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
@@ -39,6 +39,10 @@ pub enum Commands {
         /// Filter the fleet to hosts with this role (e.g. 'server')
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
 
         /// Override the SSH user for every targeted host
         #[arg(long, value_name = "USER")]
@@ -94,6 +98,10 @@ pub enum Commands {
 
     /// Display live status matrix of all discovered NixOS hosts
     Status {
+        /// Target host: 'local', a host name or glob, or 'all'; narrows the
+        /// matrix to the selected fleet (defaults to 'all' when no criteria)
+        target: Option<String>,
+
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
@@ -105,13 +113,17 @@ pub enum Commands {
         /// Filter the fleet to hosts with this role
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
+
+        /// Show every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
     },
 
     /// Generate package & systemd unit diff preview before switching
     Diff {
-        /// Target host name
-        #[arg(default_value = "local")]
-        target: String,
+        /// Target host: 'local', a host name or glob, or 'all'
+        /// (defaults to 'local')
+        target: Option<String>,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
@@ -124,6 +136,10 @@ pub enum Commands {
         /// Filter the fleet to hosts with this role
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
 
         /// Override the SSH user for every targeted host
         #[arg(long, value_name = "USER")]
@@ -140,9 +156,9 @@ pub enum Commands {
 
     /// Preview the deployment plan for a target without activating it
     Plan {
-        /// Target host: 'local', host name, or 'all'
-        #[arg(default_value = "local")]
-        target: String,
+        /// Target host: 'local', a host name or glob, or 'all'
+        /// (defaults to 'local')
+        target: Option<String>,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
@@ -155,6 +171,10 @@ pub enum Commands {
         /// Filter the fleet to hosts with this role
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
 
         /// Override the SSH user for every targeted host
         #[arg(long, value_name = "USER")]
@@ -169,14 +189,27 @@ pub enum Commands {
         identity_file: Option<String>,
     },
 
-    /// Roll back a host to its previous NixOS profile generation
+    /// Roll a host or fleet back to its previous NixOS profile generation
     Rollback {
-        /// Target host name
-        target: String,
+        /// Target host: 'local', a host name or glob, or 'all'
+        /// (defaults to 'local')
+        target: Option<String>,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
+
+        /// Filter the fleet to hosts carrying this tag
+        #[arg(long, value_name = "TAG")]
+        tag: Option<String>,
+
+        /// Filter the fleet to hosts with this role
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
 
         /// Override the SSH user for the target
         #[arg(long, value_name = "USER")]
@@ -186,24 +219,29 @@ pub enum Commands {
         #[arg(long, value_name = "PORT")]
         port: Option<u16>,
 
-        /// Override the connection timeout for the target
-        #[arg(long, value_name = "SECS")]
-        timeout: Option<u32>,
-
-        /// Target host 'local", host name, or 'all'
-        #[arg(long, value_name = "TARGET")]
-        target_opt: Option<String>,
+        /// Roll back to a specific prior generation instead of the newest
+        /// known-good profile
+        #[arg(long, value_name = "N")]
+        generation: Option<u32>,
     },
 
     /// Detect configuration drift between live closures and the flake
     Drift {
-        /// Target host: 'local', a host name, or 'all' (defaults to 'local')
-        #[arg(long, value_name = "TARGET")]
+        /// Target host: 'local', a host name or glob, or 'all'
+        /// (defaults to 'local')
         target: Option<String>,
 
         /// Narrow drift detection to hosts carrying this tag
         #[arg(long, value_name = "TAG")]
         tag: Option<String>,
+
+        /// Narrow drift detection to hosts with this role
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+
+        /// Target every host in the discovered fleet
+        #[arg(long)]
+        all: bool,
 
         /// Emit the drift report as JSON
         #[arg(long)]
@@ -213,7 +251,6 @@ pub enum Commands {
     /// Read the recorded deployment audit history
     History {
         /// Narrow the history to one host
-        #[arg(long, value_name = "TARGET")]
         target: Option<String>,
 
         /// Cap the newest entries returned
@@ -238,23 +275,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_tag_role_user_and_port_flags() {
-        let cli = Cli::parse_from(vec![
+    fn parses_switch_target_tag_role_and_all() {
+        let cli = Cli::try_parse_from(vec![
             "nod",
             "switch",
+            "atlas",
             "--flake", "/tmp/flake",
             "--tag", "server",
             "--role", "desktop",
-            "--user", "philipp",
-            "--port", "2200",
-        ]);
-        assert!(!cli.verbose);
+            "--all",
+        ])
+            .expect("valid switch invocation should parse");
         match cli.command {
             Commands::Switch {
                 target,
                 flake,
                 tag,
                 role,
+                all,
                 user,
                 port,
                 identity_file,
@@ -267,12 +305,13 @@ mod tests {
                 on_error,
                 action,
             } => {
-                assert_eq!(target, "local");
+                assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(flake, "/tmp/flake");
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("desktop".to_string()));
-                assert_eq!(user, Some("philipp".to_string()));
-                assert_eq!(port, Some(2200));
+                assert!(all);
+                assert_eq!(user, None);
+                assert_eq!(port, None);
                 assert_eq!(identity_file, None);
                 assert!(!dry_run);
                 assert_eq!(concurrency, 4);
@@ -282,6 +321,41 @@ mod tests {
                 assert!(!auto_rollback);
                 assert_eq!(on_error, None);
                 assert_eq!(action, "switch");
+            }
+            _ => panic!("expected a switch command"),
+        }
+    }
+
+    #[test]
+    fn parses_switch_with_no_target_declines_all() {
+        let cli = Cli::parse_from(vec!["nod", "switch"]);
+        match cli.command {
+            Commands::Switch {
+                target,
+                tag,
+                role,
+                all,
+                flake,
+                user,
+                port,
+                identity_file,
+                dry_run,
+                concurrency,
+                strategy,
+                batch_size,
+                fail_fast,
+                auto_rollback,
+                on_error,
+                action,
+            } => {
+                assert_eq!(target, None);
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
+                assert!(!all);
+                let _ = (
+                    flake, user, port, identity_file, dry_run, concurrency, strategy, batch_size,
+                    fail_fast, auto_rollback, on_error, action,
+                );
             }
             _ => panic!("expected a switch command"),
         }
@@ -308,8 +382,9 @@ mod tests {
                 batch_size,
                 fail_fast,
                 auto_rollback,
-                action,
                 on_error,
+                action,
+                all,
                 target,
                 flake,
                 tag,
@@ -326,6 +401,7 @@ mod tests {
                 assert!(auto_rollback);
                 assert_eq!(on_error, None);
                 assert_eq!(action, "boot");
+                assert!(!all);
                 let _ = (target, flake, tag, role, user, port, identity_file);
             }
             _ => panic!("expected a switch command"),
@@ -338,6 +414,7 @@ mod tests {
         match cli.command {
             Commands::Switch {
                 on_error,
+                all,
                 target,
                 flake,
                 tag,
@@ -354,6 +431,7 @@ mod tests {
                 action,
             } => {
                 assert_eq!(on_error, Some("continue".to_string()));
+                assert!(!all);
                 let _ = (
                     target, flake, tag, role, user, port, identity_file, dry_run, concurrency,
                     strategy, batch_size, fail_fast, auto_rollback, action,
@@ -364,52 +442,119 @@ mod tests {
     }
 
     #[test]
-    fn parses_plan_and_rollback_commands() {
-        // `Plan.target` is a positional argument (defaults to "local"), so it
-        // must be given positionally, not via `--target`.
-        let plan = Cli::try_parse_from(vec!["nod", "plan", "atlas"])
-            .expect("valid plan invocation should parse");
+    fn parses_plan_target_tag_role_and_all() {
+        let plan = Cli::try_parse_from(vec![
+            "nod", "plan", "atlas", "--tag", "server", "--role", "desktop", "--all",
+        ]).expect("valid plan invocation should parse");
         match plan.command {
-            Commands::Plan { target, .. } => {
-                assert_eq!(target, "atlas");
+            Commands::Plan { target, tag, role, all, flake, user, port, identity_file } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, Some("server".to_string()));
+                assert_eq!(role, Some("desktop".to_string()));
+                assert!(all);
+                let _ = (flake, user, port, identity_file);
             }
             _ => panic!("expected a plan command"),
         }
+    }
 
-        let roll = Cli::try_parse_from(vec!["nod", "rollback", "atlas"])
-            .expect("valid rollback invocation should parse");
+    #[test]
+    fn parses_diff_target_tag_role_and_all() {
+        let diff = Cli::try_parse_from(vec![
+            "nod", "diff", "web-*", "--tag", "prod", "--role", "server", "--all",
+        ]).expect("valid diff invocation should parse");
+        match diff.command {
+            Commands::Diff { target, tag, role, all, flake, user, port, identity_file } => {
+                assert_eq!(target, Some("web-*".to_string()));
+                assert_eq!(tag, Some("prod".to_string()));
+                assert_eq!(role, Some("server".to_string()));
+                assert!(all);
+                let _ = (flake, user, port, identity_file);
+            }
+            _ => panic!("expected a diff command"),
+        }
+    }
+
+    #[test]
+    fn parses_status_target_tag_role_and_all() {
+        let status = Cli::try_parse_from(vec![
+            "nod", "status", "atlas", "--tag", "server", "--role", "desktop", "--all",
+        ]).expect("valid status invocation should parse");
+        match status.command {
+            Commands::Status { target, tag, role, all, flake } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, Some("server".to_string()));
+                assert_eq!(role, Some("desktop".to_string()));
+                assert!(all);
+                let _ = flake;
+            }
+            _ => panic!("expected a status command"),
+        }
+
+        let bare = Cli::try_parse_from(vec!["nod", "status"])
+            .expect("bare status should parse");
+        match bare.command {
+            Commands::Status { target, tag, role, all, flake } => {
+                assert_eq!(target, None);
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
+                assert!(!all);
+                let _ = flake;
+            }
+            _ => panic!("expected a status command"),
+        }
+    }
+
+    #[test]
+    fn parses_rollback_target_tag_role_all_and_generation() {
+        let roll = Cli::try_parse_from(vec![
+            "nod", "rollback", "atlas", "--tag", "server", "--role", "db",
+            "--all", "--generation", "3",
+        ]).expect("valid rollback invocation should parse");
         match roll.command {
-            Commands::Rollback { target, .. } => {
-                assert_eq!(target, "atlas");
+            Commands::Rollback { target, tag, role, all, generation: gen, flake, user, port } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, Some("server".to_string()));
+                assert_eq!(role, Some("db".to_string()));
+                assert!(all);
+                assert_eq!(gen, Some(3));
+                let _ = (flake, user, port);
             }
             _ => panic!("expected a rollback command"),
         }
     }
 
     #[test]
-    fn parses_drift_and_history_commands() {
-        let drift = Cli::try_parse_from(vec![
-            "nod", "drift", "--target", "atlas", "--tag", "server", "--json",
+    fn parses_history_limit_and_json() {
+        let history = Cli::try_parse_from(vec![
+            "nod", "history", "atlas", "--limit", "5", "--json",
         ])
-            .expect("valid drift invocation should parse");
-        match drift.command {
-            Commands::Drift { target, tag, json } => {
-                assert_eq!(target, Some("atlas".to_string()));
-                assert_eq!(tag, Some("server".to_string()));
-                assert!(json);
-            }
-            _ => panic!("expected a drift command"),
-        }
-
-        let history = Cli::try_parse_from(vec!["nod", "history", "--limit", "5"])
             .expect("valid history invocation should parse");
         match history.command {
             Commands::History { target, limit, json } => {
-                assert_eq!(target, None);
+                assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(limit, Some(5));
-                assert!(!json);
+                assert!(json);
             }
             _ => panic!("expected a history command"),
+        }
+    }
+
+    #[test]
+    fn parses_drift_target_tag_role_all_and_json() {
+        let drift = Cli::try_parse_from(vec![
+            "nod", "drift", "atlas", "--tag", "server", "--role", "db", "--all", "--json",
+        ])
+            .expect("valid drift invocation should parse");
+        match drift.command {
+            Commands::Drift { target, tag, role, all, json } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, Some("server".to_string()));
+                assert_eq!(role, Some("db".to_string()));
+                assert!(all);
+                assert!(json);
+            }
+            _ => panic!("expected a drift command"),
         }
     }
 }

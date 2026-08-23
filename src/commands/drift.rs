@@ -54,6 +54,8 @@ pub async fn execute(
     verbose: bool,
     target: Option<&str>,
     tag: Option<&str>,
+    role: Option<&str>,
+    all: bool,
     json: bool,
 ) -> Result<(), NodError> {
     let config_store = TomlConfigStore::new(flake_path, CliOverrides::default())?;
@@ -70,11 +72,15 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let effective = target.unwrap_or("local");
-    let targets = TargetSelection::select_filtered(hosts, effective, &local_hostname, tag, None);
+    let (effective_target, effective_all) = if !all && target.is_none() && tag.is_none() && role.is_none() {
+        (Some("local"), false)
+    } else {
+        (target, all)
+    };
+    let targets = TargetSelection::select(hosts, effective_target, tag, role, effective_all, &local_hostname);
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(effective, tag, None));
+        return Err(TargetSelection::unmatched(effective_target.unwrap_or("all"), tag, role));
     }
 
     let use_case = DetectDriftUseCase::new(Arc::new(ctx));

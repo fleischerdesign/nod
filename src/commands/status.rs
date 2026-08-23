@@ -16,6 +16,8 @@ pub async fn execute(
     verbose: bool,
     tag: Option<&str>,
     role: Option<&str>,
+    target: Option<&str>,
+    all: bool,
 ) -> Result<(), NodError> {
     let ctx = AppContext::new(
         Arc::new(NixCliEvaluator::new()),
@@ -30,11 +32,14 @@ pub async fn execute(
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let selected = TargetSelection::select_filtered(hosts, "all", &local_hostname, tag, role);
+    // No target and no filters defaults to showing every discovered host.
+    let all_effective = all || (target.is_none() && tag.is_none() && role.is_none());
+    let selected = TargetSelection::select(hosts, target, tag, role, all_effective, &local_hostname);
 
     if selected.is_empty() {
-        println!("{}", "No hosts match the given filters.".yellow());
-        return Ok(());
+        return Err(NodError::config(
+            "no hosts matched the given target/tag/role filters"
+        ));
     }
 
     println!(

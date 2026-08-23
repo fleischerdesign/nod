@@ -15,6 +15,7 @@ async fn main() -> Result<()> {
             flake,
             tag,
             role,
+            all,
             user,
             port,
             identity_file,
@@ -33,13 +34,14 @@ async fn main() -> Result<()> {
                 identity_file: identity_file.map(PathBuf::from),
             };
             nod::commands::switch::execute(
-                &target,
+                target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
                 cli.quiet,
                 overrides,
                 tag.as_deref(),
                 role.as_deref(),
+                all,
                 dry_run,
                 concurrency,
                 &strategy,
@@ -53,12 +55,14 @@ async fn main() -> Result<()> {
         Commands::Check { flake } => {
             nod::commands::check::execute(Path::new(&flake)).await?;
         }
-        Commands::Status { flake, tag, role } => {
+        Commands::Status { target, flake, tag, role, all } => {
             nod::commands::status::execute(
                 Path::new(&flake),
                 cli.verbose,
                 tag.as_deref(),
                 role.as_deref(),
+                target.as_deref(),
+                all,
             ).await?;
         }
         Commands::Diff {
@@ -66,6 +70,7 @@ async fn main() -> Result<()> {
             flake,
             tag,
             role,
+            all,
             user,
             port,
             identity_file,
@@ -76,12 +81,13 @@ async fn main() -> Result<()> {
                 identity_file: identity_file.map(PathBuf::from),
             };
             nod::commands::diff::execute(
-                &target,
+                target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
                 overrides,
                 tag.as_deref(),
                 role.as_deref(),
+                all,
             ).await?;
         }
         Commands::Plan {
@@ -89,6 +95,7 @@ async fn main() -> Result<()> {
             flake,
             tag,
             role,
+            all,
             user,
             port,
             identity_file,
@@ -99,34 +106,39 @@ async fn main() -> Result<()> {
                 identity_file: identity_file.map(PathBuf::from),
             };
             nod::commands::plan::execute(
-                &target,
+                target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
                 overrides,
                 tag.as_deref(),
                 role.as_deref(),
+                all,
             ).await?;
         }
-        Commands::Rollback { target, flake, user, port, timeout: _, target_opt } => {
-            let effective = target_opt.unwrap_or(target);
+        Commands::Rollback { target, flake, tag, role, all, user, port, generation: _ } => {
             let overrides = CliOverrides {
                 user,
                 port,
                 identity_file: None,
             };
             nod::commands::rollback::execute(
-                &effective,
+                target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
                 overrides,
+                tag.as_deref(),
+                role.as_deref(),
+                all,
             ).await?;
         }
-        Commands::Drift { target, tag, json } => {
+        Commands::Drift { target, tag, role, all, json } => {
             nod::commands::drift::execute(
                 Path::new("."),
                 cli.verbose,
                 target.as_deref(),
                 tag.as_deref(),
+                role.as_deref(),
+                all,
                 json,
             ).await?;
         }

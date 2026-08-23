@@ -19,13 +19,14 @@ use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
-    target: &str,
+    target: Option<&str>,
     flake_path: &Path,
     verbose: bool,
     quiet: bool,
     cli_overrides: CliOverrides,
     tag: Option<&str>,
     role: Option<&str>,
+    all: bool,
     dry_run: bool,
     concurrency: usize,
     strategy: &str,
@@ -74,10 +75,15 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let targets = TargetSelection::select_filtered(hosts, target, &local_hostname, tag, role);
+    let (effective_target, effective_all) = if !all && target.is_none() && tag.is_none() && role.is_none() {
+        (Some("local"), false)
+    } else {
+        (target, all)
+    };
+    let targets = TargetSelection::select(hosts, effective_target, tag, role, effective_all, &local_hostname);
 
     if targets.is_empty() {
-        return Err(TargetSelection::unmatched(target, tag, role));
+        return Err(TargetSelection::unmatched(effective_target.unwrap_or("all"), tag, role));
     }
 
     // Materialize merged TOML/CLI user+port onto each staged host (ADR-004).
