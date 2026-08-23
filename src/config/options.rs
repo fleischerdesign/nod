@@ -262,6 +262,28 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Open an interactive SSH session or execute a remote command on a host
+    Ssh {
+        /// Target host name or selector
+        target: Option<String>,
+
+        /// Filter by tag
+        #[arg(short, long)]
+        tag: Option<String>,
+
+        /// Filter by role
+        #[arg(short, long)]
+        role: Option<String>,
+
+        /// Run remote command with sudo or open root shell
+        #[arg(long)]
+        sudo: bool,
+
+        /// Trailing command and arguments to execute remotely
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+
     /// Launch interactive Ratatui TUI dashboard for fleet management
     Dashboard {
         /// Custom path to flake root directory
@@ -555,6 +577,73 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected a drift command"),
+        }
+    }
+
+    #[test]
+    fn parses_ssh_bare_with_defaults() {
+        let ssh = Cli::parse_from(vec!["nod", "ssh"]);
+        match ssh.command {
+            Commands::Ssh { target, tag, role, sudo, command } => {
+                assert_eq!(target, None);
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
+                assert!(!sudo);
+                assert!(command.is_empty());
+            }
+            _ => panic!("expected an ssh command"),
+        }
+    }
+
+    #[test]
+    fn parses_ssh_target_sudo_and_filters() {
+        let ssh = Cli::try_parse_from(vec![
+            "nod", "ssh", "atlas", "--sudo", "--tag", "prod", "--role", "api",
+        ]).expect("valid ssh invocation should parse");
+        match ssh.command {
+            Commands::Ssh { target, tag, role, sudo, command } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, Some("prod".to_string()));
+                assert_eq!(role, Some("api".to_string()));
+                assert!(sudo);
+                assert!(command.is_empty());
+            }
+            _ => panic!("expected an ssh command"),
+        }
+    }
+
+    #[test]
+    fn parses_ssh_trailing_command_after_separator() {
+        let ssh = Cli::try_parse_from(vec![
+            "nod", "ssh", "atlas", "--", "uname", "-a", "-o", "flag",
+        ])
+            .expect("valid ssh command should parse");
+        match ssh.command {
+            Commands::Ssh { target, tag, role, sudo, command } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(command, ["uname", "-a", "-o", "flag"]);
+                assert!(!sudo);
+                let _ = (tag, role);
+            }
+            _ => panic!("expected an ssh command"),
+        }
+    }
+
+    #[test]
+    fn parses_ssh_short_tag_and_role_flags() {
+        let ssh = Cli::try_parse_from(vec![
+            "nod", "ssh", "atlas", "-t", "prod", "-r", "db", "--sudo", "--", "uname", "-a",
+        ])
+            .expect("valid ssh short flags should parse");
+        match ssh.command {
+            Commands::Ssh { target, tag, role, sudo, command } => {
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, Some("prod".to_string()));
+                assert_eq!(role, Some("db".to_string()));
+                assert!(sudo);
+                assert_eq!(command, ["uname", "-a"]);
+            }
+            _ => panic!("expected an ssh command"),
         }
     }
 }

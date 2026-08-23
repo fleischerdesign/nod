@@ -5,5 +5,6 @@ pub mod drift;
 pub mod history;
 pub mod plan;
 pub mod rollback;
+pub mod ssh;
 pub mod status;
 pub mod switch;

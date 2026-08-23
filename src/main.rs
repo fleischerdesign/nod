@@ -1,8 +1,13 @@
 use anyhow::Result;
 use clap::Parser;
+use nod::application::context::AppContext;
 use nod::config::options::{Cli, Commands};
 use nod::domain::config::CliOverrides;
+use nod::infrastructure::deployment::local_deployer::LocalDeployer;
+use nod::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
+use nod::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -144,6 +149,22 @@ async fn main() -> Result<()> {
         }
         Commands::History { target, limit, json } => {
             nod::commands::history::execute(target.as_deref(), limit, json).await?;
+        }
+        Commands::Ssh { target, tag, role, sudo, command } => {
+            let ctx = AppContext::new(
+                Arc::new(NixCliEvaluator::new()),
+                Arc::new(LocalDeployer::new()),
+                Arc::new(SshCliDeployer::new()),
+            );
+            nod::commands::ssh::execute(
+                ctx,
+                None,
+                target.as_deref(),
+                tag.as_deref(),
+                role.as_deref(),
+                sudo,
+                &command,
+            ).await?;
         }
         Commands::Dashboard { flake } => {
             nod::commands::dashboard::execute(Path::new(&flake)).await?;
