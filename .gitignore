@@ -1,3 +1,7 @@
 /target/
 result
 result-*
+
+.direnv/
+.pi/
+ACCEPTANCE_REPORT.json
