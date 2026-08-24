@@ -31,7 +31,7 @@ pub async fn execute(
     }
 
     println!(
-        "\n{:<20} {:<14} {:<12}",
+        "\n{:<20} {:<14} {:<24}",
         "HOST".bold(),
         "OUTCOME".bold(),
         "RECORDED (UTC)".bold()
@@ -43,11 +43,53 @@ pub async fn execute(
         } else {
             outcome.yellow()
         };
-        println!(
-            "{:<20} {:<14} {}",
-            entry.host_name, colored, entry.recorded_at
-        );
+        let timestamp_str = format_epoch_utc(entry.recorded_at);
+        println!("{:<20} {:<14} {}", entry.host_name, colored, timestamp_str);
     }
 
     Ok(())
+}
+
+/// Converts Unix epoch seconds into a formatted UTC timestamp (`YYYY-MM-DD HH:MM:SS UTC`).
+fn format_epoch_utc(secs: u64) -> String {
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let mut d = secs / 86400;
+
+    let mut year = 1970;
+    loop {
+        let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            1
+        } else {
+            0
+        };
+        let days_in_year = 365 + leap;
+        if d < days_in_year {
+            let month_days = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            for (month, &md) in (1..).zip(month_days.iter()) {
+                if d < md {
+                    let day = d + 1;
+                    return format!("{year:04}-{month:02}-{day:02} {h:02}:{m:02}:{s:02} UTC");
+                }
+                d -= md;
+            }
+            break;
+        }
+        d -= days_in_year;
+        year += 1;
+    }
+
+    format!("{secs}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_epoch_utc_formats_known_timestamps() {
+        assert_eq!(format_epoch_utc(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(format_epoch_utc(1787600664), "2026-08-24 19:44:24 UTC");
+    }
 }
