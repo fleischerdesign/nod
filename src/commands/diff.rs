@@ -82,26 +82,61 @@ pub async fn execute(
                     .dimmed()
                 );
 
-                let nvd_status = Command::new("nvd")
-                    .args([
-                        "diff",
-                        current.to_str().unwrap_or(""),
-                        new_closure.to_str().unwrap_or(""),
-                    ])
-                    .status()
+                let current_str = current.to_str().unwrap_or("");
+                let new_str = new_closure.to_str().unwrap_or("");
+
+                let mut rendered = false;
+                let nvd_output = Command::new("nvd")
+                    .args(["diff", current_str, new_str])
+                    .output()
                     .await;
 
-                if nvd_status.is_err() || !nvd_status.unwrap().success() {
-                    // Fallback to nix store diff-closures if nvd is not available
-                    let _ = Command::new("nix")
-                        .args([
-                            "store",
-                            "diff-closures",
-                            current.to_str().unwrap_or(""),
-                            new_closure.to_str().unwrap_or(""),
-                        ])
-                        .status()
+                if let Ok(output) = nvd_output {
+                    if output.status.success() {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            println!("{trimmed}");
+                            rendered = true;
+                        }
+                    }
+                }
+
+                if !rendered {
+                    let nix_output = Command::new("nix")
+                        .args(["store", "diff-closures", current_str, new_str])
+                        .output()
                         .await;
+
+                    match nix_output {
+                        Ok(output) if output.status.success() => {
+                            let text = String::from_utf8_lossy(&output.stdout);
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                println!("{trimmed}");
+                            } else {
+                                println!(
+                                    "  {}",
+                                    "✓ No package version changes detected between closures."
+                                        .green()
+                                );
+                            }
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            println!(
+                                "  {}",
+                                format!("⚠ Diff tool reported an error: {}", stderr.trim())
+                                    .yellow()
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "  {}",
+                                format!("⚠ Failed to launch nix store diff-closures: {e}").yellow()
+                            );
+                        }
+                    }
                 }
             }
             None => {

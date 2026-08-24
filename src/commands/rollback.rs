@@ -49,11 +49,91 @@ pub async fn execute(
     let use_case = RollbackUseCase::new(Arc::new(ctx));
     use_case.execute(&host).await?;
 
-    if verbose {
-        println!(
-            "  {}",
-            format!("Rollback of {} finished", host.name).dimmed()
-        );
-    }
+    println!(
+        "  {}",
+        format!("✓ Rollback of {} completed successfully.", host.name).green()
+    );
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::host::{BuilderHost, HostEntity, SshProfile};
+    use crate::domain::ports::deployer::DeployerPort;
+    use crate::domain::ports::evaluator::EvaluatorPort;
+    use async_trait::async_trait;
+    use mockall::mock;
+    use std::path::PathBuf;
+
+    mock! {
+        FakeDeployer {}
+        #[async_trait]
+        impl DeployerPort for FakeDeployer {
+            async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
+            async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
+        }
+    }
+
+    mock! {
+        FakeEvaluator {}
+        #[async_trait]
+        impl EvaluatorPort for FakeEvaluator {
+            async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_rejects_multi_match_fleet() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_discover_hosts().returning(|_, _| {
+            Ok(vec![
+                HostEntity::new("web-01", "10.0.0.1", false),
+                HostEntity::new("web-02", "10.0.0.2", false),
+            ])
+        });
+
+        let ctx = AppContext::new(
+            Arc::new(eval),
+            Arc::new(MockFakeDeployer::new()),
+            Arc::new(MockFakeDeployer::new()),
+        );
+
+        let err = execute(ctx, Some("web-*"), Path::new("."), false, None, None, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
+    }
+
+    #[tokio::test]
+    async fn rollback_single_host_succeeds() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_discover_hosts()
+            .returning(|_, _| Ok(vec![HostEntity::new("rollins", "100.126.5.72", true)]));
+
+        let mut local = MockFakeDeployer::new();
+        local.expect_rollback().returning(|_, _| Ok(()));
+
+        let ctx = AppContext::new(
+            Arc::new(eval),
+            Arc::new(local),
+            Arc::new(MockFakeDeployer::new()),
+        );
+
+        let res = execute(
+            ctx,
+            Some("rollins"),
+            Path::new("."),
+            false,
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert!(res.is_ok());
+    }
 }

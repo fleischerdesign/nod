@@ -20,6 +20,8 @@ Approved (ADR-012)
 ### AC3: Semantic Diff Tooling
 - When `active_closure != Some(new_closure)` and an active closure exists, `nod diff` must execute `nvd diff <active_closure> <new_closure>`.
 - If `nvd` is unavailable or exits non-zero, it must gracefully fall back to `nix store diff-closures <active_closure> <new_closure>`.
+- If the diff tool outputs empty content (indicating no package changes despite divergent closure hashes), `nod diff` must explicitly report:
+  `✓ No package version changes detected between closures.`
 
 ### AC4: Initial Deployment Notice
 - If `active_closure` resolves to `None` (e.g. fresh bootstrap host), `nod diff` must informatively report that no previous generation exists.
