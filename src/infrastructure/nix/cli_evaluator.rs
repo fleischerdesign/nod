@@ -138,13 +138,29 @@ impl NixCliEvaluator {
     /// maps the outcome through [`Self::eval_meta`]. The subprocess launch is
     /// kept here (async) so the pure [`Self::collect_hosts`] fold stays
     /// unit-testable without a Nix toolchain.
+    ///
+    /// `--impure` is required: the expression does `builtins.import` of the
+    /// canonicalized absolute flake path, which pure eval forbids ("access to
+    /// absolute path ... is forbidden in pure eval mode") because the path
+    /// lives outside the store.
     async fn eval_host_meta(&self, flake_path: &Path, name: &str) -> Result<FlakeMeta, NodError> {
         let meta_expr = Self::build_meta_expr(flake_path, name);
-        let meta_output = Command::new("nix")
-            .args(["eval", "--json", "--expr", &meta_expr])
-            .output()
-            .await;
+        let args = Self::meta_eval_args(&meta_expr);
+        let meta_output = Command::new("nix").args(&args).output().await;
         Self::eval_meta(name, meta_output)
+    }
+
+    /// Builds the `nix eval` argv for one host's metadata expression. Pure
+    /// and side-effect free so the command shape (specifically the `--impure`
+    /// flag) is unit-testable without a Nix toolchain.
+    fn meta_eval_args(meta_expr: &str) -> Vec<String> {
+        vec![
+            "eval".to_string(),
+            "--impure".to_string(),
+            "--json".to_string(),
+            "--expr".to_string(),
+            meta_expr.to_string(),
+        ]
     }
 
     /// Pure per-host fold: converts each per-host metadata result into a
@@ -514,6 +530,19 @@ mod tests {
         let missing = Path::new("/definitely/not/a/real/flake/dir");
         let err = NixCliEvaluator::canonical_flake(missing).unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
+    }
+
+    #[test]
+    fn meta_eval_args_forces_impure() {
+        // Regression: the per-host metadata expression `builtins.import`s the
+        // absolute flake path, which pure eval rejects with "access to absolute
+        // path ... is forbidden in pure eval mode". The `nix eval` argv must
+        // therefore carry `--impure` (the matrix `#nixosConfigurations` call is
+        // pure-mode-safe and unchanged).
+        let args = NixCliEvaluator::meta_eval_args("some-expr");
+        assert!(args.iter().any(|a| a == "--impure"));
+        assert_eq!(args[0], "eval");
+        assert!(args.iter().any(|a| a == "--expr"));
     }
 
     #[test]

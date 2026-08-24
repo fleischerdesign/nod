@@ -83,10 +83,12 @@
             '';
           };
           identityFile = lib.mkOption {
-            type = lib.types.nullOr lib.types.path;
+            type = lib.types.nullOr lib.types.str;
             default = null;
             description = ''
-              Path to the SSH private key used for authentication.
+              Path to the SSH private key used for authentication. Accepts a
+              string (e.g. "~/.ssh/id_ed25519") or an absolute path; the value
+              is forwarded verbatim to `ssh -i` / `NIX_SSHOPTS`.
             '';
           };
           proxyJump = lib.mkOption {
