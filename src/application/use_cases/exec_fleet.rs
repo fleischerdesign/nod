@@ -13,11 +13,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::application::context::AppContext;
+use crate::application::spawn;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 use crate::domain::ssh_args::build_ssh_args;
@@ -226,53 +226,31 @@ async fn run_local(
     start: Instant,
 ) -> ExecResult {
     let exec = build_local_args(command, sudo);
-    let program = exec[0].clone();
-    let mut args = Vec::<String>::new();
-    for (index, part) in exec.iter().enumerate() {
-        if index > 0 {
-            args.push(part.clone());
-        }
-    }
+    let (program, args) = spawn::split_program_args(&exec);
     run_process(host, &program, &args, start).await
 }
 
 /// Spawns `program` with `args`, capturing stdout/stderr and the numeric
-/// exit status into an [`ExecResult`]. A spawn failure surfaces as a
-/// per-host failure with a launch message (`docs/spec/exec-command.spec.md`).
+/// exit status into an [`ExecResult`]. Delegates the spawn + capture to the
+/// shared transport helper ([`spawn::run_captured`]) and wraps the captured
+/// outcome with the host identity and wall-clock duration. A spawn failure
+/// surfaces as a per-host failure with a launch message
+/// (`docs/spec/exec-command.spec.md`).
 async fn run_process(
     host: &HostEntity,
     program: &str,
     args: &[String],
     start: Instant,
 ) -> ExecResult {
-    let mut process = Command::new(program);
-    process.args(args);
-    let output = process.output().await;
-    let duration_ms = elapsed_ms(start);
-    match output {
-        Ok(output) => {
-            let exit_code = output.status.code().unwrap_or(1);
-            let success = output.status.success();
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            ExecResult::new(
-                host.name.clone(),
-                exit_code,
-                stdout,
-                stderr,
-                duration_ms,
-                success,
-            )
-        }
-        Err(_) => ExecResult::new(
-            host.name.clone(),
-            1,
-            String::new(),
-            format!("failed to launch `{program}` for {}", host.name),
-            duration_ms,
-            false,
-        ),
-    }
+    let captured = spawn::run_captured(program, args, &host.name).await;
+    ExecResult::new(
+        host.name.clone(),
+        captured.exit_code,
+        captured.stdout,
+        captured.stderr,
+        elapsed_ms(start),
+        captured.success,
+    )
 }
 
 /// Converts the elapsed time into whole milliseconds.

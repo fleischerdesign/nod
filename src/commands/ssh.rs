@@ -8,10 +8,10 @@
 //! ssh(1).
 
 use std::path::Path;
-use tokio::process::Command;
 
 use crate::application::context::AppContext;
 use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::spawn::{run_inherited, split_program_args};
 use crate::domain::errors::NodError;
 use crate::domain::ssh_args::build_ssh_args;
 
@@ -60,21 +60,16 @@ pub async fn execute(
 
 /// Runs an external program, inheriting stdio from the invoking terminal.
 /// A non-zero exit or a launch failure surfaces as a typed `NodError`.
+/// Delegates the spawn + exit-status mapping to the shared transport helper
+/// ([`run_inherited`]) with the `nod ssh` error contract.
 async fn run_process(program: &str, args: &[String]) -> Result<(), NodError> {
-    let mut process = Command::new(program);
-    process.args(args);
-    let status = process.status().await;
-    if status.is_err() {
-        return Err(NodError::deployment(format!(
-            "failed to launch `{program}`"
-        )));
-    }
-    if !status.unwrap().success() {
-        return Err(NodError::deployment(format!(
-            "`{program}` reported failure"
-        )));
-    }
-    Ok(())
+    run_inherited(
+        program,
+        args,
+        || NodError::deployment(format!("failed to launch `{program}`")),
+        || NodError::deployment(format!("`{program}` reported failure")),
+    )
+    .await
 }
 
 /// Runs a command (or opens an interactive shell) locally, for a directly
@@ -92,15 +87,27 @@ async fn run_local(sudo: bool, command: &[String]) -> Result<(), NodError> {
     if sudo {
         exec.push("sudo".to_string());
     }
-    for part in command {
-        exec.push(part.clone());
-    }
-    let program = exec[0].clone();
-    let mut args = Vec::<String>::new();
-    for (index, part) in exec.iter().enumerate() {
-        if index > 0 {
-            args.push(part.clone());
-        }
-    }
+    exec.extend(command.iter().cloned());
+    let (program, args) = split_program_args(&exec);
     run_process(&program, &args).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_ssh_runs_argv0_directly_not_through_a_shell() {
+        // `nod ssh <local> -- <cmd> args` runs <cmd> directly: argv[0] is the
+        // program and the rest are its arguments. This diverges deliberately
+        // from the exec-fleet transport, which builds a single `sh -c` line
+        // (see `exec_fleet::build_local_args`) so shell pipelines/globs work
+        // on the remote side. The shared [`split_program_args`] keeps the
+        // split rule in one place while the two contracts stay distinct.
+        let exec = vec!["uname".to_string(), "-a".to_string()];
+        let (program, args) = split_program_args(&exec);
+        assert_eq!(program, "uname");
+        assert_eq!(args, ["-a"]);
+        assert_ne!(program, "sh");
+    }
 }
