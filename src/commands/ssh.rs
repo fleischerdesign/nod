@@ -88,7 +88,8 @@ async fn run_local(sudo: bool, command: &[String]) -> Result<(), NodError> {
         exec.push("sudo".to_string());
     }
     exec.extend(command.iter().cloned());
-    let (program, args) = split_program_args(&exec);
+    let (program, args) =
+        split_program_args(&exec).expect("exec is non-empty: sudo-suffixed or a non-empty command");
     run_process(&program, &args).await
 }
 
@@ -105,7 +106,7 @@ mod tests {
         // on the remote side. The shared [`split_program_args`] keeps the
         // split rule in one place while the two contracts stay distinct.
         let exec = vec!["uname".to_string(), "-a".to_string()];
-        let (program, args) = split_program_args(&exec);
+        let (program, args) = split_program_args(&exec).unwrap();
         assert_eq!(program, "uname");
         assert_eq!(args, ["-a"]);
         assert_ne!(program, "sh");

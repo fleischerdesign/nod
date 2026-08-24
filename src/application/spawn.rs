@@ -18,13 +18,16 @@
 use crate::domain::errors::NodError;
 use tokio::process::Command;
 
-/// Splits `["prog", "a", "b"]` into `("prog", ["a", "b"])`: argv[0] is the
-/// program and everything after it is an argument. Shared by the `nod ssh`
+/// Splits `["prog", "a", "b"]` into `Some(("prog", ["a", "b"]))`: argv[0] is
+/// the program and everything after it is an argument. Shared by the `nod ssh`
 /// and exec local runners so the split rule lives in one place.
-pub fn split_program_args(argv: &[String]) -> (String, Vec<String>) {
-    let program = argv[0].clone();
+///
+/// Returns `None` when `argv` is empty — the caller is expected to produce a
+/// non-empty argv before calling, so an empty slice is a programming error.
+pub fn split_program_args(argv: &[String]) -> Option<(String, Vec<String>)> {
+    let program = argv.first()?.clone();
     let args = argv[1..].to_vec();
-    (program, args)
+    Some((program, args))
 }
 
 /// Runs `program` with `args`, inheriting stdio from the invoking terminal so
@@ -91,7 +94,7 @@ mod tests {
     #[test]
     fn split_program_args_keeps_first_word_as_program() {
         let argv = vec!["uname".to_string(), "-a".to_string(), "-r".to_string()];
-        let (program, args) = split_program_args(&argv);
+        let (program, args) = split_program_args(&argv).unwrap();
         assert_eq!(program, "uname");
         assert_eq!(args, ["-a", "-r"]);
     }
@@ -99,9 +102,15 @@ mod tests {
     #[test]
     fn split_program_args_handles_a_bare_program() {
         let argv = vec!["uptime".to_string()];
-        let (program, args) = split_program_args(&argv);
+        let (program, args) = split_program_args(&argv).unwrap();
         assert_eq!(program, "uptime");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn split_program_args_rejects_an_empty_slice() {
+        let argv: Vec<String> = Vec::new();
+        assert_eq!(split_program_args(&argv), None);
     }
 
     #[tokio::test]

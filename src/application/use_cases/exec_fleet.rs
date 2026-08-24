@@ -226,7 +226,8 @@ async fn run_local(
     start: Instant,
 ) -> ExecResult {
     let exec = build_local_args(command, sudo);
-    let (program, args) = spawn::split_program_args(&exec);
+    let (program, args) =
+        spawn::split_program_args(&exec).expect("build_local_args always yields a non-empty argv");
     run_process(host, &program, &args, start).await
 }
 
