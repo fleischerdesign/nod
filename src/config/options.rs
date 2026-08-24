@@ -333,10 +333,13 @@ pub enum Commands {
         identity_file: Option<String>,
     },
 
-    /// Roll a host or fleet back to its previous NixOS profile generation
+    /// Revert exactly one host to its previous NixOS profile generation
+    ///
+    /// Rollback is single-host: matching more than one host is rejected
+    /// rather than silently operating on a subset of the fleet.
     Rollback {
         /// Target host: 'local', a host name or glob, or 'all'
-        /// (defaults to 'local')
+        /// (defaults to 'local'); rollback targets exactly one host
         target: Option<String>,
 
         /// Custom path to flake root directory
@@ -362,11 +365,6 @@ pub enum Commands {
         /// Override the SSH port for the target
         #[arg(long, value_name = "PORT")]
         port: Option<u16>,
-
-        /// Roll back to a specific prior generation instead of the newest
-        /// known-good profile
-        #[arg(long, value_name = "N")]
-        generation: Option<u32>,
     },
 
     /// Detect configuration drift between live closures and the flake
@@ -775,18 +773,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_rollback_target_tag_role_all_and_generation() {
+    fn parses_rollback_target_tag_role_and_all() {
         let roll = Cli::try_parse_from(vec![
-            "nod",
-            "rollback",
-            "atlas",
-            "--tag",
-            "server",
-            "--role",
-            "db",
-            "--all",
-            "--generation",
-            "3",
+            "nod", "rollback", "atlas", "--tag", "server", "--role", "db", "--all",
         ])
         .expect("valid rollback invocation should parse");
         match roll.command {
@@ -795,7 +784,6 @@ mod tests {
                 tag,
                 role,
                 all,
-                generation: gen,
                 flake,
                 user,
                 port,
@@ -804,7 +792,6 @@ mod tests {
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("db".to_string()));
                 assert!(all);
-                assert_eq!(gen, Some(3));
                 let _ = (flake, user, port);
             }
             _ => panic!("expected a rollback command"),

@@ -6,13 +6,19 @@
 
 use std::sync::Arc;
 
+use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
-use crate::domain::host::HostEntity;
+use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::audit_store::AuditStorePort;
 use crate::domain::ports::config_store::ConfigStorePort;
 use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
+use crate::infrastructure::config::toml_config::TomlConfigStore;
+use crate::infrastructure::deployment::local_deployer::LocalDeployer;
+use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
+use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
+use std::path::Path;
 
 /// Resolves every port a use case may need from one seeded container.
 pub struct AppContext {
@@ -42,6 +48,25 @@ impl AppContext {
         }
     }
 
+    /// Builds the complete production graph (ADR-008). This is the single
+    /// composition root: `main` calls it for every command arm and passes the
+    /// resulting context into `execute`.
+    ///
+    /// Whereas [`AppContext::new`] takes arbitrary ports (for tests and
+    /// dependency-free contexts), `production` binds the real evaluator, both
+    /// deployers and a [`TomlConfigStore`] as the `ConfigStorePort`. The audit
+    /// store is deliberately NOT bound here: it is an opt-in per-command
+    /// binding (`audit` wires it via [`AppContext::with_audit_store`] at a
+    /// single call site in `main`).
+    pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<Self, NodError> {
+        Ok(Self::new(
+            Arc::new(NixCliEvaluator::new()),
+            Arc::new(LocalDeployer::new()),
+            Arc::new(SshCliDeployer::new()),
+        )
+        .with_config_store(Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?)))
+    }
+
     /// Resolves the evaluator port.
     pub fn evaluator(&self) -> Arc<dyn EvaluatorPort> {
         self.evaluator.clone()
@@ -53,6 +78,21 @@ impl AppContext {
             self.local_deployer.clone()
         } else {
             self.ssh_deployer.clone()
+        }
+    }
+
+    /// Resolves the *effective* connection profile for `host` (ADR-007, AC1).
+    ///
+    /// With a bound [`ConfigStorePort`] this is the full four-tier resolved
+    /// profile from `config_store.resolve(host)`. Without one it falls back to
+    /// [`SshProfile::for_host(host)`] — a deliberate, documented *primitive*
+    /// (non-resolved) profile for dependency-free contexts (tests, standalone
+    /// `ssh`/`exec` when no config store is wired). The fallback is explicit
+    /// and documented, never a silent widening.
+    pub async fn resolved_profile(&self, host: &HostEntity) -> Result<SshProfile, NodError> {
+        match &self.config_store {
+            Some(store) => store.resolve(host).await,
+            None => Ok(SshProfile::for_host(host)),
         }
     }
 
@@ -105,7 +145,7 @@ impl AppContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::config::{FleetDefaults, HostOverrides};
+    use crate::domain::config::{CliOverrides, FleetDefaults, HostOverrides};
     use crate::domain::host::{BuilderHost, SshProfile};
     use crate::infrastructure::deployment::local_deployer::LocalDeployer;
     use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
@@ -146,9 +186,32 @@ mod tests {
         FakeAuditStore {}
         #[async_trait]
         impl AuditStorePort for FakeAuditStore {
-            async fn record(&self, host: &HostEntity, outcome: &str) -> Result<(), NodError>;
+            async fn record(&self, host_name: &str, outcome: &str) -> Result<(), NodError>;
             async fn entries(&self, host: Option<String>, limit: Option<usize>) -> Result<Vec<crate::domain::audit::AuditEntry>, NodError>;
         }
+    }
+
+    #[tokio::test]
+    async fn production_is_a_single_composition_root_binding_the_config_store() {
+        // AC1/AC3: `production` wires the real graph and binds the config
+        // store, so `resolved_profile` honours merged overrides instead of
+        // falling back to the primitive `SshProfile::for_host`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".nod.toml"),
+            "[hosts.atlas]\nuser = \"philipp\"\n",
+        )
+        .unwrap();
+        let ctx = AppContext::production(dir.path(), CliOverrides::default()).unwrap();
+        let host = HostEntity::new("atlas", "10.0.0.8", false);
+        let profile = ctx.resolved_profile(&host).await.unwrap();
+        assert_eq!(
+            profile.user(),
+            "philipp",
+            "production must bind the store so merged overrides apply, \
+             not the primitive fallback"
+        );
+        assert_ne!(profile, SshProfile::for_host(&host));
     }
 
     #[test]
@@ -221,6 +284,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolved_profile_without_a_config_store_falls_back_to_primitive() {
+        let ctx = AppContext::new(
+            Arc::new(NixCliEvaluator::new()),
+            Arc::new(LocalDeployer::new()),
+            Arc::new(SshCliDeployer::new()),
+        );
+        let host = HostEntity::new("atlas", "10.0.0.8", false);
+        let profile = ctx.resolved_profile(&host).await.unwrap();
+        assert_eq!(profile, SshProfile::for_host(&host));
+    }
+
+    #[tokio::test]
+    async fn resolved_profile_with_a_config_store_returns_the_store_resolution() {
+        let mut config = MockFakeConfigStore::new();
+        let host = HostEntity::new("atlas", "10.0.0.8", false);
+        let expected = SshProfile::new("philipp", 2200)
+            .with_identity_file(std::path::PathBuf::from("/tmp/id_rsa"))
+            .with_proxy_jump("bastion");
+        let expected_c = expected.clone();
+        config
+            .expect_resolve()
+            .times(1)
+            .returning(move |_| Ok(expected_c.clone()));
+
+        let ctx = AppContext::new(
+            Arc::new(NixCliEvaluator::new()),
+            Arc::new(LocalDeployer::new()),
+            Arc::new(SshCliDeployer::new()),
+        )
+        .with_config_store(Arc::new(config));
+
+        let profile = ctx.resolved_profile(&host).await.unwrap();
+        assert_eq!(profile, expected);
+    }
+
+    #[tokio::test]
+    async fn resolved_profile_feeds_the_shared_argument_builder_exactly() {
+        // AC7 regression: the profile that resolved_profile returns (here from
+        // a bound store) is exactly the profile the shared build_ssh_args
+        // consumes, so identity/proxy/port flow to the SSH transport verbatim.
+        let mut config = MockFakeConfigStore::new();
+        let host = HostEntity::new("atlas", "10.0.0.8", false);
+        config.expect_resolve().times(1).returning(|_| {
+            Ok(SshProfile::new("philipp", 2200)
+                .with_identity_file(std::path::PathBuf::from("/tmp/id_rsa"))
+                .with_proxy_jump("bastion")
+                .with_extra_ssh_arg("-o KeepAlive=1".to_string()))
+        });
+
+        let ctx = AppContext::new(
+            Arc::new(NixCliEvaluator::new()),
+            Arc::new(LocalDeployer::new()),
+            Arc::new(SshCliDeployer::new()),
+        )
+        .with_config_store(Arc::new(config));
+
+        let profile = ctx.resolved_profile(&host).await.unwrap();
+        let args = crate::domain::ssh_args::build_ssh_args(
+            &profile,
+            &host.target_host,
+            false,
+            &["true".to_string()],
+        );
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "2200",
+                "-i",
+                "/tmp/id_rsa",
+                "-J",
+                "bastion",
+                "-o KeepAlive=1",
+                "philipp@10.0.0.8",
+                "true"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn optional_services_register_and_dispatch_to_their_mocks() {
         let mut config = MockFakeConfigStore::new();
         config
@@ -259,7 +402,11 @@ mod tests {
             .unwrap();
         assert!(healthy);
 
-        let recorded = ctx.audit_store().unwrap().record(&host, "completed").await;
+        let recorded = ctx
+            .audit_store()
+            .unwrap()
+            .record(&host.name, "completed")
+            .await;
         assert!(recorded.is_ok());
     }
 }

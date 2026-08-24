@@ -7,15 +7,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::TargetSelection;
+use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
 use crate::application::use_cases::detect_drift::{DetectDriftUseCase, DriftReport};
-use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
-use crate::infrastructure::config::toml_config::TomlConfigStore;
-use crate::infrastructure::deployment::local_deployer::LocalDeployer;
-use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
-use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 
 /// One JSON row of the drift report (`--json` shape).
 #[derive(Debug, Serialize)]
@@ -55,7 +50,9 @@ impl DriftRow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
+    ctx: AppContext,
     flake_path: &Path,
     verbose: bool,
     target: Option<&str>,
@@ -64,13 +61,6 @@ pub async fn execute(
     all: bool,
     json: bool,
 ) -> Result<(), NodError> {
-    let config_store = TomlConfigStore::new(flake_path, CliOverrides::default())?;
-    let ctx = AppContext::new(
-        Arc::new(NixCliEvaluator::new()),
-        Arc::new(LocalDeployer::new()),
-        Arc::new(SshCliDeployer::new()),
-    )
-    .with_config_store(Arc::new(config_store));
     let evaluator = ctx.evaluator();
     let store = ctx.config_store()?;
 
@@ -78,24 +68,19 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (effective_target, effective_all) =
-        if !all && target.is_none() && tag.is_none() && role.is_none() {
-            (Some("local"), false)
-        } else {
-            (target, all)
-        };
-    let targets = TargetSelection::select(
+    let targets = resolve_targets(
         hosts,
-        effective_target,
+        &local_hostname,
+        target,
         tag,
         role,
-        effective_all,
-        &local_hostname,
+        all,
+        DefaultScope::Local,
     );
 
     if targets.is_empty() {
         return Err(TargetSelection::unmatched(
-            effective_target.unwrap_or("all"),
+            target.unwrap_or("local"),
             tag,
             role,
         ));

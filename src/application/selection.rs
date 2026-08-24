@@ -8,6 +8,53 @@
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 
+/// Which host set to target when no `target`/`tag`/`role` and `!all` is
+/// given (ADR-008). The deploy lifecycle and `exec` default to local; `status`
+/// observers the whole fleet by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultScope {
+    /// `(Some("local"), false)` — target this machine.
+    Local,
+    /// `(None, true)` — every discovered host.
+    All,
+}
+
+/// Centralized target resolution (ADR-008): selects from `hosts` applying the
+/// name/`--all` selector and the optional `tag`/`role` filters. When no
+/// criterion is given at all, `default_scope` decides between targeting the
+/// local host and selecting the whole fleet, removing the copy-pasted
+/// default-when-empty block each command previously hand-rolled.
+///
+/// Delegates to [`TargetSelection::select`]; it is a pure selection function
+/// and never touches Nix or SSH.
+pub fn resolve_targets(
+    hosts: Vec<HostEntity>,
+    local_hostname: &str,
+    target: Option<&str>,
+    tag: Option<&str>,
+    role: Option<&str>,
+    all: bool,
+    default_scope: DefaultScope,
+) -> Vec<HostEntity> {
+    let (effective_target, effective_all) =
+        if !all && target.is_none() && tag.is_none() && role.is_none() {
+            match default_scope {
+                DefaultScope::Local => (Some("local"), false),
+                DefaultScope::All => (None, true),
+            }
+        } else {
+            (target, all)
+        };
+    TargetSelection::select(
+        hosts,
+        effective_target,
+        tag,
+        role,
+        effective_all,
+        local_hostname,
+    )
+}
+
 /// Pure host selection/filtering logic (target `all`, `local`, a named host
 /// or a glob, narrowed by optional tag/role filters). Extracted so it can be
 /// unit tested without Nix or SSH.
@@ -181,29 +228,6 @@ impl TargetSelection {
         }
     }
 
-    /// Filters hosts selected by the positional `target` and narrows by
-    /// optional `tag` / `role` filters (empty filters match everything).
-    ///
-    /// Compatibility shim over [`TargetSelection::select`] kept for the
-    /// deployed commands; the unified API prefers the `Option<&str>` target
-    /// and separate `all` flag.
-    pub fn select_filtered(
-        hosts: Vec<HostEntity>,
-        target: &str,
-        local_hostname: &str,
-        tag: Option<&str>,
-        role: Option<&str>,
-    ) -> Vec<HostEntity> {
-        Self::select(
-            hosts,
-            Some(target),
-            tag,
-            role,
-            target == "all",
-            local_hostname,
-        )
-    }
-
     /// Builds the "no host matched" error for the target, naming any active
     /// tag/role filters.
     pub fn unmatched(target: &str, tag: Option<&str>, role: Option<&str>) -> NodError {
@@ -221,6 +245,64 @@ impl TargetSelection {
 mod tests {
     use super::*;
     use crate::domain::host::HostRole;
+
+    // AC6: the exact divergence this refactor removes — the same empty input
+    // resolved differently by each command's hand-rolled default.
+    #[test]
+    fn resolve_targets_defaults_to_local_or_all_for_identical_empty_inputs() {
+        let local = resolve_targets(
+            fleet(),
+            "jello",
+            None,
+            None,
+            None,
+            false,
+            DefaultScope::Local,
+        );
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].name, "jello");
+
+        let all = resolve_targets(fleet(), "jello", None, None, None, false, DefaultScope::All);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn resolve_targets_forwards_given_filters_unchanged() {
+        // With an explicit criterion the default scope is ignored.
+        let via_target = resolve_targets(
+            fleet(),
+            "jello",
+            Some("atlas"),
+            None,
+            None,
+            false,
+            DefaultScope::All,
+        );
+        assert_eq!(via_target.len(), 1);
+        assert_eq!(via_target[0].name, "atlas");
+
+        let via_all = resolve_targets(
+            fleet(),
+            "jello",
+            None,
+            None,
+            None,
+            true,
+            DefaultScope::Local,
+        );
+        assert_eq!(via_all.len(), 3);
+
+        let via_tag = resolve_targets(
+            fleet(),
+            "jello",
+            None,
+            Some("server"),
+            None,
+            false,
+            DefaultScope::Local,
+        );
+        assert_eq!(via_tag.len(), 2);
+    }
 
     fn fleet() -> Vec<HostEntity> {
         let mut jello = HostEntity::new("jello", "jello-machine", true);
@@ -283,64 +365,6 @@ mod tests {
     fn select_unknown_target_returns_empty() {
         let hosts = TargetSelection::select(fleet(), Some("nowhere"), None, None, false, "jello");
         assert!(hosts.is_empty());
-    }
-
-    #[test]
-    fn select_filtered_by_tag_narrows_the_target() {
-        let hosts = TargetSelection::select_filtered(fleet(), "all", "jello", Some("server"), None);
-        assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].name, "atlas");
-        assert_eq!(hosts[1].name, "orbit");
-    }
-
-    #[test]
-    fn select_filtered_by_role_narrows_the_target() {
-        let hosts =
-            TargetSelection::select_filtered(fleet(), "all", "jello", None, Some("desktop"));
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].name, "jello");
-    }
-
-    #[test]
-    fn select_filtered_combines_tag_and_role() {
-        let hosts = TargetSelection::select_filtered(
-            fleet(),
-            "all",
-            "jello",
-            Some("server"),
-            Some("server"),
-        );
-        assert_eq!(hosts.len(), 2);
-
-        let no_match = TargetSelection::select_filtered(
-            fleet(),
-            "all",
-            "jello",
-            Some("prod"),
-            Some("desktop"),
-        );
-        assert!(no_match.is_empty());
-    }
-
-    #[test]
-    fn select_filtered_applies_to_a_named_target() {
-        let hosts = TargetSelection::select_filtered(fleet(), "atlas", "jello", Some("prod"), None);
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].name, "atlas");
-
-        let none =
-            TargetSelection::select_filtered(fleet(), "atlas", "jello", Some("laptop"), None);
-        assert!(none.is_empty());
-    }
-
-    #[test]
-    fn select_filtered_without_filters_preserves_target_behavior() {
-        let hosts = TargetSelection::select_filtered(fleet(), "all", "jello", None, None);
-        assert_eq!(hosts.len(), 3);
-
-        let local = TargetSelection::select_filtered(fleet(), "local", "jello", None, None);
-        assert_eq!(local.len(), 1);
-        assert_eq!(local[0].name, "jello");
     }
 
     // --- ADR-006: exact name match ---

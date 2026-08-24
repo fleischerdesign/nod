@@ -3,9 +3,7 @@ use clap::Parser;
 use nod::application::context::AppContext;
 use nod::config::options::{Cli, Commands};
 use nod::domain::config::CliOverrides;
-use nod::infrastructure::deployment::local_deployer::LocalDeployer;
-use nod::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
-use nod::infrastructure::nix::cli_evaluator::NixCliEvaluator;
+use nod::infrastructure::storage::json_audit_store::JsonAuditStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -38,12 +36,13 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: identity_file.map(PathBuf::from),
             };
+            let ctx = AppContext::production(Path::new(&flake), overrides)?;
             nod::commands::switch::execute(
+                ctx,
                 target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
                 cli.quiet,
-                overrides,
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -78,12 +77,14 @@ async fn main() -> Result<()> {
                 port,
                 identity_file,
             };
+            let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
+            let ctx = AppContext::production(flake_path, overrides)?;
             nod::commands::test::execute(
+                ctx,
                 target.as_deref(),
-                flake.as_deref(),
+                Some(flake_path),
                 cli.verbose,
                 cli.quiet,
-                overrides,
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -115,12 +116,14 @@ async fn main() -> Result<()> {
                 port,
                 identity_file,
             };
+            let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
+            let ctx = AppContext::production(flake_path, overrides)?;
             nod::commands::boot::execute(
+                ctx,
                 target.as_deref(),
-                flake.as_deref(),
+                Some(flake_path),
                 cli.verbose,
                 cli.quiet,
-                overrides,
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -142,12 +145,14 @@ async fn main() -> Result<()> {
             out_link,
             concurrency,
         } => {
+            let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
+            let ctx = AppContext::production(flake_path, CliOverrides::default())?;
             nod::commands::build::execute(
+                ctx,
                 target.as_deref(),
-                flake.as_deref(),
+                Some(flake_path),
                 cli.verbose,
                 cli.quiet,
-                CliOverrides::default(),
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -167,7 +172,9 @@ async fn main() -> Result<()> {
             role,
             all,
         } => {
+            let ctx = AppContext::production(Path::new(&flake), CliOverrides::default())?;
             nod::commands::status::execute(
+                ctx,
                 Path::new(&flake),
                 cli.verbose,
                 tag.as_deref(),
@@ -192,11 +199,12 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: identity_file.map(PathBuf::from),
             };
+            let ctx = AppContext::production(Path::new(&flake), overrides)?;
             nod::commands::diff::execute(
+                ctx,
                 target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
-                overrides,
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -218,11 +226,12 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: identity_file.map(PathBuf::from),
             };
+            let ctx = AppContext::production(Path::new(&flake), overrides)?;
             nod::commands::plan::execute(
+                ctx,
                 target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
-                overrides,
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -237,18 +246,18 @@ async fn main() -> Result<()> {
             all,
             user,
             port,
-            generation: _,
         } => {
             let overrides = CliOverrides {
                 user,
                 port,
                 identity_file: None,
             };
+            let ctx = AppContext::production(Path::new(&flake), overrides)?;
             nod::commands::rollback::execute(
+                ctx,
                 target.as_deref(),
                 Path::new(&flake),
                 cli.verbose,
-                overrides,
                 tag.as_deref(),
                 role.as_deref(),
                 all,
@@ -262,7 +271,9 @@ async fn main() -> Result<()> {
             all,
             json,
         } => {
+            let ctx = AppContext::production(Path::new("."), CliOverrides::default())?;
             nod::commands::drift::execute(
+                ctx,
                 Path::new("."),
                 cli.verbose,
                 target.as_deref(),
@@ -278,7 +289,10 @@ async fn main() -> Result<()> {
             limit,
             json,
         } => {
-            nod::commands::audit::execute(target.as_deref(), limit, json).await?;
+            // `audit` binds the audit store explicitly on the production graph.
+            let ctx = AppContext::production(Path::new("."), CliOverrides::default())?
+                .with_audit_store(Arc::new(JsonAuditStore::new()));
+            nod::commands::audit::execute(ctx, target.as_deref(), limit, json).await?;
         }
         Commands::Ssh {
             target,
@@ -287,14 +301,13 @@ async fn main() -> Result<()> {
             sudo,
             command,
         } => {
-            let ctx = AppContext::new(
-                Arc::new(NixCliEvaluator::new()),
-                Arc::new(LocalDeployer::new()),
-                Arc::new(SshCliDeployer::new()),
-            );
+            // AC3: `ssh` receives a production context with a flake path (`.`
+            // by default), so resolved identity/proxy/port from the config
+            // store are honoured instead of the primitive fallback.
+            let ctx = AppContext::production(Path::new("."), CliOverrides::default())?;
             nod::commands::ssh::execute(
                 ctx,
-                None,
+                Some(Path::new(".")),
                 target.as_deref(),
                 tag.as_deref(),
                 role.as_deref(),
@@ -315,14 +328,11 @@ async fn main() -> Result<()> {
             json,
             command,
         } => {
-            let ctx = AppContext::new(
-                Arc::new(NixCliEvaluator::new()),
-                Arc::new(LocalDeployer::new()),
-                Arc::new(SshCliDeployer::new()),
-            );
+            let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
+            let ctx = AppContext::production(flake_path, CliOverrides::default())?;
             nod::commands::exec::execute(
                 ctx,
-                flake.as_deref(),
+                Some(flake_path),
                 target.as_deref(),
                 tag.as_deref(),
                 role.as_deref(),
@@ -336,7 +346,8 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Dashboard { flake } => {
-            nod::commands::dashboard::execute(Path::new(&flake)).await?;
+            let ctx = AppContext::production(Path::new(&flake), CliOverrides::default())?;
+            nod::commands::dashboard::execute(ctx, Path::new(&flake)).await?;
         }
     }
 

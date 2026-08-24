@@ -146,7 +146,7 @@ mod tests {
         checker
             .expect_verify_health()
             .times(1)
-            .returning(|_| Err(NodError::healthcheck("systemctl failed to launch")));
+            .returning(|_| Err(NodError::health_check("systemctl failed to launch")));
 
         let ctx = ctx_with(checker);
         let use_case = HealthCheckUseCase::new(ctx);

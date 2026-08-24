@@ -200,9 +200,14 @@ fn render_logs(f: &mut Frame, area: Rect, app: &DashboardApp) {
 }
 
 /// Keybinding help along the bottom edge.
+///
+/// The `s`/`r`/`d` keys are PREVIEW/LOG intents only — they record the intent
+/// in the operation log, they do not perform a live switch/rollback/diff. They
+/// are labelled as such so they are never presented as a state-changing
+/// operation they do not perform (ADR-008, AC7).
 fn draw_footer(f: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(Line::from(
-        "[q] Quit | [j/k] Navigate | [s] Switch | [d] Diff | [r] Rollback | [Tab] Switch Pane",
+        "[q] Quit | [j/k] Navigate | [s] preview switch | [r] preview rollback | [d] preview diff | [Tab] Switch Pane",
     ))
     .style(Style::new().fg(Color::DarkGray))
     .centered();

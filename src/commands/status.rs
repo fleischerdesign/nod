@@ -2,16 +2,13 @@
 
 use colored::Colorize;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::TargetSelection;
+use crate::application::selection::{resolve_targets, DefaultScope};
 use crate::domain::errors::NodError;
-use crate::infrastructure::deployment::local_deployer::LocalDeployer;
-use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
-use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 
 pub async fn execute(
+    ctx: AppContext,
     flake_path: &Path,
     verbose: bool,
     tag: Option<&str>,
@@ -19,11 +16,6 @@ pub async fn execute(
     target: Option<&str>,
     all: bool,
 ) -> Result<(), NodError> {
-    let ctx = AppContext::new(
-        Arc::new(NixCliEvaluator::new()),
-        Arc::new(LocalDeployer::new()),
-        Arc::new(SshCliDeployer::new()),
-    );
     let evaluator = ctx.evaluator();
 
     let hosts = evaluator.discover_hosts(flake_path, verbose).await?;
@@ -33,9 +25,15 @@ pub async fn execute(
         .unwrap_or_default();
 
     // No target and no filters defaults to showing every discovered host.
-    let all_effective = all || (target.is_none() && tag.is_none() && role.is_none());
-    let selected =
-        TargetSelection::select(hosts, target, tag, role, all_effective, &local_hostname);
+    let selected = resolve_targets(
+        hosts,
+        &local_hostname,
+        target,
+        tag,
+        role,
+        all,
+        DefaultScope::All,
+    );
 
     if selected.is_empty() {
         return Err(NodError::config(

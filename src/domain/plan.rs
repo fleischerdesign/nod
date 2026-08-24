@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::domain::host::BuilderHost;
+use crate::domain::host::{BuilderHost, HostEntity};
 
 /// What an individual target plan asks the pipeline to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +115,14 @@ impl DeploymentOptions {
         }
     }
 
+    /// `default_policy` for the given `action`, for planning helpers that
+    /// only carry the action (see [`DeploymentPlan::from_hosts`]).
+    pub fn default_for(action: DeploymentAction) -> Self {
+        let mut options = Self::default_policy();
+        options.action = action;
+        options
+    }
+
     /// Returns `true` when no host should be activated.
     pub fn is_dry_run(&self) -> bool {
         self.dry_run || self.action == DeploymentAction::DryRun
@@ -160,6 +168,26 @@ impl DeploymentPlan {
     /// Returns the number of staged targets.
     pub fn size(&self) -> usize {
         self.targets.len()
+    }
+
+    /// Builds a plan for `hosts` without resolving closures (dry-run /
+    /// preview): every target carries `action` and no `new_closure` /
+    /// `current_closure`. The plan's options default to `default_for(action)`;
+    /// callers that need a full policy override `options` afterwards.
+    pub fn from_hosts(hosts: Vec<HostEntity>, action: DeploymentAction) -> DeploymentPlan {
+        let targets = hosts
+            .into_iter()
+            .map(|host| TargetPlan {
+                host_name: host.name,
+                action: action.clone(),
+                new_closure: None,
+                current_closure: None,
+            })
+            .collect();
+        DeploymentPlan {
+            targets,
+            options: DeploymentOptions::default_for(action),
+        }
     }
 
     /// Partitions target indices into rollout waves for the active strategy.

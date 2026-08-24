@@ -4,13 +4,12 @@ use async_trait::async_trait;
 
 use crate::domain::audit::AuditEntry;
 use crate::domain::errors::NodError;
-use crate::domain::host::HostEntity;
 
 /// Persists deployment outcomes for auditability and rollback recovery.
 #[async_trait]
 pub trait AuditStorePort: Send + Sync {
-    /// Records the outcome (`completed`, `rolled_back`, ...) for `host`.
-    async fn record(&self, host: &HostEntity, outcome: &str) -> Result<(), NodError>;
+    /// Records the `outcome` (`completed`, `rolled_back`, ...) for `host_name`.
+    async fn record(&self, host_name: &str, outcome: &str) -> Result<(), NodError>;
 
     /// Reads back the audit history. `host` narrows to a single host and
     /// `limit` caps the count to the newest entries; both are optional (a

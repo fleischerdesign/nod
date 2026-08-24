@@ -168,13 +168,12 @@ pub struct NodConfig {
     pub hooks: HooksConfig,
 }
 
-/// Merged per-host overrides exposed by the config store: TOML `[hosts.<name>]`
-/// values over `[fleet]` over `[defaults]`. `target_host`, `role`, `tags` and
-/// `description` are host-section-specific; the granular group overrides
-/// (build/rollout/health/hooks) are optional and absent when not set.
+/// The flat SSH connection override set, shared by `HostOverrides` and
+/// `FleetDefaults`. Declared once here; both parents embed it via
+/// `#[serde(flatten)]` so the serialized/constructed form of the parent
+/// structs is unchanged (flat snake_case keys, no nesting).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostOverrides {
-    pub target_host: Option<String>,
+pub struct SshConnectionOverrides {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub identity_file: Option<PathBuf>,
@@ -185,6 +184,17 @@ pub struct HostOverrides {
     pub connect_timeout_secs: Option<u32>,
     pub extra_ssh_args: Option<Vec<String>>,
     pub allow_insecure: Option<bool>,
+}
+
+/// Merged per-host overrides exposed by the config store: TOML `[hosts.<name>]`
+/// values over `[fleet]` over `[defaults]`. `target_host`, `role`, `tags` and
+/// `description` are host-section-specific; the granular group overrides
+/// (build/rollout/health/hooks) are optional and absent when not set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostOverrides {
+    #[serde(flatten)]
+    pub ssh: SshConnectionOverrides,
+    pub target_host: Option<String>,
     pub description: Option<String>,
     pub role: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -199,16 +209,8 @@ pub struct HostOverrides {
 /// inherits when it has no specific override.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetDefaults {
-    pub user: Option<String>,
-    pub port: Option<u16>,
-    pub identity_file: Option<PathBuf>,
-    pub proxy_jump: Option<String>,
-    pub proxy_command: Option<String>,
-    pub sudo: Option<bool>,
-    pub timeout_secs: Option<u32>,
-    pub connect_timeout_secs: Option<u32>,
-    pub extra_ssh_args: Option<Vec<String>>,
-    pub allow_insecure: Option<bool>,
+    #[serde(flatten)]
+    pub ssh: SshConnectionOverrides,
     pub description: Option<String>,
     pub build: Option<BuildConfig>,
     pub rollout: Option<RolloutConfig>,
@@ -371,6 +373,46 @@ mod tests {
         // Hooks group.
         assert_eq!(nod.hooks.pre_switch_hook, Some("echo pre".to_string()));
         assert_eq!(nod.hooks.post_switch_hook, Some("echo post".to_string()));
+    }
+
+    #[test]
+    fn host_overrides_ssh_fields_round_trip_with_flat_keys() {
+        let overrides = HostOverrides {
+            ssh: SshConnectionOverrides {
+                user: Some("philipp".to_string()),
+                port: Some(2222),
+                identity_file: Some(PathBuf::from("/etc/ssh/key")),
+                proxy_jump: Some("bastion.example.org".to_string()),
+                proxy_command: Some("ssh -W %d:%p bastion".to_string()),
+                sudo: Some(true),
+                timeout_secs: Some(45),
+                connect_timeout_secs: Some(12),
+                extra_ssh_args: Some(vec!["-Z".to_string()]),
+                allow_insecure: Some(true),
+            },
+            target_host: Some("10.0.0.8".to_string()),
+            description: Some("edge gateway".to_string()),
+            role: Some("server".to_string()),
+            tags: Some(vec!["prod".to_string()]),
+            build: None,
+            rollout: None,
+            health_checks: None,
+            hooks: None,
+        };
+
+        let json = serde_json::to_string(&overrides).unwrap();
+        // Flat keys, not nested under an "ssh" object (AC3 / AC6).
+        assert!(json.contains("\"user\""));
+        assert!(json.contains("\"port\""));
+        assert!(json.contains("\"identity_file\""));
+        assert!(json.contains("\"target_host\""));
+        assert!(!json.contains("\"ssh\""));
+
+        let back: HostOverrides = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, overrides);
+        assert_eq!(back.ssh.user, Some("philipp".to_string()));
+        assert_eq!(back.ssh.port, Some(2222));
+        assert_eq!(back.ssh.allow_insecure, Some(true));
     }
 
     #[test]

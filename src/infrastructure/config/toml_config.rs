@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::config::{
     BuildConfig, CliOverrides, CustomProbeConfig, FleetDefaults, HealthCheckConfig, HooksConfig,
-    HostOverrides, HttpProbeConfig, RolloutConfig, SystemdHealthConfig,
+    HostOverrides, HttpProbeConfig, RolloutConfig, SshConnectionOverrides, SystemdHealthConfig,
 };
 use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, SshProfile};
@@ -416,17 +416,19 @@ impl ConfigStorePort for TomlConfigStore {
         let merged = self.merged_for(name).ssh;
         let host = self.toml.hosts.get(name);
         Ok(HostOverrides {
+            ssh: SshConnectionOverrides {
+                user: merged.user,
+                port: merged.port,
+                identity_file: merged.identity_file,
+                proxy_jump: merged.proxy_jump,
+                proxy_command: merged.proxy_command,
+                sudo: merged.sudo,
+                timeout_secs: merged.timeout_secs,
+                connect_timeout_secs: merged.connect_timeout_secs,
+                extra_ssh_args: merged.extra_ssh_args,
+                allow_insecure: merged.allow_insecure,
+            },
             target_host: host.and_then(|h| h.target_host.clone()),
-            user: merged.user,
-            port: merged.port,
-            identity_file: merged.identity_file,
-            proxy_jump: merged.proxy_jump,
-            proxy_command: merged.proxy_command,
-            sudo: merged.sudo,
-            timeout_secs: merged.timeout_secs,
-            connect_timeout_secs: merged.connect_timeout_secs,
-            extra_ssh_args: merged.extra_ssh_args,
-            allow_insecure: merged.allow_insecure,
             description: host.and_then(|h| h.description.clone()),
             role: host.and_then(|h| h.role.clone()),
             tags: host.and_then(|h| h.tags.clone()),
@@ -443,16 +445,18 @@ impl ConfigStorePort for TomlConfigStore {
         let merged = self.base_merged().ssh;
         // CLI overrides are per-run, not fleet defaults.
         Ok(FleetDefaults {
-            user: merged.user,
-            port: merged.port,
-            identity_file: merged.identity_file,
-            proxy_jump: merged.proxy_jump,
-            proxy_command: merged.proxy_command,
-            sudo: merged.sudo,
-            timeout_secs: merged.timeout_secs,
-            connect_timeout_secs: merged.connect_timeout_secs,
-            extra_ssh_args: merged.extra_ssh_args,
-            allow_insecure: merged.allow_insecure,
+            ssh: SshConnectionOverrides {
+                user: merged.user,
+                port: merged.port,
+                identity_file: merged.identity_file,
+                proxy_jump: merged.proxy_jump,
+                proxy_command: merged.proxy_command,
+                sudo: merged.sudo,
+                timeout_secs: merged.timeout_secs,
+                connect_timeout_secs: merged.connect_timeout_secs,
+                extra_ssh_args: merged.extra_ssh_args,
+                allow_insecure: merged.allow_insecure,
+            },
             description: None,
             build: None,
             rollout: None,
@@ -609,7 +613,7 @@ mod tests {
         );
         let s = store(root, CliOverrides::default());
         let overrides = s.host_overrides("atlas").await.unwrap();
-        assert_eq!(overrides.user, Some("philipp".to_string()));
+        assert_eq!(overrides.ssh.user, Some("philipp".to_string()));
         assert_eq!(overrides.role, Some("server".to_string()));
         assert_eq!(
             overrides.tags,
@@ -629,8 +633,8 @@ mod tests {
         };
         let s = store(root, cli);
         let defaults = s.fleet_defaults().await.unwrap();
-        assert_eq!(defaults.user, Some("fleet".to_string()));
-        assert_eq!(defaults.port, Some(2222));
+        assert_eq!(defaults.ssh.user, Some("fleet".to_string()));
+        assert_eq!(defaults.ssh.port, Some(2222));
     }
 
     #[tokio::test]

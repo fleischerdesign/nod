@@ -103,18 +103,6 @@ impl DeploymentStateMachine {
         self.state.clone()
     }
 
-    /// Stable lower-case label for observability / persistence.
-    #[allow(dead_code)]
-    pub fn name(&self) -> String {
-        self.state.to_str()
-    }
-
-    /// True when `event` is the legal successor of the current state.
-    #[allow(dead_code)]
-    pub fn can(&self, event: DeploymentEvent) -> bool {
-        Self::target_of(self.state.clone(), event.clone()).is_some()
-    }
-
     /// Advances the machine one step, or raises an invariant error when the
     /// event is not legal from the current state.
     pub fn tick(&mut self, event: DeploymentEvent) -> Result<DeploymentState, NodError> {

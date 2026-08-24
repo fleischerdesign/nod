@@ -109,6 +109,11 @@ impl HostEntity {
     }
 
     /// Derives the connection descriptor (SshProfile) for this host.
+    ///
+    /// This is a *primitive, non-resolved* profile (user/port/sudo only) and
+    /// must not be mistaken for the effective profile. Authoritative
+    /// resolution is `ConfigStorePort::resolve` / `AppContext::resolved_profile`
+    /// (ADR-007); this convenience is for discovery-oriented contexts.
     pub fn ssh_profile(&self) -> SshProfile {
         SshProfile::for_host(self)
     }

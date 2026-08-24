@@ -10,7 +10,7 @@ use std::time::Instant;
 use tokio::process::Command;
 
 use crate::domain::errors::NodError;
-use crate::domain::host::HostEntity;
+use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::deployer::DeployerPort;
 
 /// Deploys local hosts through `sudo <closure>/bin/switch-to-configuration`.
@@ -36,7 +36,11 @@ impl DeployerPort for LocalDeployer {
         Ok(true)
     }
 
-    async fn current_closure(&self, _host: &HostEntity) -> Result<Option<PathBuf>, NodError> {
+    async fn current_closure(
+        &self,
+        _host: &HostEntity,
+        _profile: &SshProfile,
+    ) -> Result<Option<PathBuf>, NodError> {
         // The live local closure is the `/run/current-system` link. Reading
         // the link so the store path is comparable to a fresh `nix build`
         // output (both resolve under `/nix/store/...`).
@@ -51,6 +55,7 @@ impl DeployerPort for LocalDeployer {
     async fn deploy_and_activate(
         &self,
         host: &HostEntity,
+        _profile: &SshProfile,
         closure: &Path,
         action: &str,
         verbose: bool,
@@ -85,7 +90,7 @@ impl DeployerPort for LocalDeployer {
         Ok(())
     }
 
-    async fn rollback(&self, host: &HostEntity) -> Result<(), NodError> {
+    async fn rollback(&self, host: &HostEntity, _profile: &SshProfile) -> Result<(), NodError> {
         println!(
             "  {}",
             format!(

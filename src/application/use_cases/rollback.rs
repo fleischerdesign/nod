@@ -21,6 +21,7 @@ impl RollbackUseCase {
     /// Rolls `host` back through the deployer its target resolved to.
     pub async fn execute(&self, host: &HostEntity) -> Result<(), NodError> {
         let deployer = self.ctx.deployer_for(host);
-        deployer.rollback(host).await
+        let profile = self.ctx.resolved_profile(host).await?;
+        deployer.rollback(host, &profile).await
     }
 }

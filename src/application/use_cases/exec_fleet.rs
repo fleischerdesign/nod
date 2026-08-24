@@ -17,8 +17,10 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::application::context::AppContext;
 use crate::domain::errors::NodError;
-use crate::domain::host::{HostEntity, SshProfile};
+use crate::domain::host::HostEntity;
+use crate::domain::ssh_args::build_ssh_args;
 
 /// Exit code reported for a host that never started because `--fail-fast`
 /// aborted the run after an earlier host failed.
@@ -83,9 +85,17 @@ impl ExecResult {
 }
 
 /// Fleet remote-command policy executor.
-pub struct ExecFleetUseCase;
+pub struct ExecFleetUseCase {
+    ctx: Arc<AppContext>,
+}
 
 impl ExecFleetUseCase {
+    /// Builds the use case over a seeded context, from which connection
+    /// profiles are resolved (ADR-007).
+    pub fn new(ctx: Arc<AppContext>) -> Self {
+        Self { ctx }
+    }
+
     /// Runs `command` across `hosts`, at most `concurrency` at once.
     ///
     /// Every host is spawned immediately but each must acquire a semaphore
@@ -93,6 +103,7 @@ impl ExecFleetUseCase {
     /// failing host flips the shared abort flag; hosts that acquire a permit
     /// afterwards return a skipped `ExecResult` and never touch the transport.
     pub async fn execute(
+        &self,
         hosts: Vec<HostEntity>,
         command: Vec<String>,
         concurrency: usize,
@@ -119,9 +130,10 @@ impl ExecFleetUseCase {
             let sem_c = sem.clone();
             let abort_c = abort.clone();
             let command_c = command.clone();
-            set.spawn(
-                async move { run_one(host, command_c, sudo, fail_fast, sem_c, abort_c).await },
-            );
+            let ctx_c = self.ctx.clone();
+            set.spawn(async move {
+                run_one(ctx_c, host, command_c, sudo, fail_fast, sem_c, abort_c).await
+            });
         }
 
         Ok(set.join_all().await)
@@ -131,6 +143,7 @@ impl ExecFleetUseCase {
 /// Executes the command for one host under a semaphore permit (ADR-005),
 /// honouring the shared `--fail-fast` abort flag.
 async fn run_one(
+    ctx: Arc<AppContext>,
     host: HostEntity,
     command: Vec<String>,
     sudo: bool,
@@ -161,7 +174,19 @@ async fn run_one(
     let result = if host.is_local {
         run_local(&host, &command, sudo, start).await
     } else {
-        let profile = SshProfile::for_host(&host);
+        let profile = match ctx.resolved_profile(&host).await {
+            Ok(profile) => profile,
+            Err(err) => {
+                return ExecResult::new(
+                    host.name.clone(),
+                    1,
+                    String::new(),
+                    format!("failed to resolve connection profile: {err}"),
+                    elapsed_ms(start),
+                    false,
+                )
+            }
+        };
         let args = build_ssh_args(&profile, &host.target_host, sudo, &command);
         run_process(&host, "ssh", &args, start).await
     };
@@ -189,41 +214,6 @@ fn build_local_args(command: &[String], sudo: bool) -> Vec<String> {
         line = format!("sudo {}", line);
     }
     vec!["sh".to_string(), "-c".to_string(), line]
-}
-
-/// Builds the `ssh(1)` argument vector for one host profile: connection
-/// flags from the profile, the `user@host` target, an optional `sudo` prefix
-/// and the trailing remote command verbatim. Mirrors `nod ssh`.
-fn build_ssh_args(
-    profile: &SshProfile,
-    target_host: &str,
-    sudo: bool,
-    command: &[String],
-) -> Vec<String> {
-    let mut args = Vec::<String>::new();
-    if profile.port() != 22 {
-        args.push("-p".to_string());
-        args.push(profile.port().to_string());
-    }
-    if let Some(identity) = profile.identity_file() {
-        args.push("-i".to_string());
-        args.push(identity.display().to_string());
-    }
-    if let Some(proxy) = profile.proxy_jump() {
-        args.push("-J".to_string());
-        args.push(proxy.to_string());
-    }
-    for extra in profile.extra_ssh_args() {
-        args.push(extra.clone());
-    }
-    args.push(format!("{}@{}", profile.user(), target_host));
-    if sudo {
-        args.push("sudo".to_string());
-    }
-    for part in command {
-        args.push(part.clone());
-    }
-    args
 }
 
 /// Runs the local invocation: `sh -c <command>` (with `sudo` inside the
@@ -294,9 +284,22 @@ fn elapsed_ms(start: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::context::AppContext;
+    use std::sync::Arc;
 
     fn host(name: &str, is_local: bool) -> HostEntity {
         HostEntity::new(name, name, is_local)
+    }
+
+    /// A minimal context (no config store, so `resolved_profile` falls back to
+    /// the primitive profile). Exec runs never touch the evaluator; the local
+    /// hosts below never touch the SSH transport.
+    fn ctx() -> Arc<AppContext> {
+        Arc::new(AppContext::new(
+            Arc::new(crate::infrastructure::nix::cli_evaluator::NixCliEvaluator::new()),
+            Arc::new(crate::infrastructure::deployment::local_deployer::LocalDeployer::new()),
+            Arc::new(crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer::new()),
+        ))
     }
 
     #[test]
@@ -326,53 +329,19 @@ mod tests {
         assert_eq!(args, ["sh", "-c", "uptime"]);
     }
 
-    #[test]
-    fn build_ssh_args_defaults_to_user_host() {
-        let profile = SshProfile::for_host(&host("atlas", false));
-        let args = build_ssh_args(
-            &profile,
-            "atlas",
-            false,
-            &["uname".to_string(), "-a".to_string()],
-        );
-        assert_eq!(args, ["root@atlas", "uname", "-a"]);
-    }
-
-    #[test]
-    fn build_ssh_args_prepends_sudo_before_the_command() {
-        let profile = SshProfile::for_host(&host("atlas", false));
-        let args = build_ssh_args(
-            &profile,
-            "atlas",
-            true,
-            &["apt-get".to_string(), "update".to_string()],
-        );
-        assert_eq!(args, ["root@atlas", "sudo", "apt-get", "update"]);
-    }
-
-    #[test]
-    fn build_ssh_args_includes_profile_connection_flags() {
-        let mut profile = SshProfile::for_host(&host("atlas", false));
-        profile = profile.with_port(2200).with_proxy_jump("bastion");
-        let args = build_ssh_args(&profile, "atlas", false, &["uptime".to_string()]);
-        assert_eq!(
-            args,
-            ["-p", "2200", "-J", "bastion", "root@atlas", "uptime"]
-        );
-    }
-
     #[tokio::test]
     async fn local_host_executes_and_reports_success() {
         let hosts = vec![host("jello", true)];
-        let results = ExecFleetUseCase::execute(
-            hosts,
-            vec!["echo".to_string(), "hi".to_string()],
-            4,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+        let results = ExecFleetUseCase::new(ctx())
+            .execute(
+                hosts,
+                vec!["echo".to_string(), "hi".to_string()],
+                4,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].host_name, "jello");
         assert!(results[0].success);
@@ -384,15 +353,16 @@ mod tests {
     #[tokio::test]
     async fn failing_command_reports_the_numeric_exit_code() {
         let hosts = vec![host("atlas", true)];
-        let results = ExecFleetUseCase::execute(
-            hosts,
-            vec!["exit".to_string(), "3".to_string()],
-            4,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+        let results = ExecFleetUseCase::new(ctx())
+            .execute(
+                hosts,
+                vec!["exit".to_string(), "3".to_string()],
+                4,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(!results[0].success);
         assert_eq!(results[0].exit_code, 3);
@@ -400,7 +370,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_fleet_is_a_config_error() {
-        let err = ExecFleetUseCase::execute(vec![], vec!["true".to_string()], 4, false, false)
+        let err = ExecFleetUseCase::new(ctx())
+            .execute(vec![], vec!["true".to_string()], 4, false, false)
             .await
             .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
@@ -408,7 +379,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_command_is_a_config_error() {
-        let err = ExecFleetUseCase::execute(vec![host("jello", true)], vec![], 4, false, false)
+        let err = ExecFleetUseCase::new(ctx())
+            .execute(vec![host("jello", true)], vec![], 4, false, false)
             .await
             .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
@@ -416,15 +388,16 @@ mod tests {
 
     #[tokio::test]
     async fn zero_concurrency_is_a_config_error() {
-        let err = ExecFleetUseCase::execute(
-            vec![host("jello", true)],
-            vec!["true".to_string()],
-            0,
-            false,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let err = ExecFleetUseCase::new(ctx())
+            .execute(
+                vec![host("jello", true)],
+                vec!["true".to_string()],
+                0,
+                false,
+                false,
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
     }
 
@@ -440,7 +413,8 @@ mod tests {
         ];
         let command = vec!["sleep".to_string(), "0.2".to_string()];
         let start = Instant::now();
-        let results = ExecFleetUseCase::execute(hosts, command, 2, false, false)
+        let results = ExecFleetUseCase::new(ctx())
+            .execute(hosts, command, 2, false, false)
             .await
             .unwrap();
         let elapsed = elapsed_ms(start);
@@ -465,15 +439,16 @@ mod tests {
             host("b", true),
             host("c", true),
         ];
-        let results = ExecFleetUseCase::execute(
-            hosts,
-            vec!["exit".to_string(), "2".to_string()],
-            1,
-            false,
-            true,
-        )
-        .await
-        .unwrap();
+        let results = ExecFleetUseCase::new(ctx())
+            .execute(
+                hosts,
+                vec!["exit".to_string(), "2".to_string()],
+                1,
+                false,
+                true,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 4);
         assert!(!results[0].success);
@@ -491,15 +466,16 @@ mod tests {
     #[tokio::test]
     async fn without_fail_fast_every_host_still_runs() {
         let hosts = vec![host("h1", true), host("h2", true), host("h3", true)];
-        let results = ExecFleetUseCase::execute(
-            hosts,
-            vec!["exit".to_string(), "1".to_string()],
-            1,
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+        let results = ExecFleetUseCase::new(ctx())
+            .execute(
+                hosts,
+                vec!["exit".to_string(), "1".to_string()],
+                1,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 3);
         for result in &results {

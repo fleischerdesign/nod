@@ -50,7 +50,8 @@ impl DetectDriftUseCase {
             .await?;
 
         let deployer = self.ctx.deployer_for(host);
-        let active_closure = deployer.current_closure(host).await?;
+        let profile = self.ctx.resolved_profile(host).await?;
+        let active_closure = deployer.current_closure(host, &profile).await?;
 
         let drifted = match &active_closure {
             Some(active) => active != &flake_closure,
@@ -68,7 +69,7 @@ impl DetectDriftUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::host::BuilderHost;
+    use crate::domain::host::{BuilderHost, SshProfile};
     use crate::domain::ports::deployer::DeployerPort;
     use crate::domain::ports::evaluator::EvaluatorPort;
     use async_trait::async_trait;
@@ -79,9 +80,9 @@ mod tests {
         #[async_trait]
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
-            async fn current_closure(&self, host: &HostEntity) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
-            async fn rollback(&self, host: &HostEntity) -> Result<(), NodError>;
+            async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }
 
@@ -118,7 +119,7 @@ mod tests {
         local
             .expect_current_closure()
             .times(1)
-            .returning(|_| Ok(Some(PathBuf::from("/nix/store/bbb-live"))));
+            .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/bbb-live"))));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -150,7 +151,7 @@ mod tests {
         local
             .expect_current_closure()
             .times(1)
-            .returning(|_| Ok(Some(PathBuf::from("/nix/store/aaa-flake"))));
+            .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/aaa-flake"))));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -174,7 +175,7 @@ mod tests {
         local
             .expect_current_closure()
             .times(1)
-            .returning(|_| Ok(None));
+            .returning(|_, _| Ok(None));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -198,7 +199,7 @@ mod tests {
         let mut ssh = MockFakeDeployer::new();
         ssh.expect_current_closure()
             .times(1)
-            .returning(|_| Ok(Some(PathBuf::from("/nix/store/bbb-live"))));
+            .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/bbb-live"))));
 
         let ctx = ctx_with(eval, MockFakeDeployer::new(), ssh);
         let host = HostEntity::new("atlas", "10.0.0.8", false);
@@ -222,7 +223,7 @@ mod tests {
         local
             .expect_current_closure()
             .times(1)
-            .returning(|_| Err(NodError::deployment("query failed")));
+            .returning(|_, _| Err(NodError::deployment("query failed")));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);

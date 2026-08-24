@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -60,6 +61,63 @@ impl NixCliEvaluator {
         pb.enable_steady_tick(Duration::from_millis(80));
         pb
     }
+
+    /// Escapes a value for interpolation into a double-quoted Nix string
+    /// literal (AC4): `\`, `"` and the `${` interpolation marker are escaped
+    /// so host names / flake paths with special characters evaluate literally
+    /// (spaces need no escaping inside a Nix string).
+    fn nix_escape(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '$' if chars.peek() == Some(&'{') => {
+                    out.push_str("\\${");
+                    chars.next(); // consume the '{'
+                }
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// Builds the Nix expression that evaluates one host's `config.nod`
+    /// surface (AC4, tier 3). The flake path and host name are escaped as
+    /// Nix string literals (and the host selected with a quoted attribute) so
+    /// paths/names containing spaces, quotes or `${` evaluate correctly.
+    fn build_meta_expr(flake_path: &Path, name: &str) -> String {
+        let path = Self::nix_escape(&flake_path.display().to_string());
+        let name = Self::nix_escape(name);
+        format!(
+            "let x = (import \"{path}\").nixosConfigurations.\"{name}\".config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{name}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null }} ",
+        )
+    }
+
+    /// Runs one per-host `nix eval` and parses its JSON into `FlakeMeta`,
+    /// propagating spawn, non-zero exit and parse failures as typed errors
+    /// keyed on the host name (AC4) instead of silently defaulting to
+    /// `FlakeMeta::default()`.
+    fn eval_meta(
+        name: &str,
+        output: Result<Output, std::io::Error>,
+    ) -> Result<FlakeMeta, NodError> {
+        let output = output.map_err(|_| {
+            NodError::evaluation(format!(
+                "failed to evaluate flake metadata for host '{name}': could not launch `nix eval`"
+            ))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NodError::evaluation(format!(
+                "failed to evaluate flake metadata for host '{name}': {}",
+                stderr.trim()
+            )));
+        }
+        serde_json::from_slice::<FlakeMeta>(&output.stdout)
+            .map_err(|_| NodError::parse_failure(format!("flake metadata JSON for host '{name}'")))
+    }
 }
 
 #[async_trait]
@@ -109,32 +167,18 @@ impl EvaluatorPort for NixCliEvaluator {
         for name in host_names {
             let is_local = name == local_hostname;
 
-            // Per-host metadata from flake `config.nod` (tier 3) with graceful
-            // fallback to `deployment.*` / `networking.hostName` (ADR-004). The
-            // whole `nod` object is emitted so every granular option
-            // (ssh/build/rollout/healthChecks/hooks) deserializes onto the
-            // `HostEntity`.
-            let meta_expr = format!(
-                "let x = (import {}).nixosConfigurations.{}.config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null }} ",
-                flake_path.display(),
-                name,
-                name
-            );
-
-            let meta: FlakeMeta = Command::new("nix")
+            // Per-host metadata from flake `config.nod` (tier 3), falling back
+            // to `deployment.*` / `networking.hostName` via the Nix expression
+            // (ADR-004). The whole `nod` object is emitted so every granular
+            // option (ssh/build/rollout/healthChecks/hooks) deserializes onto
+            // the `HostEntity`. A failed eval/parse propagates as a typed error
+            // (AC4) rather than silently defaulting `FlakeMeta`.
+            let meta_expr = Self::build_meta_expr(flake_path, &name);
+            let meta_output = Command::new("nix")
                 .args(["eval", "--json", "--expr", &meta_expr])
                 .output()
-                .await
-                .ok()
-                .and_then(|o| serde_json::from_slice::<FlakeMeta>(&o.stdout).ok())
-                .unwrap_or_else(|| FlakeMeta {
-                    target_host: name.clone(),
-                    role: "server".into(),
-                    tags: vec![],
-                    user: None,
-                    port: None,
-                    nod: None,
-                });
+                .await;
+            let meta = Self::eval_meta(&name, meta_output)?;
 
             let mut entity = HostEntity::new(&name, &meta.target_host, is_local);
             entity.role = HostRole::parse(&meta.role);
@@ -324,5 +368,82 @@ mod tests {
             profile: SshProfile::for_host(&HostEntity::new("jello", "jello-machine", true)),
         };
         assert_eq!(build_builder_uri(&builder), "ssh://root@jello");
+    }
+
+    #[test]
+    fn nix_escape_handles_quotes_backslashes_and_interpolation() {
+        assert_eq!(NixCliEvaluator::nix_escape("plain-name"), "plain-name");
+        assert_eq!(NixCliEvaluator::nix_escape("a\"b"), "a\\\"b");
+        assert_eq!(NixCliEvaluator::nix_escape("a\\b"), "a\\\\b");
+        assert_eq!(NixCliEvaluator::nix_escape("${x}"), "\\${x}");
+        // Spaces need no escaping inside a Nix string literal.
+        assert_eq!(
+            NixCliEvaluator::nix_escape("host with spaces"),
+            "host with spaces"
+        );
+    }
+
+    #[test]
+    fn meta_expr_escapes_path_and_name() {
+        let expr = NixCliEvaluator::build_meta_expr(Path::new("/tmp/my flake"), "edge\"host");
+        assert!(expr.contains("(import \"/tmp/my flake\")"));
+        assert!(expr.contains("nixosConfigurations.\"edge\\\"host\""));
+        assert!(expr.contains("else \"edge\\\"host\""));
+    }
+
+    #[test]
+    fn failing_eval_spawn_yields_err_with_host_name() {
+        let err = NixCliEvaluator::eval_meta(
+            "atlas",
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "nix missing",
+            )),
+        )
+        .unwrap_err();
+        assert!(matches!(err, NodError::Evaluation { .. }));
+        assert!(err.to_string().contains("atlas"));
+    }
+
+    #[test]
+    fn failing_eval_exit_yields_err() {
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 1")
+            .status()
+            .unwrap();
+        let output = Output {
+            status,
+            stdout: Vec::new(),
+            stderr: b"boom".to_vec(),
+        };
+        let err = NixCliEvaluator::eval_meta("atlas", Ok(output)).unwrap_err();
+        assert!(matches!(err, NodError::Evaluation { .. }));
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn unparseable_eval_json_yields_parse_failure() {
+        let output = Output {
+            status: std::process::ExitStatus::default(),
+            stdout: b"not json".to_vec(),
+            stderr: Vec::new(),
+        };
+        let err = NixCliEvaluator::eval_meta("atlas", Ok(output)).unwrap_err();
+        assert!(matches!(err, NodError::Evaluation { .. }));
+        assert!(err.to_string().contains("atlas"));
+    }
+
+    #[test]
+    fn eval_meta_parses_valid_json() {
+        let json = br#"{"targetHost":"10.0.0.8","role":"server"}"#;
+        let output = Output {
+            status: std::process::ExitStatus::default(),
+            stdout: json.to_vec(),
+            stderr: Vec::new(),
+        };
+        let meta = NixCliEvaluator::eval_meta("atlas", Ok(output)).unwrap();
+        assert_eq!(meta.target_host, "10.0.0.8");
+        assert_eq!(meta.role, "server");
     }
 }

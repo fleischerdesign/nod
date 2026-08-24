@@ -17,7 +17,10 @@ use crate::application::pipeline::state_machine::{
 };
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
-use crate::domain::plan::{DeploymentAction, DeploymentOptions, DeploymentPlan, TargetPlan};
+use crate::domain::plan::{DeploymentAction, DeploymentOptions, DeploymentPlan};
+
+use std::future::Future;
+use std::pin::Pin;
 
 /// The per-host result of a deployment attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,10 +37,16 @@ pub struct HostOutcome {
     /// Optional diagnostics from the failing build step; `None` when the host
     /// reached a terminal state without a build-level error to surface.
     pub failure: Option<String>,
+    /// Post-activation health verdict. `Some(true)` = checker present and
+    /// passed, `Some(false)` = checker present and failed, `None` = no
+    /// checker was bound (verification never ran).
+    pub health_verified: Option<bool>,
 }
 
 impl HostOutcome {
     /// Builds an outcome for `state`, marking `ok` for good terminal states.
+    /// `health_verified` defaults to `None` (no verification performed); the
+    /// deploy flow sets it explicitly when a checker is present.
     pub fn new(host_name: impl Into<String>, state: DeploymentState) -> Self {
         let ok = state == DeploymentState::Completed || state == DeploymentState::Prepared;
         Self {
@@ -46,6 +55,7 @@ impl HostOutcome {
             ok,
             rolled_back: state == DeploymentState::RolledBack,
             failure: None,
+            health_verified: None,
         }
     }
 }
@@ -120,7 +130,6 @@ impl DeployFleetUseCase {
         }
 
         let plan = self.plan_for(hosts.clone(), options.clone());
-        let sem = Arc::new(Semaphore::new(options.concurrency));
         let mut summary = FleetSummary {
             outcomes: Vec::new(),
             aborted: false,
@@ -128,7 +137,7 @@ impl DeployFleetUseCase {
 
         for wave in plan.wave_indices() {
             let wave_outcomes = self
-                .run_wave(&hosts, &wave, options.clone(), sem.clone(), flake_path)
+                .run_wave(&hosts, &wave, options.clone(), flake_path)
                 .await;
             let mut failed = false;
             for outcome in wave_outcomes {
@@ -149,26 +158,21 @@ impl DeployFleetUseCase {
     /// with in-flight concurrency bounded by the semaphore.
     async fn run_wave(
         &self,
-        hosts: &Vec<HostEntity>,
-        wave: &Vec<usize>,
+        hosts: &[HostEntity],
+        wave: &[usize],
         options: DeploymentOptions,
-        sem: Arc<Semaphore>,
         flake_path: &Path,
     ) -> Vec<HostOutcome> {
         let flake = flake_path.display().to_string();
-        let mut set = JoinSet::<HostOutcome>::new();
-        let mut k = 0;
-        while k < (*wave).len() {
-            let idx = (*wave)[k];
-            k += 1;
-            let host_c = (*hosts)[idx].clone();
+        let mut tasks: Vec<Pin<Box<dyn Future<Output = HostOutcome> + Send>>> = Vec::new();
+        for idx in wave.iter() {
+            let host_c = hosts[*idx].clone();
             let opts_c = options.clone();
-            let sem_c = sem.clone();
             let ctx_c = self.ctx.clone();
             let flake_c = flake.clone();
-            set.spawn(async move { run_host(ctx_c, host_c, opts_c, sem_c, flake_c).await });
+            tasks.push(Box::pin(run_host(ctx_c, host_c, opts_c, flake_c)));
         }
-        set.join_all().await
+        run_bounded(options.concurrency, tasks).await
     }
 
     /// `--action build`: evaluate and build each host's toplevel closure,
@@ -181,23 +185,20 @@ impl DeployFleetUseCase {
         options: DeploymentOptions,
         flake_path: &Path,
     ) -> FleetSummary {
-        let sem = Arc::new(Semaphore::new(options.concurrency));
-        let mut set = JoinSet::<HostOutcome>::new();
         let flake = flake_path.display().to_string();
         let out_link = options.out_link.clone();
         let verbose = options.verbose;
         let builder = options.builder.clone();
         let evaluator = self.ctx.evaluator();
 
+        let mut tasks: Vec<Pin<Box<dyn Future<Output = HostOutcome> + Send>>> = Vec::new();
         for host in hosts {
-            let sem_c = sem.clone();
             let evaluator_c = evaluator.clone();
             let flake_c = flake.clone();
             let out_link_c = out_link.clone();
             let builder_c = builder.clone();
             let name_c = host.name.clone();
-            set.spawn(async move {
-                let _permit = sem_c.acquire().await.ok();
+            tasks.push(Box::pin(async move {
                 let built = evaluator_c
                     .build_toplevel(Path::new(&flake_c), &name_c, builder_c.as_ref(), verbose)
                     .await;
@@ -216,10 +217,10 @@ impl DeployFleetUseCase {
                         outcome
                     }
                 }
-            });
+            }));
         }
 
-        let outcomes = set.join_all().await;
+        let outcomes = run_bounded(options.concurrency, tasks).await;
         FleetSummary {
             outcomes,
             aborted: false,
@@ -249,34 +250,20 @@ impl DeployFleetUseCase {
 
     /// Builds a `DeploymentPlan` (ordered target list + policy).
     pub fn plan_for(&self, hosts: Vec<HostEntity>, options: DeploymentOptions) -> DeploymentPlan {
-        let mut targets = Vec::<TargetPlan>::with_capacity(hosts.len());
-        for host in hosts {
-            targets.push(TargetPlan {
-                host_name: host.name,
-                action: options.action.clone(),
-                new_closure: None,
-                current_closure: None,
-            });
-        }
-        DeploymentPlan { targets, options }
+        let mut plan = DeploymentPlan::from_hosts(hosts, options.action.clone());
+        plan.options = options;
+        plan
     }
 }
 
-/// Drives one host through its ADR-003 lifecycle under a semaphore permit.
+/// Drives one host through its ADR-003 lifecycle under a concurrency permit
+/// (acquired by [`run_bounded`]).
 async fn run_host(
     ctx: Arc<AppContext>,
     host: HostEntity,
     options: DeploymentOptions,
-    sem: Arc<Semaphore>,
     flake: String,
 ) -> HostOutcome {
-    let acquired = sem.acquire().await;
-    if acquired.is_err() {
-        return HostOutcome::new(host.name, DeploymentState::Failed);
-    }
-    // Permit stays alive for the whole host; dropping it frees the slot.
-    let _ = acquired.unwrap();
-
     let mut machine = DeploymentStateMachine::prepared();
     machine.tick(DeploymentEvent::Begin).unwrap();
 
@@ -307,9 +294,23 @@ async fn run_host(
 
     let deployer = ctx.deployer_for(&host);
     let activation_action = options.action.to_str();
+    let profile = match ctx.resolved_profile(&host).await {
+        Ok(profile) => profile,
+        Err(_) => {
+            return end_host(
+                &mut machine,
+                DeploymentEvent::SwitchFail,
+                &host,
+                &options,
+                &ctx,
+            )
+            .await
+        }
+    };
     let activation = deployer
         .deploy_and_activate(
             &host,
+            &profile,
             &closure.unwrap(),
             &activation_action,
             options.verbose,
@@ -331,7 +332,7 @@ async fn run_host(
     if let Some(health) = ctx.health_checker_opt() {
         let verified = health.verify_health(&host).await;
         if verified.is_err() || !verified.unwrap() {
-            return end_host(
+            let mut outcome = end_host(
                 &mut machine,
                 DeploymentEvent::VerifyFail,
                 &host,
@@ -339,11 +340,39 @@ async fn run_host(
                 &ctx,
             )
             .await;
+            outcome.health_verified = Some(false);
+            return outcome;
         }
+        machine.tick(DeploymentEvent::VerifyOk).unwrap();
+        let mut outcome = HostOutcome::new(host.name, machine.state());
+        outcome.health_verified = Some(true);
+        return outcome;
     }
 
     machine.tick(DeploymentEvent::VerifyOk).unwrap();
     HostOutcome::new(host.name, machine.state())
+}
+
+/// Bounded concurrent collector (ADR-005): runs `tasks` under a shared
+/// semaphore of `concurrency` permits and joins them, returning outcomes as
+/// each task completes (JoinSet completion order, not spawn order). Shared by
+/// activation waves and `--action build` so both obey the same concurrency
+/// budget without hand-rolling the scaffolding.
+async fn run_bounded(
+    concurrency: usize,
+    tasks: Vec<Pin<Box<dyn Future<Output = HostOutcome> + Send>>>,
+) -> Vec<HostOutcome> {
+    let sem = Arc::new(Semaphore::new(concurrency));
+    let mut set = JoinSet::<HostOutcome>::new();
+    for task in tasks {
+        let sem_c = sem.clone();
+        set.spawn(async move {
+            // Permit stays alive for the whole task; dropping it frees the slot.
+            let _permit = sem_c.acquire().await.ok();
+            task.await
+        });
+    }
+    set.join_all().await
 }
 
 /// Advances to `RollbackTriggered`, then rolls back when enabled (ADR-003).
@@ -357,7 +386,14 @@ async fn end_host(
     machine.tick(event).unwrap();
     let deployer = ctx.deployer_for(host);
     if options.auto_rollback {
-        let rollback = deployer.rollback(host).await;
+        let profile = match ctx.resolved_profile(host).await {
+            Ok(profile) => profile,
+            Err(_) => {
+                machine.tick(DeploymentEvent::RollbackFail).unwrap();
+                return HostOutcome::new(host.name.clone(), machine.state());
+            }
+        };
+        let rollback = deployer.rollback(host, &profile).await;
         if rollback.is_ok() {
             machine.tick(DeploymentEvent::RollbackOk).unwrap();
             return HostOutcome::new(host.name.clone(), machine.state());
@@ -369,9 +405,10 @@ async fn end_host(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::host::BuilderHost;
+    use crate::domain::host::{BuilderHost, SshProfile};
     use crate::domain::ports::deployer::DeployerPort;
     use crate::domain::ports::evaluator::EvaluatorPort;
+    use crate::domain::ports::health_checker::HealthCheckerPort;
     use async_trait::async_trait;
     use mockall::mock;
     use std::path::PathBuf;
@@ -381,9 +418,9 @@ mod tests {
         #[async_trait]
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
-            async fn current_closure(&self, host: &HostEntity) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
-            async fn rollback(&self, host: &HostEntity) -> Result<(), NodError>;
+            async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }
 
@@ -393,6 +430,14 @@ mod tests {
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
             async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+        }
+    }
+
+    mock! {
+        FakeHealthChecker {}
+        #[async_trait]
+        impl HealthCheckerPort for FakeHealthChecker {
+            async fn verify_health(&self, host: &HostEntity) -> Result<bool, NodError>;
         }
     }
 
@@ -407,6 +452,20 @@ mod tests {
             Arc::new(local),
             Arc::new(ssh),
         ))
+    }
+
+    /// `ctx_with` plus a bound health checker.
+    fn ctx_with_checker(
+        eval: MockFakeEvaluator,
+        local: MockFakeDeployer,
+        checker: MockFakeHealthChecker,
+    ) -> Arc<AppContext> {
+        let inner = AppContext::new(
+            Arc::new(eval),
+            Arc::new(local),
+            Arc::new(MockFakeDeployer::new()),
+        );
+        Arc::new(inner.with_health_checker(Arc::new(checker)))
     }
 
     fn options_with(action: DeploymentAction) -> DeploymentOptions {
@@ -429,8 +488,8 @@ mod tests {
         local
             .expect_deploy_and_activate()
             .times(1)
-            .withf(|_, _, action, _| action == "test")
-            .returning(|_, _, _, _| Ok(()));
+            .withf(|_, _, _, action, _| action == "test")
+            .returning(|_, _, _, _, _| Ok(()));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -462,8 +521,8 @@ mod tests {
         local
             .expect_deploy_and_activate()
             .times(1)
-            .withf(|_, _, action, _| action == "boot")
-            .returning(|_, _, _, _| Ok(()));
+            .withf(|_, _, _, action, _| action == "boot")
+            .returning(|_, _, _, _, _| Ok(()));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -605,5 +664,77 @@ mod tests {
         assert_eq!(summary.outcomes.len(), 1);
         assert_eq!(summary.outcomes[0].state, DeploymentState::Prepared);
         assert!(summary.outcomes[0].ok);
+    }
+
+    #[tokio::test]
+    async fn deploy_without_checker_reports_health_unverified_ok() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-nocheck")));
+
+        let mut local = MockFakeDeployer::new();
+        local
+            .expect_deploy_and_activate()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        // `ctx_with` binds no health checker: verification never runs.
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        let summary = use_case
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Switch),
+                Path::new("/tmp/flake"),
+            )
+            .await
+            .unwrap();
+
+        let outcome = &summary.outcomes[0];
+        assert_eq!(outcome.state, DeploymentState::Completed);
+        assert!(outcome.ok);
+        assert_eq!(outcome.health_verified, None);
+    }
+
+    #[tokio::test]
+    async fn failing_health_checker_marks_host_failed_health_false() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-healthfail")));
+
+        let mut local = MockFakeDeployer::new();
+        local
+            .expect_deploy_and_activate()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let mut checker = MockFakeHealthChecker::new();
+        checker
+            .expect_verify_health()
+            .times(1)
+            .returning(|_| Ok(false));
+
+        let ctx = ctx_with_checker(eval, local, checker);
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        // auto_rollback is false, so VerifyFail lands in `Failed`.
+        let summary = use_case
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Switch),
+                Path::new("/tmp/flake"),
+            )
+            .await
+            .unwrap();
+
+        let outcome = &summary.outcomes[0];
+        assert_eq!(outcome.state, DeploymentState::Failed);
+        assert!(!outcome.ok);
+        assert_eq!(outcome.health_verified, Some(false));
     }
 }

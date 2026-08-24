@@ -100,7 +100,7 @@ impl NodError {
 
     /// Raised when a host fails a reachability / verification probe.
     pub fn unreachable(detail: impl Into<String>) -> Self {
-        NodError::healthcheck(format!("host failed health probe: {}", detail.into()))
+        NodError::health_check(format!("host failed health probe: {}", detail.into()))
     }
 
     /// Raised when an internal invariant is violated.
@@ -130,7 +130,7 @@ impl NodError {
     }
 
     /// Category constructor: health check failures.
-    pub fn healthcheck(detail: impl Into<String>) -> Self {
+    pub fn health_check(detail: impl Into<String>) -> Self {
         NodError::HealthCheck {
             detail: detail.into(),
         }

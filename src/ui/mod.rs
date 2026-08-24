@@ -96,6 +96,13 @@ fn drive_events(
 
 /// Dispatches an action intent from the view layer to the operation log and
 /// the status line.
+///
+/// This is a PREVIEW/LOG-ONLY dispatcher (ADR-008, AC7): the intent keys are
+/// recorded, never executed. Wiring these intents to a real switch/rollback/
+/// diff run is a separate cross-cutting change (deferred dashboard-deploy
+/// feature).
+/// TODO(dashboard-deploy): wire these intents to the deploy lifecycle commands
+/// (see docs/architecture/roadmap.md).
 fn run_action(action: DashboardAction, app: &mut DashboardApp, flake_path: &Path) {
     let label = match action {
         DashboardAction::Switch => "switch",

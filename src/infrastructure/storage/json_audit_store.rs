@@ -11,7 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::audit::AuditEntry;
 use crate::domain::errors::NodError;
-use crate::domain::host::HostEntity;
 use crate::domain::ports::audit_store::AuditStorePort;
 
 /// Audit history backed by a JSON array file.
@@ -98,14 +97,16 @@ impl JsonAuditStore {
     }
 
     /// Appends one entry at the current wall-clock second.
-    fn append(&self, entry: AuditEntry) {
-        let mut all = self.read();
-        if all.is_err() {
-            all = Ok(Vec::new());
-        }
-        let mut all = all.unwrap();
+    ///
+    /// Persistence failures (a read error, corrupt existing history, or a
+    /// write error) are propagated rather than swallowed, so the caller can
+    /// surface that the deployment outcome was not recorded (ADR-003). A
+    /// corrupt existing history is reported as an error and is never
+    /// silently truncated and replaced with a fresh single entry.
+    fn append(&self, entry: AuditEntry) -> Result<(), NodError> {
+        let mut all = self.read()?;
         all.push(entry);
-        let _ = self.write(all);
+        self.write(all)
     }
 
     /// The current unix time in whole seconds.
@@ -119,9 +120,8 @@ impl JsonAuditStore {
 
 #[async_trait]
 impl AuditStorePort for JsonAuditStore {
-    async fn record(&self, host: &HostEntity, outcome: &str) -> Result<(), NodError> {
-        self.append(AuditEntry::new(&host.name, outcome, Self::now_epoch()));
-        Ok(())
+    async fn record(&self, host_name: &str, outcome: &str) -> Result<(), NodError> {
+        self.append(AuditEntry::new(host_name, outcome, Self::now_epoch()))
     }
 
     async fn entries(
@@ -162,10 +162,6 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn host(name: &str) -> HostEntity {
-        HostEntity::new(name, "10.0.0.8", false)
-    }
-
     #[tokio::test]
     async fn missing_file_reads_as_empty_not_an_error() {
         let dir = tempdir().unwrap();
@@ -180,9 +176,9 @@ mod tests {
         let store = JsonAuditStore::at(dir.path().join("history.json"));
         // record() stamps epoch seconds internally, so entries come back in
         // the chronological append order regardless of equal timestamps.
-        store.record(&host("jello"), "completed").await.unwrap();
-        store.record(&host("atlas"), "failed").await.unwrap();
-        store.record(&host("jello"), "rolled_back").await.unwrap();
+        store.record("jello", "completed").await.unwrap();
+        store.record("atlas", "failed").await.unwrap();
+        store.record("jello", "rolled_back").await.unwrap();
 
         let all = store.entries(None, None).await.unwrap();
         assert_eq!(all.len(), 3);
@@ -197,8 +193,8 @@ mod tests {
     async fn entries_narrow_by_host_filter() {
         let dir = tempdir().unwrap();
         let store = JsonAuditStore::at(dir.path().join("history.json"));
-        store.record(&host("jello"), "completed").await.unwrap();
-        store.record(&host("atlas"), "completed").await.unwrap();
+        store.record("jello", "completed").await.unwrap();
+        store.record("atlas", "completed").await.unwrap();
 
         let jello = store
             .entries(Some("jello".to_string()), None)
@@ -209,12 +205,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_propagates_a_write_failure() {
+        let dir = tempdir().unwrap();
+        // Make the parent path a regular file so directory creation fails,
+        // surfacing a persistence error instead of silently dropping the
+        // entry (AC-B2.2 / AC-B2.4b).
+        let blocker = dir.path().join("not_a_dir");
+        std::fs::write(&blocker, "x").unwrap();
+        let store = JsonAuditStore::at(blocker.join("history.json"));
+        let err = store.record("jello", "completed").await.unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
+    }
+
+    #[tokio::test]
+    async fn record_propagates_corrupt_history_instead_of_truncating() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        std::fs::write(&path, "not valid json {").unwrap();
+        let store = JsonAuditStore::at(path.clone());
+        let err = store.record("jello", "completed").await.unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
+        // The corrupt history must not be overwritten with a fresh entry
+        // (AC-B2.3): prior records are preserved on disk.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("not valid json"));
+    }
+
+    #[tokio::test]
     async fn limit_caps_the_newest_entries() {
         let dir = tempdir().unwrap();
         let store = JsonAuditStore::at(dir.path().join("history.json"));
-        store.record(&host("a"), "ok").await.unwrap();
-        store.record(&host("b"), "ok").await.unwrap();
-        store.record(&host("c"), "ok").await.unwrap();
+        store.record("a", "ok").await.unwrap();
+        store.record("b", "ok").await.unwrap();
+        store.record("c", "ok").await.unwrap();
 
         let capped = store.entries(None, Some(2)).await.unwrap();
         assert_eq!(capped.len(), 2);

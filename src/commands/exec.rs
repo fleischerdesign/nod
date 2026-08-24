@@ -6,9 +6,10 @@
 use colored::Colorize;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::TargetSelection;
+use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
 use crate::application::use_cases::exec_fleet::{ExecFleetUseCase, ExecResult};
 use crate::domain::errors::NodError;
 
@@ -49,6 +50,7 @@ pub async fn execute(
     command: &[String],
 ) -> Result<(), NodError> {
     let flake_path = flake.unwrap_or_else(|| Path::new("."));
+    let ctx = Arc::new(ctx);
     let concurrency = concurrency.unwrap_or(4);
 
     let evaluator = ctx.evaluator();
@@ -57,31 +59,27 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (effective_target, effective_all) =
-        if !all && target.is_none() && tag.is_none() && role.is_none() {
-            (Some("local"), false)
-        } else {
-            (target, all)
-        };
-    let targets = TargetSelection::select(
+    let targets = resolve_targets(
         hosts,
-        effective_target,
+        &local_hostname,
+        target,
         tag,
         role,
-        effective_all,
-        &local_hostname,
+        all,
+        DefaultScope::Local,
     );
 
     if targets.is_empty() {
         return Err(TargetSelection::unmatched(
-            effective_target.unwrap_or("all"),
+            target.unwrap_or("local"),
             tag,
             role,
         ));
     }
 
-    let results: Vec<ExecResult> =
-        ExecFleetUseCase::execute(targets, command.to_vec(), concurrency, sudo, fail_fast).await?;
+    let results: Vec<ExecResult> = ExecFleetUseCase::new(ctx)
+        .execute(targets, command.to_vec(), concurrency, sudo, fail_fast)
+        .await?;
 
     if json {
         let rows: Vec<ExecRow> = results.iter().map(ExecRow::from_result).collect();

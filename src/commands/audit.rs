@@ -7,24 +7,17 @@ use std::sync::Arc;
 use crate::application::context::AppContext;
 use crate::application::use_cases::audit_log::AuditLogUseCase;
 use crate::domain::errors::NodError;
-use crate::infrastructure::deployment::local_deployer::LocalDeployer;
-use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
-use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
-use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 
 pub async fn execute(
+    ctx: AppContext,
     target: Option<&str>,
     limit: Option<usize>,
     json: bool,
 ) -> Result<(), NodError> {
-    let ctx = AppContext::new(
-        Arc::new(NixCliEvaluator::new()),
-        Arc::new(LocalDeployer::new()),
-        Arc::new(SshCliDeployer::new()),
-    )
-    .with_audit_store(Arc::new(JsonAuditStore::new()));
-
-    let use_case = AuditLogUseCase::new(Arc::new(ctx));
+    // The audit store is bound by `main` (a single, explicit site) because it
+    // is an opt-in service: `production` builds the base graph without it.
+    let ctx = Arc::new(ctx);
+    let use_case = AuditLogUseCase::new(ctx);
     let entries = use_case.execute(target, limit).await?;
 
     if json {
