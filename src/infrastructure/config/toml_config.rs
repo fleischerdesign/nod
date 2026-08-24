@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::config::{
     BuildConfig, CliOverrides, CustomProbeConfig, FleetDefaults, HealthCheckConfig, HooksConfig,
-    HostOverrides, HttpProbeConfig, RolloutConfig, SshConnectionOverrides, SystemdHealthConfig,
+    HostOverrides, HttpProbeConfig, RolloutConfig, SshConnectionOverrides, SshProfileConfig,
+    SystemdHealthConfig,
 };
 use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, SshProfile};
@@ -299,6 +300,24 @@ impl TomlConfigStore {
     }
 }
 
+/// Maps the flake tier-3 SSH config surface (ADR-004, `config.nod.ssh`)
+/// onto the store's internal override type so it can participate in the
+/// standard `Merged::overlay` cascade as the lowest SSH tier.
+fn to_ssh_overrides(c: &SshProfileConfig) -> SshOverrides {
+    SshOverrides {
+        user: c.user.clone(),
+        port: c.port,
+        identity_file: c.identity_file.clone(),
+        proxy_jump: c.proxy_jump.clone(),
+        proxy_command: c.proxy_command.clone(),
+        sudo: c.sudo,
+        timeout_secs: c.timeout_secs,
+        connect_timeout_secs: c.connect_timeout_secs,
+        extra_ssh_args: c.extra_ssh_args.clone(),
+        allow_insecure: c.allow_insecure,
+    }
+}
+
 /// Maps a parsed `[hosts.<name>.build]` table onto the domain `BuildConfig`.
 fn to_build_config(b: &TomlBuild) -> BuildConfig {
     BuildConfig {
@@ -375,38 +394,43 @@ fn to_health_config(h: &TomlHealth) -> HealthCheckConfig {
 #[async_trait]
 impl ConfigStorePort for TomlConfigStore {
     async fn resolve(&self, host: &HostEntity) -> Result<SshProfile, NodError> {
-        let merged = self.merged_for(&host.name).ssh;
+        // Tier 3 first (lowest SSH tier): flake metadata from `config.nod.ssh`
+        // (ADR-004) materialized on the entity by `NixCliEvaluator`. Then tiers
+        // 2+1 (`.nod.toml`, then CLI) are overlaid so they win on collision.
+        let mut merged = Merged::default();
+        merged.overlay(&to_ssh_overrides(&host.nod_config.ssh));
+        merged.overlay(&self.merged_for(&host.name).ssh);
         let mut profile = SshProfile::for_host(host);
-        if let Some(user) = merged.user {
+        if let Some(user) = merged.ssh.user {
             profile = profile.with_user(user);
         }
-        if let Some(port) = merged.port {
+        if let Some(port) = merged.ssh.port {
             profile = profile.with_port(port);
         }
-        if let Some(identity) = merged.identity_file {
+        if let Some(identity) = merged.ssh.identity_file {
             profile = profile.with_identity_file(identity);
         }
-        if let Some(proxy) = merged.proxy_jump {
+        if let Some(proxy) = merged.ssh.proxy_jump {
             profile = profile.with_proxy_jump(proxy);
         }
-        if let Some(proxy) = merged.proxy_command {
+        if let Some(proxy) = merged.ssh.proxy_command {
             profile = profile.with_proxy_command(proxy);
         }
-        if let Some(sudo) = merged.sudo {
+        if let Some(sudo) = merged.ssh.sudo {
             profile = profile.with_sudo(sudo);
         }
-        if let Some(timeout) = merged.timeout_secs {
+        if let Some(timeout) = merged.ssh.timeout_secs {
             profile = profile.with_timeout_secs(timeout);
         }
-        if let Some(connect) = merged.connect_timeout_secs {
+        if let Some(connect) = merged.ssh.connect_timeout_secs {
             profile = profile.with_connect_timeout_secs(connect);
         }
-        if let Some(args) = merged.extra_ssh_args {
+        if let Some(args) = merged.ssh.extra_ssh_args {
             for arg in args {
                 profile = profile.with_extra_ssh_arg(arg);
             }
         }
-        if let Some(insecure) = merged.allow_insecure {
+        if let Some(insecure) = merged.ssh.allow_insecure {
             profile = profile.with_allow_insecure(insecure);
         }
         Ok(profile)
@@ -672,5 +696,80 @@ mod tests {
         let s = store(&sub, CliOverrides::default());
         let profile = s.resolve(&host("atlas")).await.unwrap();
         assert_eq!(profile.user(), "philipp");
+    }
+
+    /// Builds a host carrying ADR-004 tier-3 flake SSH metadata, the value
+    /// the `NixCliEvaluator` materializes from `config.nod.ssh`.
+    fn host_with_flake_ssh(name: &str) -> HostEntity {
+        let mut h = host(name);
+        h.nod_config.ssh.identity_file = Some(PathBuf::from("/flake/id_rsa"));
+        h.nod_config.ssh.proxy_jump = Some("jump.example".to_string());
+        h.nod_config.ssh.sudo = Some(true);
+        h
+    }
+
+    #[tokio::test]
+    async fn flake_ssh_identity_resolves_without_lower_override() {
+        // AC1: tier-3 flake metadata is honored when no `.nod.toml` / CLI
+        // override supplies the value.
+        let dir = tempdir().unwrap();
+        let s = store(dir.path(), CliOverrides::default());
+        let profile = s.resolve(&host_with_flake_ssh("atlas")).await.unwrap();
+        assert_eq!(
+            profile.identity_file(),
+            Some(&PathBuf::from("/flake/id_rsa"))
+        );
+        assert_eq!(profile.proxy_jump(), Some("jump.example"));
+        assert!(profile.sudo());
+    }
+
+    #[tokio::test]
+    async fn toml_overrides_flake_ssh_identity() {
+        // AC2: `.nod.toml` (tier 2) beats flake metadata (tier 3).
+        let dir = tempdir().unwrap();
+        write_toml(
+            dir.path(),
+            "[hosts.atlas.ssh]\nidentity_file = \"/toml/id_rsa\"\n",
+        );
+        let s = store(dir.path(), CliOverrides::default());
+        let profile = s.resolve(&host_with_flake_ssh("atlas")).await.unwrap();
+        assert_eq!(
+            profile.identity_file(),
+            Some(&PathBuf::from("/toml/id_rsa"))
+        );
+        // Non-colliding field still comes from flake.
+        assert_eq!(profile.proxy_jump(), Some("jump.example"));
+    }
+
+    #[tokio::test]
+    async fn cli_overrides_flake_and_toml_ssh_identity() {
+        // AC3: CLI (tier 1) beats `.nod.toml` (tier 2) and flake (tier 3).
+        let dir = tempdir().unwrap();
+        write_toml(
+            dir.path(),
+            "[hosts.atlas.ssh]\nidentity_file = \"/toml/id_rsa\"\n",
+        );
+        let cli = CliOverrides {
+            user: None,
+            port: None,
+            identity_file: Some(PathBuf::from("/cli/id_rsa")),
+        };
+        let s = store(dir.path(), cli);
+        let profile = s.resolve(&host_with_flake_ssh("atlas")).await.unwrap();
+        assert_eq!(profile.identity_file(), Some(&PathBuf::from("/cli/id_rsa")));
+        assert_eq!(profile.proxy_jump(), Some("jump.example"));
+    }
+
+    #[tokio::test]
+    async fn absent_flake_ssh_is_a_noop() {
+        // AC4: default NodConfig (all fields None) resolves exactly as before.
+        let dir = tempdir().unwrap();
+        let s = store(dir.path(), CliOverrides::default());
+        let profile = s.resolve(&host("atlas")).await.unwrap();
+        assert_eq!(profile.user(), "root");
+        assert_eq!(profile.port(), 22);
+        assert_eq!(profile.identity_file(), None);
+        assert_eq!(profile.proxy_jump(), None);
+        assert!(!profile.sudo());
     }
 }
