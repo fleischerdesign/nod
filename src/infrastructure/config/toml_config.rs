@@ -8,6 +8,14 @@
 //!   4. compiled-in defaults (`root` / `22`, carried by `HostEntity::new`).
 //!
 //! No module outside this adapter reads `.nod.toml` (ADR-004 compliance).
+//!
+//! The `[defaults]` section also carries the optional default flake root,
+//! `[defaults].flake`. Because the file itself is discovered bottom-up from
+//! the flake root, a flake root supplied by the file needs a bootstrap pass:
+//! [`effective_flake`] searches upward from the invocation cwd first, honours
+//! `[defaults].flake` (relative values resolve against the file's own
+//! directory), and only then this store is built from the resolved root. The
+//! flake cascade is: explicit CLI `--flake` > `[defaults].flake` > `.`.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -42,6 +50,18 @@ pub struct SshOverrides {
     #[serde(default)]
     pub extra_ssh_args: Option<Vec<String>>,
     pub allow_insecure: Option<bool>,
+}
+
+/// The `[defaults]` section: the shared SSH settings (same keys as `[fleet]`)
+/// plus the optional default flake root. `flake` is an ADR-004 tier-2 value
+/// applied by [`effective_flake`] when no explicit `--flake` is given.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TomlDefaults {
+    /// Optional default flake root. Relative values are resolved against the
+    /// directory containing the `.nod.toml` file by [`effective_flake`].
+    pub flake: Option<PathBuf>,
+    #[serde(flatten)]
+    pub ssh: SshOverrides,
 }
 
 /// A `[hosts.<name>]` section: shared SSH settings plus host-specific
@@ -149,11 +169,12 @@ pub struct TomlHooks {
     pub post_switch_hook: Option<String>,
 }
 
-/// Parsed shape of `.nod.toml`.
+/// Parsed shape of `.nod.toml`. `[defaults]` is [`TomlDefaults`]: the shared
+/// SSH settings plus the optional default flake root.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TomlConfig {
     #[serde(default)]
-    pub defaults: Option<SshOverrides>,
+    pub defaults: Option<TomlDefaults>,
     #[serde(default)]
     pub fleet: Option<SshOverrides>,
     #[serde(default)]
@@ -235,9 +256,24 @@ impl TomlConfigStore {
         Ok(Self { cli, toml })
     }
 
-    /// Finds the nearest config file at or above `start`.
+    /// Returns the raw `[defaults].flake` value from the parsed config file,
+    /// if any. Relative values are relative to the file's directory; call
+    /// [`effective_flake`] to resolve the effective root for a run.
+    pub fn default_flake(&self) -> Option<&Path> {
+        self.toml.defaults.as_ref().and_then(|d| d.flake.as_deref())
+    }
+
+    /// Finds the nearest config file at or above `start`. `start` need not be
+    /// the flake root: [`effective_flake`] searches from the invocation cwd so
+    /// a `[defaults].flake` in the file can bootstrap the root itself.
+    ///
+    /// A relative `start` is resolved against the current working directory
+    /// first (see `absolute_start`): Rust's `Path::parent` caps the ancestor
+    /// walk of a bare `.` immediately at `Some("")->None`, so a search started
+    /// from the invocation `cwd` would otherwise never climb above it.
     fn discover(start: &Path) -> Option<PathBuf> {
-        let mut dir: Option<&Path> = Some(start);
+        let start = Self::absolute_start(start);
+        let mut dir: Option<&Path> = Some(&start);
         while let Some(d) = dir {
             for name in CONFIG_FILE_NAMES {
                 let candidate = d.join(name);
@@ -248,6 +284,21 @@ impl TomlConfigStore {
             dir = d.parent();
         }
         None
+    }
+
+    /// Resolves a possibly-relative discovery start against the current
+    /// working directory so the ancestor walk can climb above a bare `'.'`
+    /// (`Path::new(".").parent()` is `Some("")`, whose own parent is `None`;
+    /// the walk would otherwise stop after checking the cwd itself).
+    /// Absolute starts pass through unchanged. Falls back to the unmodified
+    /// start if the cwd cannot be determined.
+    fn absolute_start(start: &Path) -> PathBuf {
+        if start.is_absolute() {
+            return start.to_path_buf();
+        }
+        std::env::current_dir()
+            .map(|cwd| cwd.join(start))
+            .unwrap_or_else(|_| start.to_path_buf())
     }
 
     /// Parses the config file, surfacing malformed TOML as `NodError::config`.
@@ -263,7 +314,7 @@ impl TomlConfigStore {
     fn base_merged(&self) -> Merged {
         let mut merged = Merged::default();
         if let Some(d) = &self.toml.defaults {
-            merged.overlay(d);
+            merged.overlay(&d.ssh);
         }
         if let Some(f) = &self.toml.fleet {
             merged.overlay(f);
@@ -297,6 +348,44 @@ impl TomlConfigStore {
         }
         merge_cli_into(&mut merged, &self.cli);
         merged
+    }
+}
+
+/// Resolves the effective flake root for one run (ADR-004 cascade):
+///
+/// 1. an explicit CLI `--flake` value (anything but the documented default
+///    `"."`) wins;
+/// 2. else `[defaults].flake` of the nearest `.nod.toml` discovered walking
+///    up from `search_start` (the invocation cwd), resolved relative to the
+///    directory containing that file;
+/// 3. else `"."` — the working directory.
+///
+/// The `"."` marker doubles as "no explicit choice" because the clap string
+/// flags default to it and it is the historical hard-coded fallback; an
+/// explicit `--flake .` is therefore indistinguishable from an absent flag and
+/// does not override the toml tier. The config file is searched from the
+/// invocation cwd, not from the flake root — learning the root from the file
+/// is the whole point (allows `nod <cmd>` outside the configured flake dir).
+pub fn effective_flake(cli_flake: &Path, search_start: &Path) -> Result<PathBuf, NodError> {
+    if cli_flake != Path::new(".") {
+        return Ok(cli_flake.to_path_buf());
+    }
+    if let Some(config) = TomlConfigStore::discover(search_start) {
+        let toml = TomlConfigStore::parse(&config)?;
+        if let Some(flake) = toml.defaults.as_ref().and_then(|d| d.flake.as_ref()) {
+            return Ok(resolve_default_flake(&config, flake));
+        }
+    }
+    Ok(PathBuf::from("."))
+}
+
+/// Resolves a raw `[defaults].flake` value against the directory containing
+/// its config file. A config file anchored directly at a filesystem root has
+/// no parent directory; the raw value is then returned unchanged.
+fn resolve_default_flake(config: &Path, flake: &Path) -> PathBuf {
+    match config.parent() {
+        Some(dir) => dir.join(flake),
+        None => flake.to_path_buf(),
     }
 }
 
@@ -481,6 +570,8 @@ impl ConfigStorePort for TomlConfigStore {
                 extra_ssh_args: merged.extra_ssh_args,
                 allow_insecure: merged.allow_insecure,
             },
+            // `[defaults].flake` (tier 2); `[fleet]` has no flake key.
+            flake: self.toml.defaults.as_ref().and_then(|d| d.flake.clone()),
             description: None,
             build: None,
             rollout: None,
@@ -771,5 +862,166 @@ mod tests {
         assert_eq!(profile.identity_file(), None);
         assert_eq!(profile.proxy_jump(), None);
         assert!(!profile.sudo());
+    }
+
+    #[tokio::test]
+    async fn defaults_flake_parses_and_exposes_accessor_and_fleet_defaults() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_toml(
+            root,
+            "[defaults]\nflake = \"/etc/nixos\"\nuser = \"deploy\"\n",
+        );
+        let s = store(root, CliOverrides::default());
+
+        // Accessor exposes the raw `[defaults].flake` value.
+        assert_eq!(s.default_flake(), Some(Path::new("/etc/nixos")));
+
+        // The domain defaults record carries it too (ADR-004 tier 2).
+        let defaults = s.fleet_defaults().await.unwrap();
+        assert_eq!(defaults.flake, Some(PathBuf::from("/etc/nixos")));
+
+        // Non-flake `[defaults]` keys still parse as shared SSH settings.
+        let profile = s.resolve(&host("atlas")).await.unwrap();
+        assert_eq!(profile.user(), "deploy");
+    }
+
+    #[test]
+    fn effective_flake_prefers_cli_then_toml_then_default() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_toml(root, "[defaults]\nflake = \"/srv/nixos/flakes\"\n");
+
+        // An explicit CLI value wins, even when relative.
+        assert_eq!(
+            effective_flake(Path::new("nix/flakes"), root).unwrap(),
+            PathBuf::from("nix/flakes")
+        );
+
+        // The `.` marker (no explicit choice) falls through to the toml tier.
+        assert_eq!(
+            effective_flake(Path::new("."), root).unwrap(),
+            PathBuf::from("/srv/nixos/flakes")
+        );
+
+        // No config file anywhere and no explicit flag means `.`.
+        let empty = tempdir().unwrap();
+        assert_eq!(
+            effective_flake(Path::new("."), empty.path()).unwrap(),
+            PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn effective_flakes_relative_default_flake_resolves_to_config_location() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_toml(root, "[defaults]\nflake = \"machines/web-01\"\n");
+
+        let flake = effective_flake(Path::new("."), root).unwrap();
+        assert_eq!(flake, root.join("machines/web-01"));
+
+        // Discovery still walks up from a subdirectory of the config dir.
+        let sub = root.join("deep").join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(
+            effective_flake(Path::new("."), &sub).unwrap(),
+            root.join("machines/web-01")
+        );
+    }
+
+    #[test]
+    fn effective_flake_ignores_toml_without_flake_key() {
+        let dir = tempdir().unwrap();
+        write_toml(dir.path(), "[defaults]\nuser = \"deploy\"\n");
+        assert_eq!(
+            effective_flake(Path::new("."), dir.path()).unwrap(),
+            PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn effective_flake_surfaces_invalid_config() {
+        let dir = tempdir().unwrap();
+        write_toml(dir.path(), "this is not = [valid toml");
+        let err = effective_flake(Path::new("."), dir.path()).unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
+    }
+
+    #[test]
+    fn explicit_dot_flake_does_not_override_defaults_flake() {
+        // Documented pin (review WARNING): the `'.'` marker doubles as "no
+        // explicit choice" because clap defaults the string flags to it, so an
+        // explicit `--flake .` is indistinguishable from an absent flag and
+        // must NOT override the toml tier (no escape hatch, by design).
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_toml(root, "[defaults]\nflake = \"/srv/nixos\"\n");
+
+        assert_eq!(
+            effective_flake(Path::new("."), root).unwrap(),
+            PathBuf::from("/srv/nixos")
+        );
+    }
+
+    #[test]
+    fn effective_flake_discovers_nod_toml_alt_filename() {
+        // `nod.toml` (no leading dot) is the second name in CONFIG_FILE_NAMES
+        // and must constrain the cascade exactly like `.nod.toml`.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("nod.toml"),
+            "[defaults]\nflake = \"flakes/web-01\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            effective_flake(Path::new("."), root).unwrap(),
+            root.join("flakes/web-01")
+        );
+    }
+
+    #[test]
+    fn absolute_start_resolves_relative_starts_against_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+
+        // The production value: `Path::new(".")` normalizes to the absolute
+        // cwd so the ancestor walk can climb above it.
+        assert_eq!(
+            TomlConfigStore::absolute_start(Path::new(".")),
+            cwd.join(".")
+        );
+        assert!(TomlConfigStore::absolute_start(Path::new(".")).is_absolute());
+        assert!(TomlConfigStore::absolute_start(Path::new("")).is_absolute());
+
+        // Multi-component relative starts keep their structure.
+        assert_eq!(
+            TomlConfigStore::absolute_start(Path::new("deep/nested")),
+            cwd.join("deep/nested")
+        );
+
+        // Absolute starts pass through unchanged.
+        assert_eq!(
+            TomlConfigStore::absolute_start(Path::new("/etc/nixos")),
+            PathBuf::from("/etc/nixos")
+        );
+    }
+
+    #[test]
+    fn root_anchored_config_resolves_default_flake_without_parent() {
+        // The discover walk can only return a config directly anchored at `/`
+        // when run as root, so the parent-less branch is exercised directly on
+        // the resolver: the raw value is returned unchanged.
+        assert_eq!(
+            resolve_default_flake(Path::new("/"), Path::new("flakes/vm")),
+            PathBuf::from("flakes/vm")
+        );
+
+        // A normal file still resolves relative defaults against its directory.
+        assert_eq!(
+            resolve_default_flake(Path::new("/etc/nixos/.nod.toml"), Path::new("flakes/vm")),
+            PathBuf::from("/etc/nixos/flakes/vm")
+        );
     }
 }

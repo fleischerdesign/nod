@@ -211,6 +211,12 @@ pub struct HostOverrides {
 pub struct FleetDefaults {
     #[serde(flatten)]
     pub ssh: SshConnectionOverrides,
+    /// Optional default flake root from `[defaults].flake` (ADR-004 tier 2),
+    /// consulted when no explicit CLI `--flake` is given. Carries the value
+    /// as configured; relative values are resolved against the config file's
+    /// directory at bootstrap time by the config adapter
+    /// (`toml_config::effective_flake`).
+    pub flake: Option<PathBuf>,
     pub description: Option<String>,
     pub build: Option<BuildConfig>,
     pub rollout: Option<RolloutConfig>,

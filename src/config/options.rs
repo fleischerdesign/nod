@@ -268,6 +268,10 @@ pub enum Commands {
         #[command(flatten)]
         target_args: TargetArgs,
 
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
         /// Emit the drift report as JSON
         #[arg(long)]
         json: bool,
@@ -275,6 +279,10 @@ pub enum Commands {
 
     /// Read the recorded deployment audit history
     Audit {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
         /// Narrow the audit to one host
         target: Option<String>,
 
@@ -289,6 +297,10 @@ pub enum Commands {
 
     /// Open an interactive SSH session or execute a remote command on a host
     Ssh {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
         /// Target host name or selector
         target: Option<String>,
 
@@ -732,13 +744,42 @@ mod tests {
             .expect("valid audit invocation should parse");
         match audit.command {
             Commands::Audit {
+                flake,
                 target,
                 limit,
                 json,
             } => {
+                assert_eq!(flake, ".");
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(limit, Some(5));
                 assert!(json);
+            }
+            _ => panic!("expected an audit command"),
+        }
+    }
+
+    #[test]
+    fn parses_audit_with_flake() {
+        let audit = Cli::try_parse_from(vec![
+            "nod",
+            "audit",
+            "--flake",
+            "/srv/nixos",
+            "--limit",
+            "3",
+        ])
+        .expect("valid audit invocation with the flake flag should parse");
+        match audit.command {
+            Commands::Audit {
+                flake,
+                target,
+                limit,
+                json,
+            } => {
+                assert_eq!(flake, "/srv/nixos");
+                assert_eq!(target, None);
+                assert_eq!(limit, Some(3));
+                assert!(!json);
             }
             _ => panic!("expected an audit command"),
         }
@@ -759,11 +800,48 @@ mod tests {
                         role,
                         all,
                     },
+                flake,
                 json,
             } => {
+                assert_eq!(flake, ".");
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("server".to_string()));
                 assert_eq!(role, Some("db".to_string()));
+                assert!(all);
+                assert!(json);
+            }
+            _ => panic!("expected a drift command"),
+        }
+    }
+
+    #[test]
+    fn parses_drift_with_flake() {
+        let drift = Cli::try_parse_from(vec![
+            "nod",
+            "drift",
+            "atlas",
+            "--flake",
+            "/etc/nixos",
+            "--all",
+            "--json",
+        ])
+        .expect("valid drift invocation with the flake flag should parse");
+        match drift.command {
+            Commands::Drift {
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                flake,
+                json,
+            } => {
+                assert_eq!(flake, "/etc/nixos");
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
                 assert!(all);
                 assert!(json);
             }
@@ -776,12 +854,14 @@ mod tests {
         let ssh = Cli::parse_from(vec!["nod", "ssh"]);
         match ssh.command {
             Commands::Ssh {
+                flake,
                 target,
                 tag,
                 role,
                 sudo,
                 command,
             } => {
+                assert_eq!(flake, ".");
                 assert_eq!(target, None);
                 assert_eq!(tag, None);
                 assert_eq!(role, None);
@@ -800,12 +880,14 @@ mod tests {
         .expect("valid ssh invocation should parse");
         match ssh.command {
             Commands::Ssh {
+                flake,
                 target,
                 tag,
                 role,
                 sudo,
                 command,
             } => {
+                assert_eq!(flake, ".");
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("prod".to_string()));
                 assert_eq!(role, Some("api".to_string()));
@@ -824,12 +906,14 @@ mod tests {
         .expect("valid ssh command should parse");
         match ssh.command {
             Commands::Ssh {
+                flake,
                 target,
                 tag,
                 role,
                 sudo,
                 command,
             } => {
+                assert_eq!(flake, ".");
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(command, ["uname", "-a", "-o", "flag"]);
                 assert!(!sudo);
@@ -847,17 +931,43 @@ mod tests {
         .expect("valid ssh short flags should parse");
         match ssh.command {
             Commands::Ssh {
+                flake,
                 target,
                 tag,
                 role,
                 sudo,
                 command,
             } => {
+                assert_eq!(flake, ".");
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("prod".to_string()));
                 assert_eq!(role, Some("db".to_string()));
                 assert!(sudo);
                 assert_eq!(command, ["uname", "-a"]);
+            }
+            _ => panic!("expected an ssh command"),
+        }
+    }
+
+    #[test]
+    fn parses_ssh_with_flake() {
+        let ssh = Cli::try_parse_from(vec!["nod", "ssh", "--flake", "/srv/nixos", "atlas"])
+            .expect("valid ssh invocation with the flake flag should parse");
+        match ssh.command {
+            Commands::Ssh {
+                flake,
+                target,
+                tag,
+                role,
+                sudo,
+                command,
+            } => {
+                assert_eq!(flake, "/srv/nixos");
+                assert_eq!(target, Some("atlas".to_string()));
+                assert_eq!(tag, None);
+                assert_eq!(role, None);
+                assert!(!sudo);
+                assert!(command.is_empty());
             }
             _ => panic!("expected an ssh command"),
         }
