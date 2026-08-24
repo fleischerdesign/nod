@@ -80,7 +80,7 @@ impl NodError {
     /// Raised when a requested target host cannot be found.
     pub fn not_found(host: impl Into<String>) -> Self {
         NodError::config(format!(
-            "Target host '{}' not found in flake nixosConfigurations.",
+            "target host '{}' not found in flake nixosConfigurations.",
             host.into()
         ))
     }
@@ -190,6 +190,18 @@ mod tests {
         let b = a.clone();
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn user_facing_messages_start_lowercase_for_ordinary_words() {
+        // House style: sentence-start words are lowercase except proper nouns
+        // (e.g. "Nix"). This guards against regressions to mixed casing.
+        let not_found = NodError::not_found("atlas").to_string();
+        assert!(not_found.contains("target host '"), "got: {not_found}");
+        assert!(!not_found.contains("Target host"));
+        assert!(NodError::local_activate("x")
+            .to_string()
+            .contains("failed to activate"));
     }
 
     #[test]
