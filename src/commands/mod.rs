@@ -6,13 +6,16 @@ pub mod dashboard;
 pub mod diff;
 pub mod drift;
 pub mod exec;
+pub mod inputs;
 pub mod lifecycle;
+pub mod metadata;
 pub mod plan;
 pub mod rollback;
 pub mod ssh;
 pub mod status;
 pub mod switch;
 pub mod test;
+pub mod update;
 pub mod wiring;
 
 use colored::Colorize;

@@ -16,16 +16,18 @@ use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::deployment::local_deployer::LocalDeployer;
 use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
 use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
+use crate::infrastructure::nix::cli_flake::NixCliFlakeStore;
 use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 
-/// Builds the complete production graph (ADR-008, ADR-013). This is the single
+/// Builds the complete production graph (ADR-008, ADR-013, ADR-014). This is the single
 /// composition root: `main` calls it for every command arm and passes the
 /// resulting context into `execute`.
 ///
 /// Whereas [`AppContext::new`] takes arbitrary ports (for tests and
 /// dependency-free contexts), `production` binds the real evaluator, both
-/// deployers, [`TomlConfigStore`] as the `ConfigStorePort`, and
-/// [`JsonAuditStore`] as the `AuditStorePort`.
+/// deployers, [`TomlConfigStore`] as the `ConfigStorePort`,
+/// [`JsonAuditStore`] as the `AuditStorePort`, and [`NixCliFlakeStore`] as
+/// the `FlakePort`.
 pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppContext, NodError> {
     Ok(AppContext::new(
         Arc::new(NixCliEvaluator::new()),
@@ -33,7 +35,8 @@ pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppC
         Arc::new(SshCliDeployer::new()),
     )
     .with_config_store(Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?))
-    .with_audit_store(Arc::new(JsonAuditStore::new())))
+    .with_audit_store(Arc::new(JsonAuditStore::new()))
+    .with_flake_port(Arc::new(NixCliFlakeStore::new())))
 }
 
 #[cfg(test)]

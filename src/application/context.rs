@@ -12,6 +12,7 @@ use crate::domain::ports::audit_store::AuditStorePort;
 use crate::domain::ports::config_store::ConfigStorePort;
 use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
+use crate::domain::ports::flake::FlakePort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
 
 /// Resolves every port a use case may need from one seeded container.
@@ -22,6 +23,7 @@ pub struct AppContext {
     health_checker: Option<Arc<dyn HealthCheckerPort>>,
     config_store: Option<Arc<dyn ConfigStorePort>>,
     audit_store: Option<Arc<dyn AuditStorePort>>,
+    flake_port: Option<Arc<dyn FlakePort>>,
 }
 
 impl AppContext {
@@ -39,6 +41,7 @@ impl AppContext {
             health_checker: None,
             config_store: None,
             audit_store: None,
+            flake_port: None,
         }
     }
 
@@ -114,6 +117,19 @@ impl AppContext {
         self.audit_store
             .clone()
             .ok_or_else(|| NodError::missing_binding("AuditStorePort"))
+    }
+
+    /// Registers a flake port.
+    pub fn with_flake_port(mut self, value: Arc<dyn FlakePort>) -> Self {
+        self.flake_port = Some(value);
+        self
+    }
+
+    /// Resolves the flake port, or raises a config error when missing.
+    pub fn flake_port(&self) -> Result<Arc<dyn FlakePort>, NodError> {
+        self.flake_port
+            .clone()
+            .ok_or_else(|| NodError::missing_binding("FlakePort"))
     }
 }
 

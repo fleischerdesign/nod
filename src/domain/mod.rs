@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod config;
 pub mod errors;
+pub mod flake;
 pub mod host;
 pub mod plan;
 pub mod ports;

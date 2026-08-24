@@ -369,6 +369,25 @@ async fn main() -> Result<()> {
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
             nod::commands::dashboard::execute(Arc::new(ctx), &flake_path).await?;
         }
+        Commands::Inputs { flake, json } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::inputs::execute(ctx, &flake_path, json).await?;
+        }
+        Commands::Metadata { flake, json } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::metadata::execute(ctx, &flake_path, json).await?;
+        }
+        Commands::Update {
+            flake,
+            inputs,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::update::execute(ctx, &flake_path, inputs, json).await?;
+        }
     }
 
     Ok(())

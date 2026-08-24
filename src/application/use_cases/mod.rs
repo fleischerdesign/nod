@@ -7,4 +7,7 @@ pub mod detect_drift;
 pub mod exec_fleet;
 pub mod generate_plan;
 pub mod health_check;
+pub mod inspect_metadata;
+pub mod list_inputs;
 pub mod rollback;
+pub mod update_flake;

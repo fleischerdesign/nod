@@ -379,6 +379,42 @@ pub enum Commands {
         #[arg(long, default_value = ".")]
         flake: String,
     },
+
+    /// Inspect declared and locked flake inputs
+    Inputs {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Emit input list as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect flake repository and lockfile metadata
+    Metadata {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Emit metadata as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Update flake inputs and display revision deltas
+    Update {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Specific input names to update (e.g. 'nixpkgs', 'nod')
+        inputs: Vec<String>,
+
+        /// Emit update report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]
