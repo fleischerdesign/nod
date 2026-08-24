@@ -66,6 +66,21 @@ Each option resolves independently; missing tiers simply fall through.
 - The `AppContext` resolves a *merged* typed `Config` once per run, exposing the winning value per option; **no module outside config reads `.nod.toml` or hard-coded fallback**.
 - Higher tier always wins, independent per option. Gherkin `foundation.spec.md` adds a scenario asserting `CLI > TOML > flake > default` for a representative option.
 
-## Related
+## Residual SSH-field duplication (documented decision)
+
+The 10-field SSH connection set intentionally appears in **three** structs after
+consolidation (`ssh-field-consolidation.spec.md`, ADR-008 composition root):
+
+| Type | Serialization shape | Where |
+|---|---|---|
+| `SshOverrides` | TOML, snake_case, `#[serde(default)]` on `extra_ssh_args` | `toml_config.rs` |
+| `SshConnectionOverrides` | domain flat (embedded via `#[serde(flatten)]` in `HostOverrides`/`FleetDefaults`) | `domain/config.rs` |
+| `SshProfileConfig` | Nix `config.nod` JSON, camelCase + aliases | `domain/config.rs` |
+
+These are **not** DRY violations to be removed: each shape is bound to a distinct
+serialization source (TOML keys, domain merge output, Nix JSON with aliases). Folding
+them into one struct would force a serde shape break in at least one boundary. Keep them
+separate; if a future change reconciles two sources, that is a deliberate new ADR, not a
+cleanup. (ADR-007 keeps the runtime `SshProfile` as a fourth, non-optional value object.)
 
 - ADR-001 (AppContext: config resolution), ADR-002 (`ConfigError`), ADR-005 (TOML carries concurrency/rollout); `../spec/foundation.spec.md`.
