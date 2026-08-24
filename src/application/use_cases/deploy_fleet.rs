@@ -265,7 +265,9 @@ async fn run_host(
     flake: String,
 ) -> HostOutcome {
     let mut machine = DeploymentStateMachine::prepared();
-    machine.tick(DeploymentEvent::Begin).unwrap();
+    machine
+        .tick(DeploymentEvent::Begin)
+        .expect("a fresh machine begins in Prepared and accepts Begin");
 
     let evaluator = ctx.evaluator();
     let closure = evaluator
@@ -288,9 +290,15 @@ async fn run_host(
         .await;
     }
 
-    machine.tick(DeploymentEvent::EvalOk).unwrap();
-    machine.tick(DeploymentEvent::BuildOk).unwrap();
-    machine.tick(DeploymentEvent::TransferOk).unwrap();
+    machine
+        .tick(DeploymentEvent::EvalOk)
+        .expect("Evaluating accepts EvalOk -> Building");
+    machine
+        .tick(DeploymentEvent::BuildOk)
+        .expect("Building accepts BuildOk -> Transferring");
+    machine
+        .tick(DeploymentEvent::TransferOk)
+        .expect("Transferring accepts TransferOk -> Switching");
 
     let deployer = ctx.deployer_for(&host);
     let activation_action = options.action.to_str();
@@ -327,7 +335,9 @@ async fn run_host(
         .await;
     }
 
-    machine.tick(DeploymentEvent::SwitchOk).unwrap();
+    machine
+        .tick(DeploymentEvent::SwitchOk)
+        .expect("Switching accepts SwitchOk -> Verifying");
 
     if let Some(health) = ctx.health_checker_opt() {
         let verified = health.verify_health(&host).await;
@@ -343,13 +353,17 @@ async fn run_host(
             outcome.health_verified = Some(false);
             return outcome;
         }
-        machine.tick(DeploymentEvent::VerifyOk).unwrap();
+        machine
+            .tick(DeploymentEvent::VerifyOk)
+            .expect("Verifying accepts VerifyOk -> Completed");
         let mut outcome = HostOutcome::new(host.name, machine.state());
         outcome.health_verified = Some(true);
         return outcome;
     }
 
-    machine.tick(DeploymentEvent::VerifyOk).unwrap();
+    machine
+        .tick(DeploymentEvent::VerifyOk)
+        .expect("Verifying accepts VerifyOk -> Completed");
     HostOutcome::new(host.name, machine.state())
 }
 
@@ -383,23 +397,31 @@ async fn end_host(
     options: &DeploymentOptions,
     ctx: &Arc<AppContext>,
 ) -> HostOutcome {
-    machine.tick(event).unwrap();
+    machine
+        .tick(event)
+        .expect("a non-terminal host accepts its failure event onto RollbackTriggered");
     let deployer = ctx.deployer_for(host);
     if options.auto_rollback {
         let profile = match ctx.resolved_profile(host).await {
             Ok(profile) => profile,
             Err(_) => {
-                machine.tick(DeploymentEvent::RollbackFail).unwrap();
+                machine
+                    .tick(DeploymentEvent::RollbackFail)
+                    .expect("RollbackTriggered accepts RollbackFail -> Failed");
                 return HostOutcome::new(host.name.clone(), machine.state());
             }
         };
         let rollback = deployer.rollback(host, &profile).await;
         if rollback.is_ok() {
-            machine.tick(DeploymentEvent::RollbackOk).unwrap();
+            machine
+                .tick(DeploymentEvent::RollbackOk)
+                .expect("RollbackTriggered accepts RollbackOk -> RolledBack");
             return HostOutcome::new(host.name.clone(), machine.state());
         }
     }
-    machine.tick(DeploymentEvent::RollbackFail).unwrap();
+    machine
+        .tick(DeploymentEvent::RollbackFail)
+        .expect("RollbackTriggered accepts RollbackFail -> Failed");
     HostOutcome::new(host.name.clone(), machine.state())
 }
 #[cfg(test)]
