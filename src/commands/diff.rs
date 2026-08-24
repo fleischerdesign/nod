@@ -60,16 +60,34 @@ pub async fn execute(
             .build_toplevel(flake_path, &host.name, None, verbose)
             .await?;
 
-        if host.is_local {
-            let current_closure = Path::new("/run/current-system");
-            if current_closure.exists() {
+        let deployer = ctx.deployer_for(&host);
+        let profile = ctx.resolved_profile(&host).await?;
+        let current_closure = deployer.current_closure(&host, &profile).await?;
+
+        match current_closure {
+            Some(current) if current == new_closure => {
                 println!(
                     "  {}",
-                    format!("Comparing /run/current-system vs {}", new_closure.display()).dimmed()
+                    "✓ System is already in sync with target closure (no package changes).".green()
+                );
+            }
+            Some(current) => {
+                println!(
+                    "  {}",
+                    format!(
+                        "Comparing {} vs {}",
+                        current.display(),
+                        new_closure.display()
+                    )
+                    .dimmed()
                 );
 
                 let nvd_status = Command::new("nvd")
-                    .args(["diff", "/run/current-system", new_closure.to_str().unwrap()])
+                    .args([
+                        "diff",
+                        current.to_str().unwrap_or(""),
+                        new_closure.to_str().unwrap_or(""),
+                    ])
                     .status()
                     .await;
 
@@ -79,28 +97,172 @@ pub async fn execute(
                         .args([
                             "store",
                             "diff-closures",
-                            "/run/current-system",
-                            new_closure.to_str().unwrap(),
+                            current.to_str().unwrap_or(""),
+                            new_closure.to_str().unwrap_or(""),
                         ])
                         .status()
                         .await;
                 }
             }
-        } else {
-            let deployer = ctx.deployer_for(&host);
-            let is_up = deployer.check_reachability(&host).await.unwrap_or(false);
-            if is_up {
+            None => {
                 println!(
                     "  {}",
                     format!(
-                        "Remote host {} is online. Ready for closure diff.",
-                        host.name
+                        "! No active closure detected on {} (initial deployment). Target: {}",
+                        host.name,
+                        new_closure.display()
                     )
-                    .dimmed()
+                    .yellow()
                 );
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::config::{FleetDefaults, HostOverrides};
+    use crate::domain::host::{BuilderHost, HostEntity, SshProfile};
+    use crate::domain::ports::config_store::ConfigStorePort;
+    use crate::domain::ports::deployer::DeployerPort;
+    use crate::domain::ports::evaluator::EvaluatorPort;
+    use async_trait::async_trait;
+    use mockall::mock;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    mock! {
+        FakeDeployer {}
+        #[async_trait]
+        impl DeployerPort for FakeDeployer {
+            async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
+            async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
+        }
+    }
+
+    mock! {
+        FakeEvaluator {}
+        #[async_trait]
+        impl EvaluatorPort for FakeEvaluator {
+            async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+        }
+    }
+
+    mock! {
+        FakeConfigStore {}
+        #[async_trait]
+        impl ConfigStorePort for FakeConfigStore {
+            async fn resolve(&self, host: &HostEntity) -> Result<SshProfile, NodError>;
+            async fn host_overrides(&self, name: &str) -> Result<HostOverrides, NodError>;
+            async fn fleet_defaults(&self) -> Result<FleetDefaults, NodError>;
+            async fn apply_to(&self, host: HostEntity) -> Result<HostEntity, NodError>;
+        }
+    }
+
+    fn test_ctx(
+        eval: MockFakeEvaluator,
+        local: MockFakeDeployer,
+        ssh: MockFakeDeployer,
+        store: MockFakeConfigStore,
+    ) -> AppContext {
+        AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh))
+            .with_config_store(Arc::new(store))
+    }
+
+    #[tokio::test]
+    async fn diff_rejects_unmatched_target() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_discover_hosts()
+            .returning(|_, _| Ok(vec![HostEntity::new("jello", "127.0.0.1", false)]));
+
+        let ctx = test_ctx(
+            eval,
+            MockFakeDeployer::new(),
+            MockFakeDeployer::new(),
+            MockFakeConfigStore::new(),
+        );
+
+        let err = execute(
+            ctx,
+            Some("unknown_host"),
+            Path::new("."),
+            false,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
+        assert!(err.to_string().contains("no hosts matched"));
+    }
+
+    #[tokio::test]
+    async fn diff_in_sync_remote_closure_succeeds() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_discover_hosts()
+            .returning(|_, _| Ok(vec![HostEntity::new("rollins", "100.126.5.72", false)]));
+        eval.expect_build_toplevel()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-system-hash")));
+
+        let mut ssh = MockFakeDeployer::new();
+        ssh.expect_current_closure()
+            .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/test-system-hash"))));
+
+        let mut store = MockFakeConfigStore::new();
+        store.expect_apply_to().returning(Ok);
+        store
+            .expect_resolve()
+            .returning(|h| Ok(SshProfile::for_host(h)));
+
+        let ctx = test_ctx(eval, MockFakeDeployer::new(), ssh, store);
+        let res = execute(
+            ctx,
+            Some("rollins"),
+            Path::new("."),
+            false,
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn diff_missing_active_closure_succeeds() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_discover_hosts()
+            .returning(|_, _| Ok(vec![HostEntity::new("rollins", "100.126.5.72", false)]));
+        eval.expect_build_toplevel()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/new-system-hash")));
+
+        let mut ssh = MockFakeDeployer::new();
+        ssh.expect_current_closure().returning(|_, _| Ok(None));
+
+        let mut store = MockFakeConfigStore::new();
+        store.expect_apply_to().returning(Ok);
+        store
+            .expect_resolve()
+            .returning(|h| Ok(SshProfile::for_host(h)));
+
+        let ctx = test_ctx(eval, MockFakeDeployer::new(), ssh, store);
+        let res = execute(
+            ctx,
+            Some("rollins"),
+            Path::new("."),
+            false,
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert!(res.is_ok());
+    }
 }
