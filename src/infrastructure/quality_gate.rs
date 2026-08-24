@@ -99,14 +99,16 @@ fn warn_gate(tool: &str, status: &Result<ExitStatus, io::Error>) {
 }
 
 /// Runs the hard gate (deadnix): a launch failure or a non-zero exit is a
-/// hard configuration error (AC1).
+/// hard evaluation error (AC1). deadnix reports dead code, i.e. a check
+/// outcome, so it is classified as an evaluation failure rather than a
+/// malformed configuration.
 fn deadnix_gate(status: &Result<ExitStatus, io::Error>) -> Result<(), NodError> {
     match classify(status) {
         GateClassification::Pass => Ok(()),
-        GateClassification::LaunchError => Err(NodError::config(
+        GateClassification::LaunchError => Err(NodError::evaluation(
             "deadnix check could not run: failed to launch `deadnix`".to_string(),
         )),
-        GateClassification::FailedCheck => Err(NodError::config(
+        GateClassification::FailedCheck => Err(NodError::evaluation(
             "deadnix check failed (dead code detected).",
         )),
     }
@@ -152,16 +154,16 @@ mod tests {
     }
 
     #[test]
-    fn deadnix_launch_failure_is_a_hard_config_error() {
+    fn deadnix_launch_failure_is_a_hard_evaluation_error() {
         let err = deadnix_gate(&launch_error()).unwrap_err();
-        assert!(matches!(err, NodError::Config { .. }));
+        assert!(matches!(err, NodError::Evaluation { .. }));
         assert!(err.to_string().contains("deadnix"));
     }
 
     #[test]
-    fn deadnix_nonzero_exit_is_a_hard_config_error() {
+    fn deadnix_nonzero_exit_is_a_hard_evaluation_error() {
         let err = deadnix_gate(&failed_status()).unwrap_err();
-        assert!(matches!(err, NodError::Config { .. }));
+        assert!(matches!(err, NodError::Evaluation { .. }));
     }
 
     #[test]

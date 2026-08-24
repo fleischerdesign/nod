@@ -46,8 +46,10 @@ impl SystemdHealthChecker {
     /// reading the `UNIT`, `ACTIVE` and `SUB` columns (AC2) instead of
     /// relying on the leading bullet glyph that systemd omits when colour is
     /// disabled on a pipe. A row counts as a failed unit when its `ACTIVE` or
-    /// `SUB` column reads `failed`; the header, legend and "N units listed."
-    /// summary rows are skipped.
+    /// `SUB` column reads `failed`; the header and "N units listed." summary
+    /// rows are skipped. The summary skip keys off the leading token parsing
+    /// as a count, not a leading digit, so a failed unit whose name starts
+    /// with a digit (e.g. `10gig.service`) is not dropped.
     pub fn failed_units(output: &str) -> Vec<String> {
         let mut failed = Vec::new();
         for line in output.lines() {
@@ -55,8 +57,14 @@ impl SystemdHealthChecker {
             if cols.len() < 4 {
                 continue;
             }
-            // Skip the header row and the numeric "N units listed." summary.
-            if cols[0] == "UNIT" || cols[0].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            // Skip the header row and the "N units listed." summary. The
+            // summary is recognised by its first token parsing as a count and
+            // the remainder reading as a "... units listed." row, not by a
+            // leading digit.
+            if cols[0] == "UNIT"
+                || (cols[0].parse::<usize>().is_ok()
+                    && cols[1..].join(" ").ends_with("units listed."))
+            {
                 continue;
             }
             if cols[2] == "failed" || cols[3] == "failed" {
@@ -186,6 +194,16 @@ mod tests {
     fn no_failed_rows_means_no_failed_units() {
         assert!(SystemdHealthChecker::failed_units("0 loaded units listed.").is_empty());
         assert!(SystemdHealthChecker::failed_units("").is_empty());
+    }
+
+    #[test]
+    fn digit_leading_failed_unit_is_detected_while_summary_is_skipped() {
+        // A failed unit whose name starts with a digit must not be dropped by
+        // the summary-line heuristic (AC2), while the "N units listed."
+        // summary row is still skipped.
+        let output = "  UNIT                      LOAD   ACTIVE SUB    DESCRIPTION\n  10gig.service             loaded failed failed Big service\n3 failed units listed.\n";
+        let units = SystemdHealthChecker::failed_units(output);
+        assert_eq!(units, vec!["10gig.service".to_string()]);
     }
 
     #[test]

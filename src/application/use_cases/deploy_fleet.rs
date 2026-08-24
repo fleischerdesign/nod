@@ -737,4 +737,44 @@ mod tests {
         assert!(!outcome.ok);
         assert_eq!(outcome.health_verified, Some(false));
     }
+
+    #[tokio::test]
+    async fn passing_health_checker_marks_host_health_verified_true() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-healthpass")));
+
+        let mut local = MockFakeDeployer::new();
+        local
+            .expect_deploy_and_activate()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let mut checker = MockFakeHealthChecker::new();
+        checker
+            .expect_verify_health()
+            .times(1)
+            .returning(|_| Ok(true));
+
+        let ctx = ctx_with_checker(eval, local, checker);
+        let host = HostEntity::new("jello", "jello-machine", true);
+        let use_case = DeployFleetUseCase::new(ctx);
+
+        // auto_rollback is false, so VerifyOk lands in `Completed` and the
+        // passing checker must be recorded as Some(true) health_verified.
+        let summary = use_case
+            .execute(
+                vec![host],
+                options_with(DeploymentAction::Switch),
+                Path::new("/tmp/flake"),
+            )
+            .await
+            .unwrap();
+
+        let outcome = &summary.outcomes[0];
+        assert_eq!(outcome.state, DeploymentState::Completed);
+        assert!(outcome.ok);
+        assert_eq!(outcome.health_verified, Some(true));
+    }
 }
