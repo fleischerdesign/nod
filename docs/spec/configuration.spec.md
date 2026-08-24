@@ -50,6 +50,35 @@ Feature: Options resolve with CLI > .nod.toml > flake metadata > compiled defaul
 
 ---
 
+## Feature: Default Flake Root
+
+```gherkin
+@precedence @flake
+Feature: The effective flake root resolves as --flake > [defaults].flake > .
+
+  Scenario: explicit --flake beats the config default
+    Given a .nod.toml with [defaults] flake "/srv/nixos"
+    When the user runs a command with --flake "/tmp/other"
+    Then the effective flake root is "/tmp/other"
+
+  Scenario: [defaults].flake applies when no --flake is given
+    Given a .nod.toml with [defaults] flake "/srv/nixos"
+    When the user runs a command without --flake from a directory under that file
+    Then the effective flake root is "/srv/nixos"
+
+  Scenario: a relative [defaults].flake resolves against the config file location
+    Given a .nod.toml at /srv/nixos/.nod.toml with [defaults] flake "flakes/web"
+    When no --flake is given
+    Then the effective flake root is "/srv/nixos/flakes/web"
+
+  Scenario: the working directory is the fallback
+    Given no .nod.toml with a flake key anywhere above the cwd
+    When no --flake is given
+    Then the effective flake root is "."
+```
+
+---
+
 ## Feature: Host Selection by Tag, Role or Name
 
 ```gherkin
@@ -153,4 +182,7 @@ Feature: The effective SshProfile merges user, port, identity file, proxy jump a
 > **Conventions:** tier values are merged per option with a fixed precedence
 > (CLI > `.nod.toml` > flake metadata > compiled defaults); `[hosts.<name>]`
 > sections beat `[fleet]` which beats `[defaults]` within the TOML tier.
+> The **default flake root** uses its own two-tier cascade — CLI `--flake` >
+> `[defaults].flake` (discovered from the cwd, relative values resolved
+> against the config file's directory) > `.` — and stays out of `config.nod`.
 > Tag names are stable anchors for the runner.
