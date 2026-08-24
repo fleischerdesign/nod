@@ -1,10 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
-use nod::application::context::AppContext;
-use nod::config::options::{Cli, Commands};
+use nod::config::options::{Cli, Commands, SshArgs, TargetArgs};
 use nod::domain::config::CliOverrides;
 use nod::infrastructure::storage::json_audit_store::JsonAuditStore;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -14,14 +13,20 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Switch {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
+            ssh_args:
+                SshArgs {
+                    user,
+                    port,
+                    identity_file,
+                },
             flake,
-            tag,
-            role,
-            all,
-            user,
-            port,
-            identity_file,
             dry_run,
             concurrency,
             strategy,
@@ -34,9 +39,9 @@ async fn main() -> Result<()> {
             let overrides = CliOverrides {
                 user,
                 port,
-                identity_file: identity_file.map(PathBuf::from),
+                identity_file,
             };
-            let ctx = AppContext::production(Path::new(&flake), overrides)?;
+            let ctx = nod::commands::wiring::production(Path::new(&flake), overrides)?;
             nod::commands::switch::execute(
                 ctx,
                 target.as_deref(),
@@ -58,14 +63,20 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Test {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
+            ssh_args:
+                SshArgs {
+                    user,
+                    port,
+                    identity_file,
+                },
             flake,
-            tag,
-            role,
-            all,
-            user,
-            port,
-            identity_file,
             concurrency,
             strategy,
             batch_size,
@@ -78,7 +89,7 @@ async fn main() -> Result<()> {
                 identity_file,
             };
             let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
-            let ctx = AppContext::production(flake_path, overrides)?;
+            let ctx = nod::commands::wiring::production(flake_path, overrides)?;
             nod::commands::test::execute(
                 ctx,
                 target.as_deref(),
@@ -97,14 +108,20 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Boot {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
+            ssh_args:
+                SshArgs {
+                    user,
+                    port,
+                    identity_file,
+                },
             flake,
-            tag,
-            role,
-            all,
-            user,
-            port,
-            identity_file,
             concurrency,
             strategy,
             batch_size,
@@ -117,7 +134,7 @@ async fn main() -> Result<()> {
                 identity_file,
             };
             let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
-            let ctx = AppContext::production(flake_path, overrides)?;
+            let ctx = nod::commands::wiring::production(flake_path, overrides)?;
             nod::commands::boot::execute(
                 ctx,
                 target.as_deref(),
@@ -136,17 +153,20 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Build {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
             flake,
-            tag,
-            role,
-            all,
             builder,
             out_link,
             concurrency,
         } => {
             let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
-            let ctx = AppContext::production(flake_path, CliOverrides::default())?;
+            let ctx = nod::commands::wiring::production(flake_path, CliOverrides::default())?;
             nod::commands::build::execute(
                 ctx,
                 target.as_deref(),
@@ -166,13 +186,17 @@ async fn main() -> Result<()> {
             nod::commands::check::execute(Path::new(&flake)).await?;
         }
         Commands::Status {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
             flake,
-            tag,
-            role,
-            all,
         } => {
-            let ctx = AppContext::production(Path::new(&flake), CliOverrides::default())?;
+            let ctx =
+                nod::commands::wiring::production(Path::new(&flake), CliOverrides::default())?;
             nod::commands::status::execute(
                 ctx,
                 Path::new(&flake),
@@ -185,21 +209,27 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Diff {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
+            ssh_args:
+                SshArgs {
+                    user,
+                    port,
+                    identity_file,
+                },
             flake,
-            tag,
-            role,
-            all,
-            user,
-            port,
-            identity_file,
         } => {
             let overrides = CliOverrides {
                 user,
                 port,
-                identity_file: identity_file.map(PathBuf::from),
+                identity_file,
             };
-            let ctx = AppContext::production(Path::new(&flake), overrides)?;
+            let ctx = nod::commands::wiring::production(Path::new(&flake), overrides)?;
             nod::commands::diff::execute(
                 ctx,
                 target.as_deref(),
@@ -212,21 +242,27 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Plan {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
+            ssh_args:
+                SshArgs {
+                    user,
+                    port,
+                    identity_file,
+                },
             flake,
-            tag,
-            role,
-            all,
-            user,
-            port,
-            identity_file,
         } => {
             let overrides = CliOverrides {
                 user,
                 port,
-                identity_file: identity_file.map(PathBuf::from),
+                identity_file,
             };
-            let ctx = AppContext::production(Path::new(&flake), overrides)?;
+            let ctx = nod::commands::wiring::production(Path::new(&flake), overrides)?;
             nod::commands::plan::execute(
                 ctx,
                 target.as_deref(),
@@ -239,11 +275,14 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Rollback {
-            target,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
             flake,
-            tag,
-            role,
-            all,
             user,
             port,
         } => {
@@ -252,7 +291,7 @@ async fn main() -> Result<()> {
                 port,
                 identity_file: None,
             };
-            let ctx = AppContext::production(Path::new(&flake), overrides)?;
+            let ctx = nod::commands::wiring::production(Path::new(&flake), overrides)?;
             nod::commands::rollback::execute(
                 ctx,
                 target.as_deref(),
@@ -265,13 +304,16 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Drift {
-            target,
-            tag,
-            role,
-            all,
+            target_args:
+                TargetArgs {
+                    target,
+                    tag,
+                    role,
+                    all,
+                },
             json,
         } => {
-            let ctx = AppContext::production(Path::new("."), CliOverrides::default())?;
+            let ctx = nod::commands::wiring::production(Path::new("."), CliOverrides::default())?;
             nod::commands::drift::execute(
                 ctx,
                 Path::new("."),
@@ -290,7 +332,7 @@ async fn main() -> Result<()> {
             json,
         } => {
             // `audit` binds the audit store explicitly on the production graph.
-            let ctx = AppContext::production(Path::new("."), CliOverrides::default())?
+            let ctx = nod::commands::wiring::production(Path::new("."), CliOverrides::default())?
                 .with_audit_store(Arc::new(JsonAuditStore::new()));
             nod::commands::audit::execute(ctx, target.as_deref(), limit, json).await?;
         }
@@ -304,7 +346,7 @@ async fn main() -> Result<()> {
             // AC3: `ssh` receives a production context with a flake path (`.`
             // by default), so resolved identity/proxy/port from the config
             // store are honoured instead of the primitive fallback.
-            let ctx = AppContext::production(Path::new("."), CliOverrides::default())?;
+            let ctx = nod::commands::wiring::production(Path::new("."), CliOverrides::default())?;
             nod::commands::ssh::execute(
                 ctx,
                 Some(Path::new(".")),
@@ -329,7 +371,7 @@ async fn main() -> Result<()> {
             command,
         } => {
             let flake_path = flake.as_deref().unwrap_or_else(|| Path::new("."));
-            let ctx = AppContext::production(flake_path, CliOverrides::default())?;
+            let ctx = nod::commands::wiring::production(flake_path, CliOverrides::default())?;
             nod::commands::exec::execute(
                 ctx,
                 Some(flake_path),
@@ -346,7 +388,8 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Dashboard { flake } => {
-            let ctx = AppContext::production(Path::new(&flake), CliOverrides::default())?;
+            let ctx =
+                nod::commands::wiring::production(Path::new(&flake), CliOverrides::default())?;
             nod::commands::dashboard::execute(Arc::new(ctx), Path::new(&flake)).await?;
         }
     }

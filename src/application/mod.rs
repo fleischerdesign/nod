@@ -5,4 +5,5 @@
 pub mod context;
 pub mod pipeline;
 pub mod selection;
+pub mod spawn;
 pub mod use_cases;

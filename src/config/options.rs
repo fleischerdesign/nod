@@ -1,6 +1,48 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Common target-selection flags shared by the commands that scope a fleet:
+/// a positional target plus `--tag`/`--role`/`--all` filters (DRY — these
+/// were previously re-declared per command). Only the long flag forms live
+/// here; `ssh`/`exec` keep their own short forms (`-t`/`-r`/`-a`) and inline
+/// declarations to preserve their exact CLI surface.
+#[derive(clap::Args, Debug, Default)]
+pub struct TargetArgs {
+    /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
+    pub target: Option<String>,
+
+    /// Filter the fleet to hosts carrying this tag
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Filter the fleet to hosts with this role (e.g. 'server')
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+
+    /// Target every host in the discovered fleet
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// Common SSH connection overrides shared by the deploy/preview/diff
+/// commands (DRY — previously re-declared per command). Rollback deliberately
+/// keeps its own `--user`/`--port` (it has no `--identity-file`), so only
+/// commands that genuinely accept all three flatten this in.
+#[derive(clap::Args, Debug, Default)]
+pub struct SshArgs {
+    /// Override the SSH user for every targeted host
+    #[arg(long, value_name = "USER")]
+    pub user: Option<String>,
+
+    /// Override the SSH port for every targeted host
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
+
+    /// Override the SSH identity file for every targeted host
+    #[arg(long, value_name = "PATH")]
+    pub identity_file: Option<PathBuf>,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "nod",
@@ -25,37 +67,15 @@ pub struct Cli {
 pub enum Commands {
     /// Rebuild and activate NixOS configurations (local or remote)
     Switch {
-        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
-        /// for fleet deployment (defaults to 'local')
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        #[command(flatten)]
+        ssh_args: SshArgs,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
-
-        /// Filter the fleet to hosts carrying this tag (repeatable)
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role (e.g. 'server')
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
-
-        /// Override the SSH user for every targeted host
-        #[arg(long, value_name = "USER")]
-        user: Option<String>,
-
-        /// Override the SSH port for every targeted host
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-
-        /// Override the SSH identity file for every targeted host
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<String>,
 
         /// Preview the deployment plan without activating any host
         #[arg(long)]
@@ -92,36 +112,15 @@ pub enum Commands {
 
     /// Run `switch-to-configuration test` on one host or a fleet
     Test {
-        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        #[command(flatten)]
+        ssh_args: SshArgs,
 
         /// Custom path to flake root directory
         #[arg(long)]
         flake: Option<PathBuf>,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role (e.g. 'server')
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
-
-        /// Override the SSH user for every targeted host
-        #[arg(long, value_name = "USER")]
-        user: Option<String>,
-
-        /// Override the SSH port for every targeted host
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-
-        /// Override the SSH identity file for every targeted host
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<PathBuf>,
 
         /// Maximum hosts processed in-flight at once
         #[arg(long, value_name = "N")]
@@ -146,36 +145,15 @@ pub enum Commands {
 
     /// Run `switch-to-configuration boot` on one host or a fleet
     Boot {
-        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        #[command(flatten)]
+        ssh_args: SshArgs,
 
         /// Custom path to flake root directory
         #[arg(long)]
         flake: Option<PathBuf>,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role (e.g. 'server')
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
-
-        /// Override the SSH user for every targeted host
-        #[arg(long, value_name = "USER")]
-        user: Option<String>,
-
-        /// Override the SSH port for every targeted host
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-
-        /// Override the SSH identity file for every targeted host
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<PathBuf>,
 
         /// Maximum hosts processed in-flight at once
         #[arg(long, value_name = "N")]
@@ -200,24 +178,12 @@ pub enum Commands {
 
     /// Build a host or fleet's toplevel closure without transferring it
     Build {
-        /// Target host: 'local', a host name or glob (e.g. 'web-*'), or 'all'
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
 
         /// Custom path to flake root directory
         #[arg(long)]
         flake: Option<PathBuf>,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role (e.g. 'server')
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
 
         /// Build through a configured fleet host (exactly one; flake `buildHost`
         /// default is the lower tier)
@@ -242,95 +208,38 @@ pub enum Commands {
 
     /// Display live status matrix of all discovered NixOS hosts
     Status {
-        /// Target host: 'local', a host name or glob, or 'all'; narrows the
-        /// matrix to the selected fleet (defaults to 'all' when no criteria)
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Show every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
     },
 
     /// Generate package & systemd unit diff preview before switching
     Diff {
-        /// Target host: 'local', a host name or glob, or 'all'
-        /// (defaults to 'local')
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        #[command(flatten)]
+        ssh_args: SshArgs,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
-
-        /// Override the SSH user for every targeted host
-        #[arg(long, value_name = "USER")]
-        user: Option<String>,
-
-        /// Override the SSH port for every targeted host
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-
-        /// Override the SSH identity file for every targeted host
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<String>,
     },
 
     /// Preview the deployment plan for a target without activating it
     Plan {
-        /// Target host: 'local', a host name or glob, or 'all'
-        /// (defaults to 'local')
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        #[command(flatten)]
+        ssh_args: SshArgs,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
-
-        /// Override the SSH user for every targeted host
-        #[arg(long, value_name = "USER")]
-        user: Option<String>,
-
-        /// Override the SSH port for every targeted host
-        #[arg(long, value_name = "PORT")]
-        port: Option<u16>,
-
-        /// Override the SSH identity file for every targeted host
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<String>,
     },
 
     /// Revert exactly one host to its previous NixOS profile generation
@@ -338,25 +247,12 @@ pub enum Commands {
     /// Rollback is single-host: matching more than one host is rejected
     /// rather than silently operating on a subset of the fleet.
     Rollback {
-        /// Target host: 'local', a host name or glob, or 'all'
-        /// (defaults to 'local'); rollback targets exactly one host
-        target: Option<String>,
+        #[command(flatten)]
+        target_args: TargetArgs,
 
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
-
-        /// Filter the fleet to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Filter the fleet to hosts with this role
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
 
         /// Override the SSH user for the target
         #[arg(long, value_name = "USER")]
@@ -369,21 +265,8 @@ pub enum Commands {
 
     /// Detect configuration drift between live closures and the flake
     Drift {
-        /// Target host: 'local', a host name or glob, or 'all'
-        /// (defaults to 'local')
-        target: Option<String>,
-
-        /// Narrow drift detection to hosts carrying this tag
-        #[arg(long, value_name = "TAG")]
-        tag: Option<String>,
-
-        /// Narrow drift detection to hosts with this role
-        #[arg(long, value_name = "ROLE")]
-        role: Option<String>,
-
-        /// Target every host in the discovered fleet
-        #[arg(long)]
-        all: bool,
+        #[command(flatten)]
+        target_args: TargetArgs,
 
         /// Emit the drift report as JSON
         #[arg(long)]
@@ -497,14 +380,20 @@ mod tests {
         .expect("valid switch invocation should parse");
         match cli.command {
             Commands::Switch {
-                target,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                tag,
-                role,
-                all,
-                user,
-                port,
-                identity_file,
                 dry_run,
                 concurrency,
                 strategy,
@@ -540,14 +429,20 @@ mod tests {
         let cli = Cli::parse_from(vec!["nod", "switch"]);
         match cli.command {
             Commands::Switch {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                user,
-                port,
-                identity_file,
                 dry_run,
                 concurrency,
                 strategy,
@@ -599,6 +494,20 @@ mod tests {
         ]);
         match cli.command {
             Commands::Switch {
+                target_args:
+                    TargetArgs {
+                        all,
+                        target,
+                        tag,
+                        role,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
+                flake,
                 dry_run,
                 concurrency,
                 strategy,
@@ -607,14 +516,6 @@ mod tests {
                 auto_rollback,
                 on_error,
                 action,
-                all,
-                target,
-                flake,
-                tag,
-                role,
-                user,
-                port,
-                identity_file,
             } => {
                 assert!(dry_run);
                 assert_eq!(concurrency, 2);
@@ -636,21 +537,27 @@ mod tests {
         let cli = Cli::parse_from(vec!["nod", "switch", "--on-error", "continue"]);
         match cli.command {
             Commands::Switch {
-                on_error,
-                all,
-                target,
+                target_args:
+                    TargetArgs {
+                        all,
+                        target,
+                        tag,
+                        role,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                tag,
-                role,
-                user,
-                port,
-                identity_file,
                 dry_run,
                 concurrency,
                 strategy,
                 batch_size,
                 fail_fast,
                 auto_rollback,
+                on_error,
                 action,
             } => {
                 assert_eq!(on_error, Some("continue".to_string()));
@@ -684,14 +591,20 @@ mod tests {
         .expect("valid plan invocation should parse");
         match plan.command {
             Commands::Plan {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                user,
-                port,
-                identity_file,
             } => {
                 assert_eq!(target, Some("atlas".to_string()));
                 assert_eq!(tag, Some("server".to_string()));
@@ -711,14 +624,20 @@ mod tests {
         .expect("valid diff invocation should parse");
         match diff.command {
             Commands::Diff {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                user,
-                port,
-                identity_file,
             } => {
                 assert_eq!(target, Some("web-*".to_string()));
                 assert_eq!(tag, Some("prod".to_string()));
@@ -738,10 +657,13 @@ mod tests {
         .expect("valid status invocation should parse");
         match status.command {
             Commands::Status {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
                 flake,
             } => {
                 assert_eq!(target, Some("atlas".to_string()));
@@ -756,10 +678,13 @@ mod tests {
         let bare = Cli::try_parse_from(vec!["nod", "status"]).expect("bare status should parse");
         match bare.command {
             Commands::Status {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
                 flake,
             } => {
                 assert_eq!(target, None);
@@ -780,10 +705,13 @@ mod tests {
         .expect("valid rollback invocation should parse");
         match roll.command {
             Commands::Rollback {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
                 flake,
                 user,
                 port,
@@ -824,10 +752,13 @@ mod tests {
         .expect("valid drift invocation should parse");
         match drift.command {
             Commands::Drift {
-                target,
-                tag,
-                role,
-                all,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
                 json,
             } => {
                 assert_eq!(target, Some("atlas".to_string()));
@@ -963,14 +894,20 @@ mod tests {
         .expect("valid test invocation should parse");
         match cli.command {
             Commands::Test {
-                target,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                tag,
-                role,
-                all,
-                user,
-                port,
-                identity_file,
                 concurrency,
                 strategy,
                 batch_size,
@@ -1000,14 +937,20 @@ mod tests {
         let cli = Cli::parse_from(vec!["nod", "test"]);
         match cli.command {
             Commands::Test {
-                target,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                tag,
-                role,
-                all,
-                user,
-                port,
-                identity_file,
                 concurrency,
                 strategy,
                 batch_size,
@@ -1049,14 +992,20 @@ mod tests {
         .expect("valid boot invocation should parse");
         match cli.command {
             Commands::Boot {
-                target,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
+                ssh_args:
+                    SshArgs {
+                        user,
+                        port,
+                        identity_file,
+                    },
                 flake,
-                tag,
-                role,
-                all,
-                user,
-                port,
-                identity_file,
                 concurrency,
                 strategy,
                 batch_size,
@@ -1100,11 +1049,14 @@ mod tests {
         .expect("valid build invocation should parse");
         match cli.command {
             Commands::Build {
-                target,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
                 flake,
-                tag,
-                role,
-                all,
                 builder,
                 out_link,
                 concurrency,
@@ -1135,11 +1087,14 @@ mod tests {
         ]);
         match cli.command {
             Commands::Build {
-                target,
+                target_args:
+                    TargetArgs {
+                        target,
+                        tag,
+                        role,
+                        all,
+                    },
                 flake,
-                tag,
-                role,
-                all,
                 builder,
                 out_link,
                 concurrency,

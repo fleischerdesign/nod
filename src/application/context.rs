@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::audit_store::AuditStorePort;
@@ -14,11 +13,6 @@ use crate::domain::ports::config_store::ConfigStorePort;
 use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
-use crate::infrastructure::config::toml_config::TomlConfigStore;
-use crate::infrastructure::deployment::local_deployer::LocalDeployer;
-use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
-use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
-use std::path::Path;
 
 /// Resolves every port a use case may need from one seeded container.
 pub struct AppContext {
@@ -46,25 +40,6 @@ impl AppContext {
             config_store: None,
             audit_store: None,
         }
-    }
-
-    /// Builds the complete production graph (ADR-008). This is the single
-    /// composition root: `main` calls it for every command arm and passes the
-    /// resulting context into `execute`.
-    ///
-    /// Whereas [`AppContext::new`] takes arbitrary ports (for tests and
-    /// dependency-free contexts), `production` binds the real evaluator, both
-    /// deployers and a [`TomlConfigStore`] as the `ConfigStorePort`. The audit
-    /// store is deliberately NOT bound here: it is an opt-in per-command
-    /// binding (`audit` wires it via [`AppContext::with_audit_store`] at a
-    /// single call site in `main`).
-    pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<Self, NodError> {
-        Ok(Self::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        )
-        .with_config_store(Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?)))
     }
 
     /// Resolves the evaluator port.
@@ -145,11 +120,8 @@ impl AppContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::config::{CliOverrides, FleetDefaults, HostOverrides};
+    use crate::domain::config::{FleetDefaults, HostOverrides};
     use crate::domain::host::{BuilderHost, SshProfile};
-    use crate::infrastructure::deployment::local_deployer::LocalDeployer;
-    use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
-    use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
     use async_trait::async_trait;
     use mockall::mock;
     use std::path::{Path, PathBuf};
@@ -160,6 +132,17 @@ mod tests {
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
             async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+        }
+    }
+
+    mock! {
+        FakeDeployer {}
+        #[async_trait]
+        impl DeployerPort for FakeDeployer {
+            async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
+            async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }
 
@@ -191,36 +174,21 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn production_is_a_single_composition_root_binding_the_config_store() {
-        // AC1/AC3: `production` wires the real graph and binds the config
-        // store, so `resolved_profile` honours merged overrides instead of
-        // falling back to the primitive `SshProfile::for_host`.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".nod.toml"),
-            "[hosts.atlas]\nuser = \"philipp\"\n",
+    /// Fresh evaluator and two distinct deployer slots for dependency-free
+    /// contexts. The application layer never imports concrete adapters
+    /// (ADR-001); tests bind mock ports instead.
+    fn dependencies() -> (MockFakeEvaluator, MockFakeDeployer, MockFakeDeployer) {
+        (
+            MockFakeEvaluator::new(),
+            MockFakeDeployer::new(),
+            MockFakeDeployer::new(),
         )
-        .unwrap();
-        let ctx = AppContext::production(dir.path(), CliOverrides::default()).unwrap();
-        let host = HostEntity::new("atlas", "10.0.0.8", false);
-        let profile = ctx.resolved_profile(&host).await.unwrap();
-        assert_eq!(
-            profile.user(),
-            "philipp",
-            "production must bind the store so merged overrides apply, \
-             not the primitive fallback"
-        );
-        assert_ne!(profile, SshProfile::for_host(&host));
     }
 
     #[test]
     fn default_resolution_resolves_distinct_deployers_by_target() {
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        );
+        let (eval, local, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh));
         let local = HostEntity::new("jello", "jello-machine", true);
         let remote = HostEntity::new("atlas", "10.0.0.8", false);
         let local_d = ctx.deployer_for(&local);
@@ -233,11 +201,8 @@ mod tests {
 
     #[test]
     fn unknown_service_is_a_config_error() {
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        );
+        let (eval, local, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh));
         let err = ctx.config_store().err().unwrap();
         assert!(matches!(err, NodError::Config { .. }));
         assert!(err.to_string().contains("ConfigStorePort"));
@@ -254,8 +219,8 @@ mod tests {
 
         let ctx = AppContext::new(
             Arc::new(mock_eval),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
+            Arc::new(MockFakeDeployer::new()),
+            Arc::new(MockFakeDeployer::new()),
         );
 
         let resolved = ctx
@@ -269,15 +234,17 @@ mod tests {
 
     #[tokio::test]
     async fn local_host_probes_through_local_deployer_without_ssh() {
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        );
-        let local = HostEntity::new("jello", "jello-machine", true);
+        let mut local = MockFakeDeployer::new();
+        local
+            .expect_check_reachability()
+            .times(1)
+            .returning(|_| Ok(true));
+        let (eval, _, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh));
+        let host = HostEntity::new("jello", "jello-machine", true);
         let is_up = ctx
-            .deployer_for(&local)
-            .check_reachability(&local)
+            .deployer_for(&host)
+            .check_reachability(&host)
             .await
             .unwrap();
         assert!(is_up, "local deployer probes reachability without SSH");
@@ -285,11 +252,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_profile_without_a_config_store_falls_back_to_primitive() {
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        );
+        let (eval, local, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh));
         let host = HostEntity::new("atlas", "10.0.0.8", false);
         let profile = ctx.resolved_profile(&host).await.unwrap();
         assert_eq!(profile, SshProfile::for_host(&host));
@@ -308,12 +272,9 @@ mod tests {
             .times(1)
             .returning(move |_| Ok(expected_c.clone()));
 
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        )
-        .with_config_store(Arc::new(config));
+        let (eval, local, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh))
+            .with_config_store(Arc::new(config));
 
         let profile = ctx.resolved_profile(&host).await.unwrap();
         assert_eq!(profile, expected);
@@ -333,12 +294,9 @@ mod tests {
                 .with_extra_ssh_arg("-o KeepAlive=1".to_string()))
         });
 
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        )
-        .with_config_store(Arc::new(config));
+        let (eval, local, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh))
+            .with_config_store(Arc::new(config));
 
         let profile = ctx.resolved_profile(&host).await.unwrap();
         let args = crate::domain::ssh_args::build_ssh_args(
@@ -380,14 +338,11 @@ mod tests {
         let mut audit = MockFakeAuditStore::new();
         audit.expect_record().times(1).returning(move |_, _| Ok(()));
 
-        let ctx = AppContext::new(
-            Arc::new(NixCliEvaluator::new()),
-            Arc::new(LocalDeployer::new()),
-            Arc::new(SshCliDeployer::new()),
-        )
-        .with_config_store(Arc::new(config))
-        .with_health_checker(Arc::new(health))
-        .with_audit_store(Arc::new(audit));
+        let (eval, local, ssh) = dependencies();
+        let ctx = AppContext::new(Arc::new(eval), Arc::new(local), Arc::new(ssh))
+            .with_config_store(Arc::new(config))
+            .with_health_checker(Arc::new(health))
+            .with_audit_store(Arc::new(audit));
 
         let host = HostEntity::new("atlas", "10.0.0.8", false);
         let profile = ctx.config_store().unwrap().resolve(&host).await.unwrap();
