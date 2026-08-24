@@ -92,7 +92,7 @@ pub async fn execute(
     let summary = use_case.execute(staged, options, flake_path).await?;
 
     if !quiet {
-        crate::commands::render_summary(&summary, verbose);
+        crate::commands::render_summary(&summary);
     }
 
     Ok(())
