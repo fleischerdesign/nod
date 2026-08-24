@@ -3,7 +3,8 @@
 **Module:** `src/ui/mod.rs`, `src/ui/app.rs`, `src/ui/views.rs`.
 **References:** ADR-008 (AC7 labelled the keys as preview/log-only via `TODO(dashboard-deploy)`),
 ADR-003, ADR-005.
-**Depends on:** P1-P6, P7c, P7a in place. `AppContext::production` and the three use cases
+**Depends on:** P1-P6, P7c, P7a in place. `wiring::production` (in
+`src/commands/wiring.rs`) and the three use cases
 exist.
 
 ## Problem (verified)
@@ -38,7 +39,7 @@ must make that unmistakable, not a silent side effect).
 
 1. **`run_dashboard` takes `Arc<AppContext>`** (change `AppContext` by value → `Arc`), so the
    context can be handed into the event loop. (`main.rs` already constructs via
-   `AppContext::production`; pass `Arc::new(ctx)`.)
+   `wiring::production`; pass `Arc::new(ctx)`.)
 2. **Thread the context through the event loop**: `drive_events(&mut app, &mut terminal,
    flake_path, ctx_arc)` and `run_action(action, app, flake_path, ctx_arc, verbose)`.
 3. **`run_action` dispatches** (async, since use cases are async):

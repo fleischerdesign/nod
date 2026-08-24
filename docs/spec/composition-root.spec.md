@@ -31,7 +31,13 @@ Two structural defects surfaced by the audit and review:
 ## Decision
 
 ### 1. A single production factory (ADR-008, Composition Root)
-`AppContext::production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppContext, NodError>`
+`wiring::production` in `src/commands/wiring.rs`:
+
+```rust
+pub fn production(flake_path: &Path, cli_overrides: CliOverrides)
+    -> Result<AppContext, NodError>
+```
+
 builds the complete production graph in **one** place:
 
 - evaluator = `Arc::new(NixCliEvaluator::new())`
@@ -40,7 +46,7 @@ builds the complete production graph in **one** place:
 - config store = `Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?)`
 - audit store = NOT bound by default (only `audit` uses it; see below)
 
-`main.rs` becomes the **only** composition root: it calls `AppContext::production(...)`
+`main.rs` becomes the **only** composition root: it calls `wiring::production(...)`
 for every command and passes the `ctx` into `execute`. The 8 command files stop
 constructing `AppContext`/`TomlConfigStore` themselves and instead accept `ctx` as a
 parameter.
@@ -96,13 +102,13 @@ identical and there is no divergent third copy.
 
 ## Acceptance Criteria
 
-- **AC1 — One composition root.** `AppContext::production(flake, overrides)` exists and
-  is the only place that constructs the evaluator/deployers/config-store graph. `grep`
-  shows `AppContext::new(` no longer appears inside any `src/commands/*.rs` (only
-  `context.rs` internal + tests).
-- **AC2 — main is the root.** `main.rs` calls `production(...)` for every command arm and
-  passes `ctx` to `execute`. No command constructs `AppContext` or `TomlConfigStore`
-  itself.
+- **AC1 — One composition root.** `wiring::production(flake, overrides)` in
+  `src/commands/wiring.rs` exists and is the only place that constructs the
+  evaluator/deployers/config-store graph. `grep` shows `AppContext::new(` appears only
+  in `wiring.rs::production` plus `context.rs` internal + tests (no other command file).
+- **AC2 — main is the root.** `main.rs` calls `wiring::production(...)` for every command
+  arm and passes `ctx` to `execute`. Command execute arms construct neither `AppContext`
+  nor `TomlConfigStore` themselves (only `wiring.rs::production` does).
 - **AC3 — ssh/exec bind a config store.** After the change, `nod ssh` and `nod exec`
   reach `resolved_profile` with a `Some(config_store)`, so configured
   identity/proxy/port are honoured (Welle-1 warning closed). `ssh` receives a flake path
@@ -138,6 +144,6 @@ identical and there is no divergent third copy.
 - `cargo test` — all existing tests + new `DefaultScope`/resolution tests pass.
 - `cargo clippy --all-targets -- -D warnings` — zero warnings.
 - `cargo fmt --check`.
-- `grep -rn "AppContext::new(" src/commands/` → no matches (AC1).
-- `grep -rn "TomlConfigStore::new" src/commands/` → no matches (AC2).
+- `grep -rn "AppContext::new(" src/commands/` → matches only `wiring.rs` (AC1).
+- `grep -rn "TomlConfigStore::new" src/commands/` → matches only `wiring.rs` (AC2).
 - `grep -rn "fn render_summary" src/commands/` → exactly one definition (AC5).

@@ -23,9 +23,9 @@ host — 0 or >1 matches is a clean typed error.
 
 The roadmap builds on shipped wiring that is no longer a per-command concern:
 
-- **Single composition root** — `AppContext::production(...)` in `main.rs` is the
-  only place commands obtain the context, evaluator, both deployers, and the config
-  store (ADR-008).
+- **Single composition root** — `wiring::production(...)` in
+  `src/commands/wiring.rs`, called by `main.rs`, is the only place commands obtain
+  the context, evaluator, both deployers, and the config store (ADR-008).
 - **Effective connection profile** — the resolved `SshProfile` flows through the
   deploy port from the caller (ADR-007); `ssh`/`exec` bind a config store so
   configured `identity_file`/`proxy_jump`/port are honoured.
