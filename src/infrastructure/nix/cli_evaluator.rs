@@ -98,15 +98,20 @@ impl NixCliEvaluator {
         })
     }
 
-    /// Builds the Nix expression that evaluates one host's `config.nod`
-    /// surface (AC4, tier 3). The flake path and host name are escaped as
-    /// Nix string literals (and the host selected with a quoted attribute) so
-    /// paths/names containing spaces, quotes or `${` evaluate correctly.
+    /// Builds the `--apply` lambda that extracts the `config.nod` surface
+    /// (AC4, tier 3) from a host's evaluated config. The host name is escaped
+    /// so names containing quotes or `${` evaluate literally. It reads a
+    /// single `x` argument (the evaluated config) and returns the same field
+    /// set node's `NixCliEvaluator::collect_hosts` deserializes.
+    ///
+    /// No `import` is emitted: the host config is reached via a flake
+    /// reference (`<path>#nixosConfigurations.<name>.config`), which is
+    /// pure-mode-safe and works for flakes without a `default.nix`.
     fn build_meta_expr(flake_path: &Path, name: &str) -> String {
-        let path = Self::nix_escape(&flake_path.display().to_string());
+        let _ = flake_path; // kept for signature stability / escaping context
         let name = Self::nix_escape(name);
         format!(
-            "let x = (import \"{path}\").nixosConfigurations.\"{name}\".config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{name}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null; }} ",
+            "x: {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{name}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null; }}",
         )
     }
 
@@ -139,27 +144,34 @@ impl NixCliEvaluator {
     /// kept here (async) so the pure [`Self::collect_hosts`] fold stays
     /// unit-testable without a Nix toolchain.
     ///
-    /// `--impure` is required: the expression does `builtins.import` of the
-    /// canonicalized absolute flake path, which pure eval forbids ("access to
-    /// absolute path ... is forbidden in pure eval mode") because the path
-    /// lives outside the store.
+    /// The host config is reached via a flake reference
+    /// (`<abs-path>#nixosConfigurations.<name>.config`) with an `--apply`
+    /// field-extraction lambda — pure-mode-safe and correct for flakes that
+    /// have no `default.nix` (an `import "<path>"` approach fails on both
+    /// counts).
     async fn eval_host_meta(&self, flake_path: &Path, name: &str) -> Result<FlakeMeta, NodError> {
-        let meta_expr = Self::build_meta_expr(flake_path, name);
-        let args = Self::meta_eval_args(&meta_expr);
+        let lambda = Self::build_meta_expr(flake_path, name);
+        let flake_ref = format!(
+            "{}#nixosConfigurations.{}.config",
+            flake_path.display(),
+            name
+        );
+        let args = Self::meta_eval_args(&flake_ref, &lambda);
         let meta_output = Command::new("nix").args(&args).output().await;
         Self::eval_meta(name, meta_output)
     }
 
-    /// Builds the `nix eval` argv for one host's metadata expression. Pure
-    /// and side-effect free so the command shape (specifically the `--impure`
-    /// flag) is unit-testable without a Nix toolchain.
-    fn meta_eval_args(meta_expr: &str) -> Vec<String> {
+    /// Builds the `nix eval` argv for one host's metadata: evaluate the flake
+    /// reference and map it through the `--apply` field-extraction lambda.
+    /// Pure and side-effect free so the command shape is unit-testable
+    /// without a Nix toolchain.
+    fn meta_eval_args(flake_ref: &str, lambda: &str) -> Vec<String> {
         vec![
             "eval".to_string(),
-            "--impure".to_string(),
             "--json".to_string(),
-            "--expr".to_string(),
-            meta_expr.to_string(),
+            "--apply".to_string(),
+            lambda.to_string(),
+            flake_ref.to_string(),
         ]
     }
 
@@ -533,23 +545,31 @@ mod tests {
     }
 
     #[test]
-    fn meta_eval_args_forces_impure() {
-        // Regression: the per-host metadata expression `builtins.import`s the
-        // absolute flake path, which pure eval rejects with "access to absolute
-        // path ... is forbidden in pure eval mode". The `nix eval` argv must
-        // therefore carry `--impure` (the matrix `#nixosConfigurations` call is
-        // pure-mode-safe and unchanged).
-        let args = NixCliEvaluator::meta_eval_args("some-expr");
-        assert!(args.iter().any(|a| a == "--impure"));
+    fn meta_eval_args_use_flake_ref_and_apply() {
+        // The per-host metadata is reached via a flake reference with an
+        // `--apply` field-extraction lambda (no `import`, no `--impure`),
+        // which is pure-mode-safe and works for flakes without `default.nix`.
+        let args =
+            NixCliEvaluator::meta_eval_args("/etc/nixos#nixosConfigurations.yorke.config", "x: x");
         assert_eq!(args[0], "eval");
-        assert!(args.iter().any(|a| a == "--expr"));
+        assert!(args.iter().any(|a| a == "--json"));
+        assert!(args.iter().any(|a| a == "--apply"));
+        assert!(args.contains(&"x: x".to_string()));
+        assert!(args.contains(&"/etc/nixos#nixosConfigurations.yorke.config".to_string()));
+        // No `--impure` and no `--expr`-embedded `import` — pure-mode-safe.
+        assert!(!args.iter().any(|a| a == "--impure"));
     }
 
     #[test]
-    fn meta_expr_escapes_path_and_name() {
+    fn meta_expr_is_a_field_extraction_lambda_not_an_import() {
+        // The meta expression is an `--apply` lambda, not a `let ... import
+        // "<path>"` expression — `import` of a bare dir requires a
+        // `default.nix` and is forbidden in pure mode, both of which break
+        // flake-based discovery.
         let expr = NixCliEvaluator::build_meta_expr(Path::new("/tmp/my flake"), "edge\"host");
-        assert!(expr.contains("(import \"/tmp/my flake\")"));
-        assert!(expr.contains("nixosConfigurations.\"edge\\\"host\""));
+        assert!(expr.starts_with("x: {"), "must be a lambda, got: {expr}");
+        assert!(!expr.contains("import "));
+        assert!(!expr.contains("let x ="));
         assert!(expr.contains("else \"edge\\\"host\""));
     }
 
