@@ -75,7 +75,7 @@ The innermost, dependency-free layer. It contains:
 - **Value objects** — immutable, structural: `SshProfile`, `ActiveClosure`, `ConfigError`/typed-error types, deployment transition guards.
 - **Ports** — the interfaces the outside world must satisfy so Domain/Application never depend on an external tool:
   - `NixEvaluatorPort` — discover hosts, build a toplevel closure.
-  - `DeployerPort` — reachability probe, deploy-and-activate, rollback.
+  - `DeployerPort` — reachability probe, deploy-and-activate, rollback. Transport methods take the resolved `&SshProfile` alongside the host (ADR-007).
   - `ConfigSource` — supply resolved configuration for a host.
   - `HealthCheckPort` — verify a live system after activation.
 
@@ -85,10 +85,9 @@ Domain Core has **zero imports from Infrastructure, Application, or Presentation
 
 The Application layer is where **orchestration lives**: it owns the *policy* (which hosts, in which order, with which concurrency and error-recovery, how to sequence the deployment state machine) but *not* the mechanics.
 
-- **AppContext** — a dependency-injection container. It is seeded by `main` (Presentation) and resolves:
-  - all use-case instances,
-  - the ports those use cases need (`Evaluator`, `Deployer`, `ConfigSource`, `HealthCheck`),
-  - the runtime `CliOptions` (verbosity, quiet mode) and the resolved configuration tier (see ADR-004).
+- **AppContext** — a dependency-injection container. `main` (Presentation) is the **single composition root**: it builds the context through one factory, `AppContext::production(flake_path, cli_overrides)` (see ADR-008), which constructs the evaluator, both deployers, the `TomlConfigStore` (bound as `ConfigStorePort`), all use-case instances, and the runtime `CliOptions`. Commands no longer construct `AppContext` or the store themselves; they accept a resolved context and bind optional services (e.g. `audit`'s `AuditStorePort`) at an explicit call site.
+- **Effective profile flow** — the resolved `SshProfile` is an explicit argument to the deploy port (ADR-007). The caller obtains it via `ConfigStorePort::resolve(host)` / `AppContext::resolved_profile(host)`; the transport adapters are dumb transports that consume only the passed profile instead of re-deriving a primitive one. `ssh`/`exec` now bind a config store, so resolved connection settings are honoured on those paths.
+- **Centralized target resolution** — `resolve_targets` + `DefaultScope` in `application/selection.rs` implement the shared ADR-006 target-selection idiom at one call site per command (ADR-008): deploy/exec default to `DefaultScope::Local`, `status` to `DefaultScope::All`, and `select_exact_one` stays the single-host gate for `rollback`/`ssh`.
 - **Use cases** — one per command: `switch`, `check`, `status`, `diff`, `rollback`, `dashboard`. Each expresses *"what should happen"* and delegates mechanical steps to the resolved port implementations.
 
 Application depends on Domain Core *only through ports*, and is independent of any concrete adapter.
@@ -175,4 +174,7 @@ src/
 - ADR-003 — Deployment State Machine (`../adr/003-deployment-state-machine.md`)
 - ADR-004 — Configuration Hierarchy (`../adr/004-configuration-hierarchy.md`)
 - ADR-005 — Fleet Concurrency (`../adr/005-fleet-concurrency.md`)
+- ADR-006 — Unified Target Selection (`../adr/006-unified-target-selection.md`)
+- ADR-007 — Effective Connection Profile (`../adr/007-effective-connection-profile.md`)
+- ADR-008 — Single Composition Root & Centralized Target Resolution (`../adr/008-composition-root.md`)
 - Gherkin / foundation spec (`../spec/foundation.spec.md`)

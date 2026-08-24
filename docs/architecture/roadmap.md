@@ -21,6 +21,18 @@ narrowing by **boolean AND (set-intersection)** and staying order-free. Commands
 with a single terminal (`ssh`, `repl`, `eval`) must resolve to **exactly one**
 host — 0 or >1 matches is a clean typed error.
 
+The roadmap builds on shipped wiring that is no longer a per-command concern:
+
+- **Single composition root** — `AppContext::production(...)` in `main.rs` is the
+  only place commands obtain the context, evaluator, both deployers, and the config
+  store (ADR-008).
+- **Effective connection profile** — the resolved `SshProfile` flows through the
+  deploy port from the caller (ADR-007); `ssh`/`exec` bind a config store so
+  configured `identity_file`/`proxy_jump`/port are honoured.
+- **Centralized target resolution** — `resolve_targets` + `DefaultScope` in
+  `application/selection.rs` is the single ADR-006 selection idiom used by every
+  command (ADR-008).
+
 ## Theme 1 — Lifecycle & Deployment
 
 The core activate/switch lifecycle: compile, transfer, and activate per-generation,
@@ -34,7 +46,7 @@ stage and validate before committing.
 | `nod boot [TARGET/GLOB] [--tag] [--role] [--all]` | Register the generation as the bootloader default **without** an immediate live service switch (`switch-to-configuration boot`) — the inverse of `test`. | P1 | High | Small | App: deploy use case writes only the boot entry; service activation deferred. |
 | `nod build [TARGET/GLOB] [--tag] [--role] [--all] [--out-link L]` | Pure compilation of `system.build.toplevel` closures **without transfer or activation**; materialize an out-link at `L` when supplied. The local/preflight build path. | P0 | Critical | Small | App: build/link port; feeds transfer and cache export. |
 | `nod plan [TARGET/GLOB] [--tag] [--role] [--all]` | Dry-run execution plan and closure diffing: evaluate the target closure set, diff against the deployed generation, and print the pending action step — without performing it. | P1 | High | Small | Existing `plan`; read-only App use case over discovery + store diff. |
-| `nod rollback [TARGET/GLOB] [--tag] [--role] [--all] [--generation N]` | Revert to the previous generation (or an explicit `--generation N`), re-arming the **auto-rollback** boundary so a failed activation recovers itself. | P1 | High | Small | Existing `RollbackUseCase`; ADR-003 state machine + history store. |
+| `nod rollback [TARGET]` | Revert to the previous generation (**exactly one** target — multi-match is a clean error; no `--generation` flag, generation-targeted rollback is deferred future work), re-arming the **auto-rollback** boundary so a failed activation recovers itself. | P1 | High | Small | Existing `RollbackUseCase`; ADR-003 state machine + history store; single-host via `select_exact_one`. |
 
 ## Theme 2 — Flake & Lockfile Management
 
@@ -71,7 +83,7 @@ Interactive and bulk remote management: an established, deployed fleet.
 | `nod eval <TARGET> <ATTRIBUTE>` | Evaluate an arbitrary NixOS option for the target **without building**: resolve the closure, read the attribute, and print it. Exactly-one target. | P2 | Medium | Medium | App use case over the evaluator; single-terminal invariant. |
 | `nod repl <TARGET>` | Interactive `nix repl` with the **host's configuration preloaded**; reuse the normal selector with the exactly-1 invariant. | P2 | Medium | Medium | App: reuses the ADR-006 single-terminal invariant. |
 | `nod reboot [TARGET/GLOB] [--tag] [--role] [--all] [--wait]` | **Coordinated rolling reboots**: drain, reboot, and (with `--wait`) poll reachability + post-reboot health checks — the ADR-005 rolling rollout shape. | P2 | High | Medium | App: reuses ADR-003 state machine + ADR-005 fleet rollout. |
-| `nod dashboard` ✅ shipped | An interactive **Ratatui TUI**: streams the fleet status matrix, generation, and audit history in a terminal UI. | P1 | High | Small | Presentation layer over the existing status + audit use cases; no domain change. |
+| `nod dashboard` ✅ shipped | An interactive **Ratatui TUI**: streams the fleet status matrix, generation, and audit history in a terminal UI. | P1 | High | Small | Presentation layer over the existing status + audit use cases; no domain change. Action keys (`s`/`r`/`d`) are preview/log intents only — live deploy dispatch from the TUI is a deferred cross-cutting change (see `TODO(dashboard-deploy)` in `src/ui/mod.rs`). |
 
 ## Theme 5 — Secrets & Security
 
@@ -137,10 +149,10 @@ come next. Then the P1 selector-heavy trio `exec`/`secret check`/`update`, `test
 | 1. Lifecycle/deploy | App + Infra | transfer/switch/bootloader ports; deploy, plan, rollback use cases | ADR-006, ADR-003, ADR-002 |
 | 2. Flake/lockfile | App + Infra | flake/update, store, quality-gate adapters | ADR-006 |
 | 3. Generations/store | Infra | new `NixStorePort` seam; store walker | ADR-006, ADR-001 |
-| 4. Day-2 ops | Presentation (TUI) + App | selector + SSH port + rollout controller | ADR-006, ADR-002, ADR-005 |
+| 4. Day-2 ops | Presentation (TUI) + App | selector + SSH port + rollout controller | ADR-006, ADR-002, ADR-005, ADR-007, ADR-008 |
 | 5. Secrets | Infra | sops/age adapters; typed errors; rolling rollout | ADR-002, ADR-005 |
 | 6. Provisioning | Infra | disko/anywhere/ISO adapters (`ProvisioningPort`) | ADR-001 (ports) |
-| 7. Build/cache | Infra | cache adapter + builder selection | ADR-005 |
+| 7. Build/cache | Infra | cache adapter + builder selection | ADR-005, ADR-007, ADR-008 |
 | 8. GitOps/DX | App daemon + App | watcher + rollout controller + exporter + graph queries | ADR-005, ADR-003 |
 
 ## Definition of Done for roadmap entries
