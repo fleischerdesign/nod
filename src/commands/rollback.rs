@@ -46,8 +46,19 @@ pub async fn execute(
         format!("> Rolling back {}", host.name).bold().yellow()
     );
 
+    let audit_store_res = ctx.audit_store();
     let use_case = RollbackUseCase::new(Arc::new(ctx));
     use_case.execute(&host).await?;
+
+    if let Ok(audit_store) = audit_store_res {
+        if let Err(e) = audit_store.record(&host.name, "rolled_back").await {
+            tracing::warn!(
+                "Failed to record rollback audit entry for {}: {}",
+                host.name,
+                e
+            );
+        }
+    }
 
     println!(
         "  {}",
@@ -109,6 +120,15 @@ mod tests {
         assert!(matches!(err, NodError::Config { .. }));
     }
 
+    mock! {
+        FakeAuditStore {}
+        #[async_trait]
+        impl crate::domain::ports::audit_store::AuditStorePort for FakeAuditStore {
+            async fn record(&self, host_name: &str, outcome: &str) -> Result<(), NodError>;
+            async fn entries(&self, host: Option<String>, limit: Option<usize>) -> Result<Vec<crate::domain::audit::AuditEntry>, NodError>;
+        }
+    }
+
     #[tokio::test]
     async fn rollback_single_host_succeeds() {
         let mut eval = MockFakeEvaluator::new();
@@ -118,11 +138,22 @@ mod tests {
         let mut local = MockFakeDeployer::new();
         local.expect_rollback().returning(|_, _| Ok(()));
 
+        let mut audit = MockFakeAuditStore::new();
+        audit
+            .expect_record()
+            .with(
+                mockall::predicate::eq("rollins"),
+                mockall::predicate::eq("rolled_back"),
+            )
+            .times(1)
+            .returning(|_, _| Ok(()));
+
         let ctx = AppContext::new(
             Arc::new(eval),
             Arc::new(local),
             Arc::new(MockFakeDeployer::new()),
-        );
+        )
+        .with_audit_store(Arc::new(audit));
 
         let res = execute(
             ctx,

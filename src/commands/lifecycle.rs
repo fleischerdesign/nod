@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
+use crate::application::pipeline::state_machine::DeploymentState;
 use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
 use crate::application::use_cases::deploy_fleet::DeployFleetUseCase;
 use crate::domain::errors::NodError;
@@ -28,7 +29,7 @@ pub struct LifecycleParams<'a> {
     pub quiet: bool,
 }
 
-/// Executes a standard deployment lifecycle use case across resolved targets (ADR-010).
+/// Executes a standard deployment lifecycle use case across resolved targets (ADR-010, ADR-013).
 pub async fn execute_lifecycle(
     ctx: AppContext,
     flake_path: &Path,
@@ -88,8 +89,28 @@ pub async fn execute_lifecycle(
         staged.push(store.apply_to(host).await?);
     }
 
+    let audit_store_res = ctx.audit_store();
     let use_case = DeployFleetUseCase::new(Arc::new(ctx));
     let summary = use_case.execute(staged, options, flake_path).await?;
+
+    if !params.dry_run {
+        if let Ok(audit_store) = audit_store_res {
+            for outcome in &summary.outcomes {
+                let outcome_str = match outcome.state {
+                    DeploymentState::Completed => "completed",
+                    DeploymentState::RolledBack => "rolled_back",
+                    _ => "failed",
+                };
+                if let Err(e) = audit_store.record(&outcome.host_name, outcome_str).await {
+                    tracing::warn!(
+                        "Failed to record audit entry for {}: {}",
+                        outcome.host_name,
+                        e
+                    );
+                }
+            }
+        }
+    }
 
     if !params.quiet {
         crate::commands::render_summary(&summary);
@@ -138,6 +159,15 @@ mod tests {
             async fn host_overrides(&self, name: &str) -> Result<HostOverrides, NodError>;
             async fn fleet_defaults(&self) -> Result<FleetDefaults, NodError>;
             async fn apply_to(&self, host: HostEntity) -> Result<HostEntity, NodError>;
+        }
+    }
+
+    mock! {
+        FakeAuditStore {}
+        #[async_trait]
+        impl crate::domain::ports::audit_store::AuditStorePort for FakeAuditStore {
+            async fn record(&self, host_name: &str, outcome: &str) -> Result<(), NodError>;
+            async fn entries(&self, host: Option<String>, limit: Option<usize>) -> Result<Vec<crate::domain::audit::AuditEntry>, NodError>;
         }
     }
 
@@ -247,6 +277,45 @@ mod tests {
             .returning(|h| Ok(SshProfile::for_host(h)));
 
         let ctx = test_ctx(eval, local, MockFakeDeployer::new(), store);
+        let mut params = dummy_params();
+        params.target = Some("jello");
+
+        let res = execute_lifecycle(ctx, Path::new("."), DeploymentAction::Switch, params).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_happy_path_records_audit_outcome() {
+        let mut eval = MockFakeEvaluator::new();
+        eval.expect_discover_hosts()
+            .returning(|_, _| Ok(vec![HostEntity::new("jello", "jello-machine", true)]));
+        eval.expect_build_toplevel()
+            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-system")));
+
+        let mut local = MockFakeDeployer::new();
+        local.expect_check_reachability().returning(|_| Ok(true));
+        local
+            .expect_deploy_and_activate()
+            .returning(|_, _, _, _, _| Ok(()));
+
+        let mut store = MockFakeConfigStore::new();
+        store.expect_apply_to().returning(Ok);
+        store
+            .expect_resolve()
+            .returning(|h| Ok(SshProfile::for_host(h)));
+
+        let mut audit = MockFakeAuditStore::new();
+        audit
+            .expect_record()
+            .with(
+                mockall::predicate::eq("jello"),
+                mockall::predicate::eq("completed"),
+            )
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let ctx =
+            test_ctx(eval, local, MockFakeDeployer::new(), store).with_audit_store(Arc::new(audit));
         let mut params = dummy_params();
         params.target = Some("jello");
 

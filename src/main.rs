@@ -3,7 +3,6 @@ use clap::Parser;
 use nod::config::options::{Cli, Commands, TargetArgs};
 use nod::domain::config::CliOverrides;
 use nod::infrastructure::config::toml_config::effective_flake;
-use nod::infrastructure::storage::json_audit_store::JsonAuditStore;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -304,10 +303,8 @@ async fn main() -> Result<()> {
             limit,
             json,
         } => {
-            // `audit` binds the audit store explicitly on the production graph.
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
-            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?
-                .with_audit_store(Arc::new(JsonAuditStore::new()));
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
             nod::commands::audit::execute(ctx, target.as_deref(), limit, json).await?;
         }
         Commands::Ssh {
