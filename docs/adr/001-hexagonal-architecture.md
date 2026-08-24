@@ -6,11 +6,11 @@
 
 ## Context
 
-`nod` started as a compact command-line engine: `main.rs` parses a `clap` CLI, dispatches to per-command functions, and each command constructs its infrastructure types directly (`TokioSshDeployer::new()`, `NixCliEvaluator::new()`). Domain logic, application control flow, and mechanical tool calls are interleaved:
+`nod` started as a compact command-line engine: `main.rs` parses a `clap` CLI, dispatches to per-command functions, and each command constructs its infrastructure types directly (`SshCliDeployer::new()`, `NixCliEvaluator::new()`). Domain logic, application control flow, and mechanical tool calls are interleaved:
 
 - `main.rs` wires commands by hand and ties to concrete infrastructure.
-- `switch.rs` / `status.rs` / `diff.rs` each construct `NixCliEvaluator` + `TokioSshDeployer` directly.
-- The single `TokioSshDeployer` branches on `host.is_local`, so SSH and local deployment live in one adapter.
+- `switch.rs` / `status.rs` / `diff.rs` each construct `NixCliEvaluator` + `SshCliDeployer` directly.
+- The single `SshCliDeployer` branches on `host.is_local`, so SSH and local deployment live in one adapter.
 - Error handling is `anyhow::Result` everywhere, so no failure type survives a layer boundary intact (moved to ADR-002).
 
 This works for a single-operator tool, but it cannot support what v2 needs: testable domain logic, a deployment state machine, config tiers, and fleet-scale concurrency (ADRs 003–005). The engine must be able to run the same policy logic against a fake/in-memory "deployer" in tests and against real SSH in production, without rewiring control flow.
@@ -20,7 +20,7 @@ This works for a single-operator tool, but it cannot support what v2 needs: test
 Adopt **Hexagonal Architecture (Ports & Adapters) with a Clean-Architecture layer ordering**:
 
 1. **Domain Core** — pure, dependency-free Rust: entities and value objects (`HostEntity`, `SshProfile`, ...) and the **ports** (interfaces) that the rest of the world must satisfy:
-   - `NixEvaluatorPort` — `discover_hosts`, `build_toplevel`.
+   - `EvaluatorPort` — `discover_hosts`, `build_toplevel`.
    - `DeployerPort` — `check_reachability`, `deploy_and_activate`, `rollback`.
    - `ConfigSource` — configuration resolution for a host.
    - `HealthCheckPort` — post-activation verification.
@@ -31,7 +31,7 @@ Adopt **Hexagonal Architecture (Ports & Adapters) with a Clean-Architecture laye
    - `ConfigAdapter` (`.nod.toml` → flake metadata → defaults),
    - `StoreAdapter` (closure storage),
    - `PingHealthProbe` / `SshHealthProbe` health adapters.
-4. **Presentation** — the CLI (`clap`) and the TUI (`ratatui` / dashboard). It parses user intent and builds/seeds the `AppContext`; it never imports Infrastructure or Domain internals directly.
+4. **Presentation** — the CLI (`clap`) and the TUI (`ratatui` / dashboard). It parses user intent, formats results, and builds/seeds the `AppContext`. Concrete adapter wiring is centralized in the single composition root `src/commands/wiring.rs::production` (ADR-008), which `main.rs` calls for every command arm; apart from that root, Presentation never imports Infrastructure or Domain internals directly.
 
 The **dependency rule is absolute**: source dependencies point inward toward the Domain Core. Domain imports nothing from Application/Infrastructure/Presentation. Application depends on Domain ports, not adapter types. Infrastructure and Presentation are free to depend on Domain and Application through the designated seams.
 

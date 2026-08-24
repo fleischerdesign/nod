@@ -28,18 +28,21 @@ Two concrete consequences:
 
 ## Decision
 
-### 1. `AppContext::production()` — the single composition root
+### 1. `src/commands/wiring.rs::production` — the single composition root
 
-`main.rs` is the only composition root. It calls a single factory per command arm and
-passes the context to `execute`:
+The composition root lives in the presentation layer as the free function
+`wiring::production` in `src/commands/wiring.rs`. `main.rs` is the only caller: it invokes
+that factory for every command arm and passes the resulting context to `execute`:
 
 ```rust
-AppContext::production(flake_path: &Path, cli_overrides: CliOverrides)
+// src/commands/wiring.rs
+pub fn production(flake_path: &Path, cli_overrides: CliOverrides)
     -> Result<AppContext, NodError>
 ```
 
 The factory—and only the factory—constructs the evaluator, both deployers, and the
-`TomlConfigStore` (bound as the `ConfigStorePort`). Commands stop constructing `AppContext`
+`TomlConfigStore` (bound as the `ConfigStorePort`), without the Application layer
+importing any concrete adapter (ADR-001). Commands stop constructing `AppContext`
 or `TomlConfigStore`; they accept `ctx: AppContext` and resolve optional services (e.g.
 `audit`'s `AuditStorePort`) at a single, explicit call site (`ctx.with_audit_store(...)`).
 
@@ -72,7 +75,7 @@ detail when present.
 - Wiring changes in one place (add a port/adapter → edit `production`), not 10.
 - `ssh`/`exec` correctly apply resolved SSH settings, closing the ADR-007 runtime gap.
 - The target default is a reviewed, singular decision rather than nine silent copies.
-- `main.rs` grows as the composition root; command files thin out (presentation-only).
+- The composition root is a single function (`wiring::production` in `src/commands/wiring.rs`) called by `main.rs`; command files thin out (presentation-only).
 
 ## Alternatives
 

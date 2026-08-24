@@ -34,7 +34,7 @@
 │   Entities & Value Objects                                          │
 │     Host, SshProfile, DeploymentState, FlakeReference...            │
 │   Ports (interfaces)                                                │
-│     NixEvaluatorPort, DeployerPort, ConfigSource,                   │
+│     EvaluatorPort,   DeployerPort, ConfigSource,                   │
 │     HealthCheckPort, MachineClock                                  │
 │                                                                     │
 │        ↻ NO dependencies: pure Rust types + thiserror domain errors │
@@ -74,7 +74,7 @@ The innermost, dependency-free layer. It contains:
 - **Entities** — long-lived stateful objects: `HostEntity`, `HostRole`.
 - **Value objects** — immutable, structural: `SshProfile`, `ActiveClosure`, `ConfigError`/typed-error types, deployment transition guards.
 - **Ports** — the interfaces the outside world must satisfy so Domain/Application never depend on an external tool:
-  - `NixEvaluatorPort` — discover hosts, build a toplevel closure.
+  - `EvaluatorPort` — discover hosts, build a toplevel closure.
   - `DeployerPort` — reachability probe, deploy-and-activate, rollback. Transport methods take the resolved `&SshProfile` alongside the host (ADR-007).
   - `ConfigSource` — supply resolved configuration for a host.
   - `HealthCheckPort` — verify a live system after activation.
@@ -85,7 +85,7 @@ Domain Core has **zero imports from Infrastructure, Application, or Presentation
 
 The Application layer is where **orchestration lives**: it owns the *policy* (which hosts, in which order, with which concurrency and error-recovery, how to sequence the deployment state machine) but *not* the mechanics.
 
-- **AppContext** — a dependency-injection container. `main` (Presentation) is the **single composition root**: it builds the context through one factory, `AppContext::production(flake_path, cli_overrides)` (see ADR-008), which constructs the evaluator, both deployers, the `TomlConfigStore` (bound as `ConfigStorePort`), all use-case instances, and the runtime `CliOptions`. Commands no longer construct `AppContext` or the store themselves; they accept a resolved context and bind optional services (e.g. `audit`'s `AuditStorePort`) at an explicit call site.
+- **AppContext** — a dependency-injection container. `main` (Presentation) is the **single composition root**: it builds the context through one factory, `wiring::production(flake_path, cli_overrides)` in `src/commands/wiring.rs` (see ADR-008), which constructs the evaluator, both deployers, and the `TomlConfigStore` (bound as `ConfigStorePort`). Commands no longer construct `AppContext` or the store themselves; they accept a resolved context and bind optional services (e.g. `audit`'s `AuditStorePort`) at an explicit call site.
 - **Effective profile flow** — the resolved `SshProfile` is an explicit argument to the deploy port (ADR-007). The caller obtains it via `ConfigStorePort::resolve(host)` / `AppContext::resolved_profile(host)`; the transport adapters are dumb transports that consume only the passed profile instead of re-deriving a primitive one. `ssh`/`exec` now bind a config store, so resolved connection settings are honoured on those paths.
 - **Centralized target resolution** — `resolve_targets` + `DefaultScope` in `application/selection.rs` implement the shared ADR-006 target-selection idiom at one call site per command (ADR-008): deploy/exec default to `DefaultScope::Local`, `status` to `DefaultScope::All`, and `select_exact_one` stays the single-host gate for `rollback`/`ssh`.
 - **Use cases** — one per command: `switch`, `check`, `status`, `diff`, `rollback`, `dashboard`. Each expresses *"what should happen"* and delegates mechanical steps to the resolved port implementations.
@@ -147,13 +147,13 @@ src/
 │   ├── entities/         # Host, HostType
 │   ├── values/           # SshHost, ActiveClosure, DeploymentConfig
 │   ├── ports/            # HostPort, Deployer, ConfigSource, HealthCheck
-│   └── errors/           # NodError, NodEvaluationError, ...
+│   └── errors/           # NodError (variant hierarchy)
 ├── application/
 │   ├── context.rs        # AppContext (DI container)
 │   └── use_cases/        # switch, check, status, diff, rollback
 ├── infrastructure/
 │   ├── adapters/
-│   │   ├── nix_evaluator.rs
+│   │   ├── cli_evaluator.rs
 │   │   ├── ssh_deployer.rs
 │   │   ├── local_deployer.rs
 │   │   ├── config.rs
