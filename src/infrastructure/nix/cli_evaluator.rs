@@ -91,7 +91,7 @@ impl NixCliEvaluator {
         let path = Self::nix_escape(&flake_path.display().to_string());
         let name = Self::nix_escape(name);
         format!(
-            "let x = (import \"{path}\").nixosConfigurations.\"{name}\".config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{name}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null }} ",
+            "let x = (import \"{path}\").nixosConfigurations.\"{name}\".config; in {{ targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else \"{name}\")); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null; }} ",
         )
     }
 
@@ -481,6 +481,28 @@ mod tests {
         assert!(expr.contains("(import \"/tmp/my flake\")"));
         assert!(expr.contains("nixosConfigurations.\"edge\\\"host\""));
         assert!(expr.contains("else \"edge\\\"host\""));
+    }
+
+    #[test]
+    fn meta_expr_terminates_every_binding_with_a_semicolon() {
+        // Regression: Lix 2.95 (strict parser) requires the final attrset
+        // binding to be terminated with `;` before the closing brace. The
+        // generated meta expression used to end `nod = ... else null }` with
+        // no semicolon, which evaluated on stock Nix but failed to parse on
+        // Lix with "expecting ';' to end binding", skipping every host.
+        let expr = NixCliEvaluator::build_meta_expr(Path::new("."), "rollins");
+        // Any binding with a trailing `}` directly after a value (no `;`) is a
+        // parse hazard under Lix. The whole expr is `... in { ... } ` and must
+        // not contain `null }` or `] }` un-terminated patterns before the close.
+        assert!(!expr.contains("null }"));
+        assert!(!expr.contains("] }"));
+        // The closing brace must come immediately after a `;`-terminated binding.
+        let close_offset = expr.rfind('}').expect("expr closes with a brace");
+        let before_close = &expr[..close_offset];
+        assert!(
+            before_close.trim_end().ends_with(';'),
+            "the value before the closing brace must end with ';' (Lix 2.95 strict parser)"
+        );
     }
 
     #[test]
