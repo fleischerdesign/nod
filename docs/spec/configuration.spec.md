@@ -54,7 +54,7 @@ Feature: Options resolve with CLI > .nod.toml > flake metadata > compiled defaul
 
 ```gherkin
 @precedence @flake
-Feature: The effective flake root resolves as --flake > [defaults].flake > .
+Feature: The effective flake root resolves as --flake > [defaults].flake > the /etc/nixos/flake.nix marker > .
 
   Scenario: explicit --flake beats the config default
     Given a .nod.toml with [defaults] flake "/srv/nixos"
@@ -71,9 +71,22 @@ Feature: The effective flake root resolves as --flake > [defaults].flake > .
     When no --flake is given
     Then the effective flake root is "/srv/nixos/flakes/web"
 
-  Scenario: the working directory is the fallback
+  Scenario: Marker beats cwd
     Given no .nod.toml with a flake key anywhere above the cwd
-    When no --flake is given
+    And a flake.nix existing at /etc/nixos
+    When the user runs a command without --flake from any directory
+    Then the effective flake root is "/etc/nixos"
+
+  Scenario: CLI beats marker
+    Given no .nod.toml with a flake key anywhere above the cwd
+    And a flake.nix existing at /etc/nixos
+    When the user runs a command with --flake "/tmp/other"
+    Then the effective flake root is "/tmp/other"
+
+  Scenario: Working-dir fallback
+    Given no .nod.toml with a flake key anywhere above the cwd
+    And no /etc/nixos/flake.nix
+    When the user runs a command without --flake
     Then the effective flake root is "."
 ```
 
@@ -182,7 +195,12 @@ Feature: The effective SshProfile merges user, port, identity file, proxy jump a
 > **Conventions:** tier values are merged per option with a fixed precedence
 > (CLI > `.nod.toml` > flake metadata > compiled defaults); `[hosts.<name>]`
 > sections beat `[fleet]` which beats `[defaults]` within the TOML tier.
-> The **default flake root** uses its own two-tier cascade — CLI `--flake` >
+> The **default flake root** uses its own cascade — CLI `--flake` >
 > `[defaults].flake` (discovered from the cwd, relative values resolved
-> against the config file's directory) > `.` — and stays out of `config.nod`.
+> against the config file's directory) > the system marker
+> (`/etc/nixos/flake.nix`, the nixos-rebuild convention) > `.` — and stays
+> out of `config.nod`. The marker is read on the control host where nod runs —
+> the controller's `/etc/nixos/flake.nix`, not a target's (unlike
+> `nixos-rebuild`, which reads the marker on the target) — so remote-fleet
+> operators pin per-fleet roots with `--flake` or `[defaults].flake`.
 > Tag names are stable anchors for the runner.

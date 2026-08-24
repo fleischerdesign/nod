@@ -25,6 +25,8 @@ Introduce a **four-tier configuration hierarchy**, with higher tiers overriding 
 
 Practical rule: **“Anything a CLI flag can set, a config file can set one tier down; anything the flake declares can be overridden by the user TOML; the fallback is the built-in default.”**
 
+The **default flake root** resolves through its own cascade, independent of the four tiers above: CLI `--flake` > `[defaults].flake` > the system marker `/etc/nixos/flake.nix` > the working directory. The marker tier mirrors nixos-rebuild's documented default — "the directory containing the target of the symlink `/etc/nixos/flake.nix`, if it exists" — so `nod <cmd>` finds the system flake from any cwd without a Nix option (a marker is a convention, not config). Unlike `nixos-rebuild`, the marker is resolved on the control host where nod runs, so it resolves the controller's `/etc/nixos/flake.nix` even when the deployment targets are remote; fleets must pin a remote target's root with `--flake` or `[defaults].flake`.
+
 ### What each tier supplies
 
 - **CLI flags** — temporary, per-run overrides; `--flake`, `--target`, `-v/--verbose`, `-q/--quiet`, and (once ADR-005 lands) `--strategy`, `--batch-size`, `--concurrency`.

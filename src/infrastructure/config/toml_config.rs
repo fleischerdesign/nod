@@ -15,7 +15,8 @@
 //! [`effective_flake`] searches upward from the invocation cwd first, honours
 //! `[defaults].flake` (relative values resolve against the file's own
 //! directory), and only then this store is built from the resolved root. The
-//! flake cascade is: explicit CLI `--flake` > `[defaults].flake` > `.`.
+//! flake cascade is: explicit CLI `--flake` > `[defaults].flake` > system
+//! marker (`/etc/nixos/flake.nix`, nixos-rebuild convention) > `.`.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -351,6 +352,14 @@ impl TomlConfigStore {
     }
 }
 
+/// Path of the nixos-rebuild system flake marker. `nixos-rebuild`'s
+/// documented default flake is the directory containing the target of the
+/// symlink `/etc/nixos/flake.nix`, if it exists; nod mirrors that convention
+/// so `nod <cmd>` resolves the system flake from any working directory. The
+/// marker is a convention rather than a Nod option — the flake root cannot be
+/// read back from the flake without already knowing it (chicken-and-egg).
+const SYSTEM_FLAKE_MARKER: &str = "/etc/nixos/flake.nix";
+
 /// Resolves the effective flake root for one run (ADR-004 cascade):
 ///
 /// 1. an explicit CLI `--flake` value (anything but the documented default
@@ -358,15 +367,29 @@ impl TomlConfigStore {
 /// 2. else `[defaults].flake` of the nearest `.nod.toml` discovered walking
 ///    up from `search_start` (the invocation cwd), resolved relative to the
 ///    directory containing that file;
-/// 3. else `"."` — the working directory.
+/// 3. else the system marker [`SYSTEM_FLAKE_MARKER`] via
+///    [`resolve_system_flake_marker`] when it resolves (nixos-rebuild parity);
+/// 4. else `"."` — the working directory.
 ///
 /// The `"."` marker doubles as "no explicit choice" because the clap string
 /// flags default to it and it is the historical hard-coded fallback; an
 /// explicit `--flake .` is therefore indistinguishable from an absent flag and
-/// does not override the toml tier. The config file is searched from the
-/// invocation cwd, not from the flake root — learning the root from the file
+/// does not override the toml or marker tier. The config file is searched from
+/// the invocation cwd, not from the flake root — learning the root from the file
 /// is the whole point (allows `nod <cmd>` outside the configured flake dir).
 pub fn effective_flake(cli_flake: &Path, search_start: &Path) -> Result<PathBuf, NodError> {
+    effective_flake_inner(cli_flake, search_start, Path::new(SYSTEM_FLAKE_MARKER))
+}
+
+/// [`effective_flake`] with an injectable system-marker path. Production goes
+/// through the public two-argument wrapper with [`SYSTEM_FLAKE_MARKER`]; tests
+/// pass a temp-dir marker so the tier is pinned without touching the real
+/// `/etc/nixos`. Precedence lives here once — the single cascade point.
+fn effective_flake_inner(
+    cli_flake: &Path,
+    search_start: &Path,
+    system_marker: &Path,
+) -> Result<PathBuf, NodError> {
     if cli_flake != Path::new(".") {
         return Ok(cli_flake.to_path_buf());
     }
@@ -376,7 +399,30 @@ pub fn effective_flake(cli_flake: &Path, search_start: &Path) -> Result<PathBuf,
             return Ok(resolve_default_flake(&config, flake));
         }
     }
+    if let Some(marker) = resolve_system_flake_marker(system_marker) {
+        return Ok(marker);
+    }
     Ok(PathBuf::from("."))
+}
+
+/// Resolves the nixos-rebuild system flake marker at `marker_path` (production
+/// passes [`SYSTEM_FLAKE_MARKER`]). Mirrors `nixos-rebuild`'s documented
+/// default — "the directory containing the target of the symlink
+/// `/etc/nixos/flake.nix`, if it exists":
+///
+/// - a regular marker file canonicalizes to itself and resolves to its own
+///   parent directory (typically `/etc/nixos`);
+/// - a symlink marker canonicalizes to its target — a directory target is
+///   returned directly, a file target's parent directory is returned;
+/// - a missing or un-canonicalizable marker yields `None`, letting the caller
+///   fall through to the next cascade tier.
+fn resolve_system_flake_marker(marker_path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(marker_path).ok()?;
+    if canonical.is_dir() {
+        Some(canonical)
+    } else {
+        canonical.parent().map(Path::to_path_buf)
+    }
 }
 
 /// Resolves a raw `[defaults].flake` value against the directory containing
@@ -904,10 +950,17 @@ mod tests {
             PathBuf::from("/srv/nixos/flakes")
         );
 
-        // No config file anywhere and no explicit flag means `.`.
+        // No config file anywhere, no explicit flag, and no system marker
+        // (injected absent path) means `.`. The marker injection keeps this
+        // green even on hosts whose real /etc/nixos/flake.nix exists.
         let empty = tempdir().unwrap();
         assert_eq!(
-            effective_flake(Path::new("."), empty.path()).unwrap(),
+            effective_flake_inner(
+                Path::new("."),
+                empty.path(),
+                &empty.path().join("flake.nix")
+            )
+            .unwrap(),
             PathBuf::from(".")
         );
     }
@@ -934,9 +987,137 @@ mod tests {
     fn effective_flake_ignores_toml_without_flake_key() {
         let dir = tempdir().unwrap();
         write_toml(dir.path(), "[defaults]\nuser = \"deploy\"\n");
+        // A toml without a flake key is not a flake source: with an injected
+        // absent marker the cascade lands on `.`. Injecting the absent marker
+        // keeps the pin machine-independent even where /etc/nixos/flake.nix
+        // exists (the marker tier would otherwise supply /etc/nixos here).
         assert_eq!(
-            effective_flake(Path::new("."), dir.path()).unwrap(),
+            effective_flake_inner(Path::new("."), dir.path(), &dir.path().join("flake.nix"))
+                .unwrap(),
             PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn system_marker_regular_file_resolves_to_parent_dir() {
+        // 3a: a regular marker file pins the directory containing it
+        // (production: /etc/nixos) as the flake root.
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("nixos").join("flake.nix");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "# nix flake\n").unwrap();
+
+        assert_eq!(
+            resolve_system_flake_marker(&marker),
+            Some(std::fs::canonicalize(marker.parent().unwrap()).unwrap())
+        );
+    }
+
+    #[test]
+    fn system_marker_symlink_to_file_resolves_to_target_parent() {
+        // 3b (symlink to a FILE): the marker canonicalizes to the target
+        // file's directory — nixos-rebuild's "target of the symlink".
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target").join("flake.nix");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "# nix flake\n").unwrap();
+        let marker = dir.path().join("flake.nix");
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+
+        assert_eq!(
+            resolve_system_flake_marker(&marker),
+            Some(std::fs::canonicalize(target.parent().unwrap()).unwrap())
+        );
+    }
+
+    #[test]
+    fn system_marker_symlink_to_directory_resolves_to_directory() {
+        // 3b (symlink to a DIRECTORY): the canonicalized target directory is
+        // the flake root itself.
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("nixos");
+        std::fs::create_dir_all(&target).unwrap();
+        let marker = dir.path().join("flake.nix");
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+
+        assert_eq!(
+            resolve_system_flake_marker(&marker),
+            Some(std::fs::canonicalize(&target).unwrap())
+        );
+    }
+
+    #[test]
+    fn system_marker_absent_returns_none() {
+        // 3c: no marker file -> None, so the caller falls through to the
+        // next cascade tier.
+        let dir = tempdir().unwrap();
+        assert_eq!(
+            resolve_system_flake_marker(&dir.path().join("flake.nix")),
+            None
+        );
+    }
+
+    #[test]
+    fn effective_flake_uses_system_marker_before_dot_fallback() {
+        // 3d (marker-resolves pin): no CLI flake, no config file above the
+        // search dir, but a resolvable marker -> the marker's root wins over
+        // the `.` fallback. The temp-dir marker is injected so the pin is
+        // independent of whether the machine's real /etc/nixos/flake.nix
+        // exists.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("flake.nix"), "# nix flake\n").unwrap();
+        let search = dir.path().join("worktree");
+        std::fs::create_dir_all(&search).unwrap();
+
+        assert_eq!(
+            effective_flake_inner(Path::new("."), &search, &dir.path().join("flake.nix")).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn effective_flake_cli_wins_over_system_marker() {
+        // 3d (CLI pin): with a resolvable marker present, an explicit
+        // `--flake` still wins the cascade.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("flake.nix"), "# nix flake\n").unwrap();
+        let search = dir.path().join("worktree");
+        std::fs::create_dir_all(&search).unwrap();
+
+        assert_eq!(
+            effective_flake_inner(
+                Path::new("/var/lib/nixos"),
+                &search,
+                &dir.path().join("flake.nix")
+            )
+            .unwrap(),
+            PathBuf::from("/var/lib/nixos")
+        );
+    }
+
+    #[test]
+    fn effective_flake_toml_beats_system_marker() {
+        // Review pin: `[defaults].flake` (tier 2) wins before the system
+        // marker (tier 3). The injected marker lives in its own temp dir and
+        // would resolve — asserted below — to a root different from the toml
+        // flake, so the toml tier (not an absent marker) is what's under
+        // test, and the pin stays machine-independent where /etc/nixos
+        // exists.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_toml(root, "[defaults]\nflake = \"/srv/nixos/flakes\"\n");
+
+        let marker_dir = tempdir().unwrap();
+        let marker = marker_dir.path().join("flake.nix");
+        std::fs::write(&marker, "# nix flake\n").unwrap();
+        assert_eq!(
+            resolve_system_flake_marker(&marker),
+            Some(std::fs::canonicalize(marker_dir.path()).unwrap())
+        );
+
+        assert_eq!(
+            effective_flake_inner(Path::new("."), root, &marker).unwrap(),
+            PathBuf::from("/srv/nixos/flakes")
         );
     }
 
