@@ -83,6 +83,21 @@ impl NixCliEvaluator {
         out
     }
 
+    /// Resolves the flake root to an absolute path for downstream Nix
+    /// expressions (`import "<abs>"`, `#nixosConfigurations`). A bare
+    /// relative path such as `.` would otherwise embed as `import "."`,
+    /// which Lix rejects with "string '.' doesn't represent an absolute
+    /// path". Errors when the path cannot be canonicalized (missing root).
+    fn canonical_flake(flake_path: &Path) -> Result<PathBuf, NodError> {
+        std::fs::canonicalize(flake_path).map_err(|e| NodError::Config {
+            detail: format!(
+                "cannot resolve flake path '{}': {}",
+                flake_path.display(),
+                e
+            ),
+        })
+    }
+
     /// Builds the Nix expression that evaluates one host's `config.nod`
     /// surface (AC4, tier 3). The flake path and host name are escaped as
     /// Nix string literals (and the host selected with a quoted attribute) so
@@ -205,6 +220,11 @@ impl NixCliEvaluator {
         &self,
         flake_path: &Path,
     ) -> Result<Vec<(String, Result<FlakeMeta, NodError>)>, NodError> {
+        // Canonicalize the flake path once so downstream references
+        // (`import "<abs>"`, `#nixosConfigurations`) are absolute. A relative
+        // path such as `.` otherwise embeds as `import "."`, which Lix rejects
+        // with "string '.' doesn't represent an absolute path".
+        let flake_path = Self::canonical_flake(flake_path)?;
         let pb = Self::create_braille_spinner("Evaluating host matrix...");
         let output = Command::new("nix")
             .args([
@@ -237,7 +257,7 @@ impl NixCliEvaluator {
 
         let mut meta_results = Vec::with_capacity(host_names.len());
         for name in host_names {
-            let meta = self.eval_host_meta(flake_path, &name).await;
+            let meta = self.eval_host_meta(flake_path.as_path(), &name).await;
             meta_results.push((name, meta));
         }
         Ok(meta_results)
@@ -473,6 +493,27 @@ mod tests {
             NixCliEvaluator::nix_escape("host with spaces"),
             "host with spaces"
         );
+    }
+
+    #[test]
+    fn canonical_flake_resolves_relative_to_absolute() {
+        // Regression: `nod switch` defaults the flake path to `.`, which was
+        // embedded verbatim as `import "."` and rejected by Lix with "string
+        // '.' doesn't represent an absolute path".
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let abs = NixCliEvaluator::canonical_flake(Path::new(".")).unwrap();
+        std::env::set_current_dir(cwd).unwrap();
+        assert!(abs.is_absolute());
+        assert_eq!(abs, dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn canonical_flake_errors_on_missing_root() {
+        let missing = Path::new("/definitely/not/a/real/flake/dir");
+        let err = NixCliEvaluator::canonical_flake(missing).unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
     }
 
     #[test]
