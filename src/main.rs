@@ -347,7 +347,7 @@ async fn main() -> Result<()> {
         }
         Commands::Dashboard { flake } => {
             let ctx = AppContext::production(Path::new(&flake), CliOverrides::default())?;
-            nod::commands::dashboard::execute(ctx, Path::new(&flake)).await?;
+            nod::commands::dashboard::execute(Arc::new(ctx), Path::new(&flake)).await?;
         }
     }
 

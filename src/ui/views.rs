@@ -201,13 +201,12 @@ fn render_logs(f: &mut Frame, area: Rect, app: &DashboardApp) {
 
 /// Keybinding help along the bottom edge.
 ///
-/// The `s`/`r`/`d` keys are PREVIEW/LOG intents only — they record the intent
-/// in the operation log, they do not perform a live switch/rollback/diff. They
-/// are labelled as such so they are never presented as a state-changing
-/// operation they do not perform (ADR-008, AC7).
+/// The `s`/`r`/`d` keys are **live** actions: they perform a real
+/// switch/rollback/diff on the currently selected host. They are labelled as
+/// such so the operator knows a keypress triggers a state-changing operation.
 fn draw_footer(f: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(Line::from(
-        "[q] Quit | [j/k] Navigate | [s] preview switch | [r] preview rollback | [d] preview diff | [Tab] Switch Pane",
+        "[q] Quit | [j/k] Navigate | [s] live switch | [r] live rollback | [d] live diff | [Tab] Switch Pane",
     ))
     .style(Style::new().fg(Color::DarkGray))
     .centered();
@@ -333,6 +332,18 @@ mod tests {
         assert!(contains_text(&board, "[r]"));
         assert!(contains_text(&board, "[d]"));
         assert!(contains_text(&board, "[Tab]"));
+    }
+
+    #[test]
+    fn footer_does_not_label_actions_as_preview() {
+        let app = DashboardApp::new(fleet());
+        let online = vec![false, false, false];
+        let board = board_text(&render(&app, &online));
+
+        assert!(!contains_text(&board, "preview"));
+        assert!(contains_text(&board, "live switch"));
+        assert!(contains_text(&board, "live rollback"));
+        assert!(contains_text(&board, "live diff"));
     }
 
     #[test]

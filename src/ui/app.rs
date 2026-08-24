@@ -149,7 +149,7 @@ impl DashboardApp {
                     .selected_host()
                     .map(|h| h.name.clone())
                     .unwrap_or("?".to_string());
-                self.status_message = Some(format!("switch queued for {}", host));
+                self.status_message = Some(format!("performing switch on {}", host));
                 Some(DashboardAction::Switch)
             }
             DashboardKey::Rollback => {
@@ -157,7 +157,7 @@ impl DashboardApp {
                     .selected_host()
                     .map(|h| h.name.clone())
                     .unwrap_or("?".to_string());
-                self.status_message = Some(format!("rollback queued for {}", host));
+                self.status_message = Some(format!("performing rollback on {}", host));
                 Some(DashboardAction::Rollback)
             }
             DashboardKey::Diff => {
@@ -165,7 +165,7 @@ impl DashboardApp {
                     .selected_host()
                     .map(|h| h.name.clone())
                     .unwrap_or("?".to_string());
-                self.status_message = Some(format!("diff queued for {}", host));
+                self.status_message = Some(format!("performing diff on {}", host));
                 Some(DashboardAction::Diff)
             }
         }
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(switched, Some(DashboardAction::Switch));
         assert_eq!(
             app.status_message,
-            Some("switch queued for jello".to_string())
+            Some("performing switch on jello".to_string())
         );
 
         app.next_host();
@@ -305,14 +305,23 @@ mod tests {
         assert_eq!(rolled, Some(DashboardAction::Rollback));
         assert_eq!(
             app.status_message,
-            Some("rollback queued for atlas".to_string())
+            Some("performing rollback on atlas".to_string())
         );
 
         let diffed = app.handle_key(DashboardKey::Diff);
         assert_eq!(diffed, Some(DashboardAction::Diff));
         assert_eq!(
             app.status_message,
-            Some("diff queued for atlas".to_string())
+            Some("performing diff on atlas".to_string())
         );
+    }
+
+    #[test]
+    fn action_keys_are_harmless_on_an_empty_fleet() {
+        let mut app = DashboardApp::new(Vec::new());
+
+        assert!(app.handle_key(DashboardKey::Switch).is_some());
+        assert!(app.handle_key(DashboardKey::Rollback).is_some());
+        assert!(app.handle_key(DashboardKey::Diff).is_some());
     }
 }

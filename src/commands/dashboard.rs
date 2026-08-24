@@ -4,12 +4,13 @@
 //! presentation layer, which owns the terminal session.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::application::context::AppContext;
 use crate::domain::errors::NodError;
 use crate::ui::run_dashboard;
 
-pub async fn execute(ctx: AppContext, flake_path: &Path) -> Result<(), NodError> {
+pub async fn execute(ctx: Arc<AppContext>, flake_path: &Path) -> Result<(), NodError> {
     run_dashboard(ctx, Some(flake_path.to_path_buf())).await?;
     Ok(())
 }

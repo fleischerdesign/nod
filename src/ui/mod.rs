@@ -10,6 +10,7 @@ pub mod views;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::terminal::{
@@ -18,7 +19,11 @@ use crossterm::terminal::{
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 
 use crate::application::context::AppContext;
+use crate::application::use_cases::deploy_fleet::DeployFleetUseCase;
+use crate::application::use_cases::detect_drift::DetectDriftUseCase;
+use crate::application::use_cases::rollback::RollbackUseCase;
 use crate::domain::errors::NodError;
+use crate::domain::plan::{DeploymentAction, DeploymentOptions};
 use crate::ui::app::{DashboardAction, DashboardApp};
 use crate::ui::event::{poll as poll_event, UiEvent};
 
@@ -26,8 +31,10 @@ use crate::ui::event::{poll as poll_event, UiEvent};
 ///
 /// `flake` may carry the flake root; `None` resolves to the current
 /// directory. Terminal restoration is guaranteed both on normal quit and on
-/// panic.
-pub async fn run_dashboard(ctx: AppContext, flake: Option<PathBuf>) -> Result<(), NodError> {
+/// panic. The shared `AppContext` is threaded through the event loop so action
+/// keypresses can dispatch real deploy/rollback/diff use cases on the selected
+/// host.
+pub async fn run_dashboard(ctx: Arc<AppContext>, flake: Option<PathBuf>) -> Result<(), NodError> {
     let flake_buf = flake.unwrap_or(PathBuf::from("."));
     let flake_path: &Path = flake_buf.as_path();
 
@@ -65,7 +72,7 @@ pub async fn run_dashboard(ctx: AppContext, flake: Option<PathBuf>) -> Result<()
         if app.should_quit {
             break;
         }
-        drive_events(&mut app, &mut terminal, flake_path)?;
+        drive_events(&mut app, &mut terminal, flake_path, &ctx).await?;
     }
 
     reset_terminal().map_err(io_err)?;
@@ -73,10 +80,16 @@ pub async fn run_dashboard(ctx: AppContext, flake: Option<PathBuf>) -> Result<()
 }
 
 /// Handles one input batch for the current loop iteration.
-fn drive_events(
+///
+/// The operation keys (`s`/`r`/`d`) dispatch real single-host use cases on the
+/// selected host, passing the shared context through. A long deploy runs
+/// **inline** (awaited here), blocking the TUI until it completes — acceptable
+/// for v2; a background-task render is future work and out of scope.
+async fn drive_events(
     app: &mut DashboardApp,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     flake_path: &Path,
+    ctx: &Arc<AppContext>,
 ) -> Result<(), NodError> {
     match poll_event(Duration::from_millis(250)) {
         Some(UiEvent::Resize(width, height)) => {
@@ -86,7 +99,7 @@ fn drive_events(
         }
         Some(UiEvent::Key(key)) => {
             if let Some(action) = app.handle_key(key) {
-                run_action(action, app, flake_path);
+                run_action(action, app, flake_path, ctx).await;
             }
         }
         None => {}
@@ -94,26 +107,76 @@ fn drive_events(
     Ok(())
 }
 
-/// Dispatches an action intent from the view layer to the operation log and
-/// the status line.
+/// Dispatches an action intent from the view layer to the command layer.
 ///
-/// This is a PREVIEW/LOG-ONLY dispatcher (ADR-008, AC7): the intent keys are
-/// recorded, never executed. Wiring these intents to a real switch/rollback/
-/// diff run is a separate cross-cutting change (deferred dashboard-deploy
-/// feature).
-/// TODO(dashboard-deploy): wire these intents to the deploy lifecycle commands
-/// (see docs/architecture/roadmap.md).
-fn run_action(action: DashboardAction, app: &mut DashboardApp, flake_path: &Path) {
-    let label = match action {
-        DashboardAction::Switch => "switch",
-        DashboardAction::Rollback => "rollback",
-        DashboardAction::Diff => "diff",
+/// The selected host (from `app.selected_host()`) is passed to the matching
+/// single-host use case with the shared context and flake path:
+///
+/// - `Switch` → [`DeployFleetUseCase`] with `DeploymentOptions` defaulted to
+///   `DeploymentAction::Switch`.
+/// - `Rollback` → [`RollbackUseCase`].
+/// - `Diff` → [`DetectDriftUseCase`] (non-verbose).
+///
+/// Each outcome — success or error — is written to the operation log and the
+/// status line so the operator sees the result of the action they triggered.
+/// If no host is selected the action is a no-op: a warning is logged and no
+/// use case runs, so the dashboard never panics and never makes a silent
+/// change.
+async fn run_action(
+    action: DashboardAction,
+    app: &mut DashboardApp,
+    flake_path: &Path,
+    ctx: &Arc<AppContext>,
+) {
+    // AC3: without a selected host there is nothing to act on — warn and bail.
+    let Some(host) = app.selected_host().cloned() else {
+        app.append_log("warning: no host selected; action skipped");
+        return;
     };
-    let detail = app
-        .selected_host()
-        .map(|h| h.name.clone())
-        .unwrap_or("unknown".to_string());
-    app.append_log(format!("{} {} → {}", label, detail, flake_path.display()).as_str());
+
+    let outcome = match action {
+        DashboardAction::Switch => DeployFleetUseCase::new(ctx.clone())
+            .execute(
+                vec![host.clone()],
+                DeploymentOptions::default_for(DeploymentAction::Switch),
+                flake_path,
+            )
+            .await
+            .map(|summary| {
+                format!(
+                    "switch complete ({} succeeded, {} failed)",
+                    summary.succeeded(),
+                    summary.failed()
+                )
+            }),
+        DashboardAction::Rollback => RollbackUseCase::new(ctx.clone())
+            .execute(&host)
+            .await
+            .map(|()| "rollback complete".to_string()),
+        DashboardAction::Diff => DetectDriftUseCase::new(ctx.clone())
+            .execute(&host, flake_path, false)
+            .await
+            .map(|report| {
+                if report.drifted {
+                    "diff: drifted".to_string()
+                } else {
+                    "diff: in sync".to_string()
+                }
+            }),
+    };
+
+    match outcome {
+        Ok(message) => {
+            let line = format!("{}: {}", host.name, message);
+            app.append_log(&line);
+            app.status_message = Some(line);
+        }
+        Err(err) => {
+            let line = format!("{}: error: {}", host.name, err);
+            app.append_log(&line);
+            app.status_message = Some(line);
+        }
+    }
 }
 
 /// Enters raw mode, switches to the alternate screen and hides the cursor.
