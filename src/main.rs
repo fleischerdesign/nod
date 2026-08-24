@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use nod::config::options::{Cli, Commands, SshArgs, TargetArgs};
+use nod::config::options::{Cli, Commands, TargetArgs};
 use nod::domain::config::CliOverrides;
 use nod::infrastructure::config::toml_config::effective_flake;
 use nod::infrastructure::storage::json_audit_store::JsonAuditStore;
@@ -21,12 +21,7 @@ async fn main() -> Result<()> {
                     role,
                     all,
                 },
-            ssh_args:
-                SshArgs {
-                    user,
-                    port,
-                    identity_file,
-                },
+            ssh_args,
             flake,
             dry_run,
             concurrency,
@@ -37,11 +32,7 @@ async fn main() -> Result<()> {
             on_error,
             action,
         } => {
-            let overrides = CliOverrides {
-                user,
-                port,
-                identity_file,
-            };
+            let overrides = ssh_args.into();
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, overrides)?;
             nod::commands::switch::execute(
@@ -72,12 +63,7 @@ async fn main() -> Result<()> {
                     role,
                     all,
                 },
-            ssh_args:
-                SshArgs {
-                    user,
-                    port,
-                    identity_file,
-                },
+            ssh_args,
             flake,
             concurrency,
             strategy,
@@ -85,11 +71,7 @@ async fn main() -> Result<()> {
             fail_fast,
             auto_rollback,
         } => {
-            let overrides = CliOverrides {
-                user,
-                port,
-                identity_file,
-            };
+            let overrides = ssh_args.into();
             let flake_path = effective_flake(
                 flake.as_deref().unwrap_or_else(|| Path::new(".")),
                 Path::new("."),
@@ -120,12 +102,7 @@ async fn main() -> Result<()> {
                     role,
                     all,
                 },
-            ssh_args:
-                SshArgs {
-                    user,
-                    port,
-                    identity_file,
-                },
+            ssh_args,
             flake,
             concurrency,
             strategy,
@@ -133,11 +110,7 @@ async fn main() -> Result<()> {
             fail_fast,
             auto_rollback,
         } => {
-            let overrides = CliOverrides {
-                user,
-                port,
-                identity_file,
-            };
+            let overrides = ssh_args.into();
             let flake_path = effective_flake(
                 flake.as_deref().unwrap_or_else(|| Path::new(".")),
                 Path::new("."),
@@ -228,19 +201,10 @@ async fn main() -> Result<()> {
                     role,
                     all,
                 },
-            ssh_args:
-                SshArgs {
-                    user,
-                    port,
-                    identity_file,
-                },
+            ssh_args,
             flake,
         } => {
-            let overrides = CliOverrides {
-                user,
-                port,
-                identity_file,
-            };
+            let overrides = ssh_args.into();
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, overrides)?;
             nod::commands::diff::execute(
@@ -262,19 +226,10 @@ async fn main() -> Result<()> {
                     role,
                     all,
                 },
-            ssh_args:
-                SshArgs {
-                    user,
-                    port,
-                    identity_file,
-                },
+            ssh_args,
             flake,
         } => {
-            let overrides = CliOverrides {
-                user,
-                port,
-                identity_file,
-            };
+            let overrides = ssh_args.into();
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, overrides)?;
             nod::commands::plan::execute(

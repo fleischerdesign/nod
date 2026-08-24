@@ -5,8 +5,11 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::domain::config::NodConfig;
 use crate::domain::errors::NodError;
@@ -149,7 +152,7 @@ impl NixCliEvaluator {
     /// field-extraction lambda — pure-mode-safe and correct for flakes that
     /// have no `default.nix` (an `import "<path>"` approach fails on both
     /// counts).
-    async fn eval_host_meta(&self, flake_path: &Path, name: &str) -> Result<FlakeMeta, NodError> {
+    async fn eval_host_meta(flake_path: &Path, name: &str) -> Result<FlakeMeta, NodError> {
         let lambda = Self::build_meta_expr(flake_path, name);
         let flake_ref = format!(
             "{}#nixosConfigurations.{}.config",
@@ -283,11 +286,34 @@ impl NixCliEvaluator {
         }
         let host_names = parsed.unwrap();
 
-        let mut meta_results = Vec::with_capacity(host_names.len());
-        for name in host_names {
-            let meta = self.eval_host_meta(flake_path.as_path(), &name).await;
-            meta_results.push((name, meta));
+        let mut join_set = JoinSet::new();
+        let semaphore = Arc::new(Semaphore::new(8));
+
+        for name in host_names.iter().cloned() {
+            let sem = semaphore.clone();
+            let flake_path_buf = flake_path.clone();
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await;
+                let meta = Self::eval_host_meta(&flake_path_buf, &name).await;
+                (name, meta)
+            });
         }
+
+        let mut meta_results = Vec::with_capacity(host_names.len());
+        while let Some(res) = join_set.join_next().await {
+            if let Ok(item) = res {
+                meta_results.push(item);
+            }
+        }
+
+        // Preserve deterministic host ordering matching nixosConfigurations attribute set
+        meta_results.sort_by_key(|(name, _)| {
+            host_names
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or(usize::MAX)
+        });
+
         Ok(meta_results)
     }
 }

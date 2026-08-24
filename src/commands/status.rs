@@ -63,17 +63,7 @@ pub async fn execute(
         let tags = if host.tags.is_empty() {
             "-".to_string()
         } else {
-            let mut parts = String::new();
-            let mut first = true;
-            for t in host.tags {
-                if first {
-                    parts = t.to_string();
-                    first = false;
-                } else {
-                    parts = format!("{}, {}", parts, t);
-                }
-            }
-            parts
+            host.tags.join(", ")
         };
         println!(
             "{:<14} {:<22} {:<10} {:<16} {:<10}",

@@ -43,6 +43,16 @@ pub struct SshArgs {
     pub identity_file: Option<PathBuf>,
 }
 
+impl From<SshArgs> for crate::domain::config::CliOverrides {
+    fn from(args: SshArgs) -> Self {
+        Self {
+            user: args.user,
+            port: args.port,
+            identity_file: args.identity_file,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "nod",
@@ -1347,5 +1357,22 @@ mod tests {
             }
             _ => panic!("expected an exec command"),
         }
+    }
+
+    #[test]
+    fn ssh_args_converts_into_cli_overrides() {
+        use crate::domain::config::CliOverrides;
+        let args = SshArgs {
+            user: Some("philipp".to_string()),
+            port: Some(2222),
+            identity_file: Some(PathBuf::from("/home/philipp/.ssh/id_ed25519")),
+        };
+        let overrides: CliOverrides = args.into();
+        assert_eq!(overrides.user, Some("philipp".to_string()));
+        assert_eq!(overrides.port, Some(2222));
+        assert_eq!(
+            overrides.identity_file,
+            Some(PathBuf::from("/home/philipp/.ssh/id_ed25519"))
+        );
     }
 }

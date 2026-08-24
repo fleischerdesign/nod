@@ -4,7 +4,6 @@
 //! "reachability probe routing").
 
 use async_trait::async_trait;
-use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::process::Command;
@@ -61,7 +60,7 @@ impl DeployerPort for LocalDeployer {
         verbose: bool,
     ) -> Result<(), NodError> {
         let start = Instant::now();
-        println!("  {}", "Activating local configuration...".dimmed());
+        tracing::info!(host = %host.name, "Activating local configuration...");
 
         let switch_bin = closure.join("bin/switch-to-configuration");
         let status = Command::new("sudo")
@@ -81,23 +80,19 @@ impl DeployerPort for LocalDeployer {
         }
 
         if verbose {
-            println!(
-                "  {}",
-                format!("Local activation finished in {:?}", start.elapsed()).dimmed()
+            tracing::debug!(
+                host = %host.name,
+                elapsed = ?start.elapsed(),
+                "Local activation finished"
             );
         }
-        let _ = host;
         Ok(())
     }
 
     async fn rollback(&self, host: &HostEntity, _profile: &SshProfile) -> Result<(), NodError> {
-        println!(
-            "  {}",
-            format!(
-                "Rolling back local host {} to previous generation...",
-                host.name
-            )
-            .yellow()
+        tracing::info!(
+            host = %host.name,
+            "Rolling back local host to previous generation..."
         );
         // Re-invoke the prior generation's profile or ask nixos-rebuild to
         // switch back to the previous known-good configuration (ADR-003).

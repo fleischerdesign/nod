@@ -217,17 +217,10 @@ fn draw_footer(f: &mut Frame, area: Rect) {
 /// Comma-joined tag list, or a dash when the host has none.
 fn tags_text(host: &HostEntity) -> String {
     if host.tags.is_empty() {
-        return String::from("-");
+        String::from("-")
+    } else {
+        host.tags.join(", ")
     }
-    let mut parts = String::new();
-    for (i, tag) in host.tags.iter().enumerate() {
-        if i > 0 {
-            parts = format!("{}, {}", parts, tag);
-        } else {
-            parts = tag.to_string();
-        }
-    }
-    parts
 }
 
 /// The active closure path, or a placeholder when the host has none.

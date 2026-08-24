@@ -3,7 +3,6 @@
 //! `SshProfile` and never re-derives a connection profile itself (ADR-007).
 
 use async_trait::async_trait;
-use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 use std::time::Instant;
@@ -98,9 +97,9 @@ impl DeployerPort for SshCliDeployer {
         let switch_bin = closure.join("bin/switch-to-configuration");
         let remote_cmd = build_remote_command(&switch_bin, action)?;
 
-        println!(
-            "  {}",
-            format!("Copying closure to {} over SSH...", host.target_host).dimmed()
+        tracing::info!(
+            target_host = %host.target_host,
+            "Copying closure over SSH..."
         );
 
         // `nix copy --to ssh://` runs its own ssh; the connection-only flags
@@ -129,9 +128,9 @@ impl DeployerPort for SshCliDeployer {
             return Err(NodError::store_transfer(host.name.clone()));
         }
 
-        println!(
-            "  {}",
-            format!("Activating remote configuration on {}...", host.target_host).dimmed()
+        tracing::info!(
+            target_host = %host.target_host,
+            "Activating remote configuration..."
         );
 
         let args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
@@ -144,9 +143,10 @@ impl DeployerPort for SshCliDeployer {
         }
 
         if verbose {
-            println!(
-                "  {}",
-                format!("Remote deployment finished in {:?}", start.elapsed()).dimmed()
+            tracing::debug!(
+                host = %host.name,
+                elapsed = ?start.elapsed(),
+                "Remote deployment finished"
             );
         }
 
@@ -154,13 +154,9 @@ impl DeployerPort for SshCliDeployer {
     }
 
     async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
-        println!(
-            "  {}",
-            format!(
-                "Rolling back remote host {} to previous generation...",
-                host.name
-            )
-            .yellow()
+        tracing::info!(
+            host = %host.name,
+            "Rolling back remote host to previous generation..."
         );
 
         // Remote generation query: list the prior profile links available.
