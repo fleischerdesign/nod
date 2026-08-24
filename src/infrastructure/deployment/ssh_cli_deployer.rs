@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Output};
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -62,14 +63,13 @@ impl DeployerPort for SshCliDeployer {
             false,
             &["readlink /run/current-system".to_string()],
         );
-        let output = Command::new("ssh").args(&args).output().await;
-        if output.is_err() {
-            return Err(NodError::deployment(format!(
+        let output = run_ssh("ssh", &args, || {
+            NodError::deployment(format!(
                 "failed to query current closure of {} over SSH",
                 host.name
-            )));
-        }
-        let output = output.unwrap();
+            ))
+        })
+        .await?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -135,15 +135,11 @@ impl DeployerPort for SshCliDeployer {
         );
 
         let args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
-        let ssh_status = Command::new("ssh").args(&args).status().await;
-
-        if ssh_status.is_err() {
-            return Err(NodError::remote_activate(format!(
-                "failed to launch `ssh` for {}",
-                host.name
-            )));
-        }
-        if !ssh_status.unwrap().success() {
+        let ssh_status = run_ssh_inherited("ssh", &args, || {
+            NodError::remote_activate(format!("failed to launch `ssh` for {}", host.name))
+        })
+        .await?;
+        if !ssh_status.success() {
             return Err(NodError::remote_activate(host.name.clone()));
         }
 
@@ -174,14 +170,14 @@ impl DeployerPort for SshCliDeployer {
             false,
             &["/nix/var/nix/profiles".to_string()],
         );
-        let query = Command::new("ssh").args(&query_args).status().await;
-        if query.is_err() {
-            return Err(NodError::rollback_failure(format!(
+        let query = run_ssh_inherited("ssh", &query_args, || {
+            NodError::rollback_failure(format!(
                 "failed to query remote generations for {}",
                 host.name
-            )));
-        }
-        if !query.unwrap().success() {
+            ))
+        })
+        .await?;
+        if !query.success() {
             return Err(NodError::rollback_failure(format!(
                 "remote generation query failed for {}",
                 host.name
@@ -191,17 +187,58 @@ impl DeployerPort for SshCliDeployer {
         // Roll back by switching to the previous known-good configuration.
         let remote_cmd = "nixos-rebuild --rollback switch".to_string();
         let rollback_args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
-        let rollback_status = Command::new("ssh").args(&rollback_args).status().await;
-        if rollback_status.is_err() {
-            return Err(NodError::rollback_failure(format!(
-                "failed to launch ssh rollback for {}",
-                host.name
-            )));
-        }
-        if !rollback_status.unwrap().success() {
+        let rollback_status = run_ssh_inherited("ssh", &rollback_args, || {
+            NodError::rollback_failure(format!("failed to launch ssh rollback for {}", host.name))
+        })
+        .await?;
+        if !rollback_status.success() {
             return Err(NodError::rollback_failure(host.name.clone()));
         }
         Ok(())
+    }
+}
+
+/// Spawns `program` with `args`, capturing stdout/stderr into buffers and
+/// waiting for the process to exit. Returns `Ok(output)` once the process has
+/// launched and finished; a launch failure is mapped to `map_launch`. The
+/// caller inspects `output.status` (and stdout) for exit handling.
+///
+/// This is used only by [`current_closure`], which needs the captured stdout
+/// to read the resolved closure path and treats a non-zero exit as "no active
+/// closure". The console-facing activation and rollback invocations use
+/// [`run_ssh_inherited`] instead, so their remote logs are streamed to the
+/// operator's terminal rather than being captured into never-read buffers.
+///
+/// This centralizes the process-spawn + launch-failure mapping that was
+/// previously hand-rolled at each call site (ADR-007 keeps the argv
+/// construction in [`build_ssh_args`]; this is the transport half).
+async fn run_ssh(
+    program: &str,
+    args: &[String],
+    map_launch: impl FnOnce() -> NodError,
+) -> Result<Output, NodError> {
+    match Command::new(program).args(args).output().await {
+        Ok(output) => Ok(output),
+        Err(_) => Err(map_launch()),
+    }
+}
+
+/// Spawns `program` with `args` with stdio inherited (streamed to the
+/// operator's terminal) and waits for it to exit, returning the `ExitStatus`.
+/// A launch failure is mapped to `map_launch`. This mirrors [`run_ssh`] but
+/// uses `.status()` so the remote activation and `nixos-rebuild --rollback`
+/// logs (including non-critical stderr warnings that still exit 0) reach the
+/// terminal instead of being silently dropped. It exactly restores the
+/// pre-refactor `.status()` behaviour at the console-facing SSH sites. The
+/// caller maps a non-zero exit to the per-site `NodError` variant.
+async fn run_ssh_inherited(
+    program: &str,
+    args: &[String],
+    map_launch: impl FnOnce() -> NodError,
+) -> Result<ExitStatus, NodError> {
+    match Command::new(program).args(args).status().await {
+        Ok(status) => Ok(status),
+        Err(_) => Err(map_launch()),
     }
 }
 
@@ -279,6 +316,75 @@ mod tests {
                 action
             );
         }
+    }
+
+    #[tokio::test]
+    async fn run_ssh_maps_launch_failure_to_the_provided_error() {
+        // A spawn failure (missing binary) surfaces the injected constructor,
+        // preserving the per-site NodError variant and message.
+        let args = vec!["-x".to_string()];
+        let err = run_ssh("nod-no-such-binary-xyz", &args, || {
+            NodError::rollback_failure("failed to query remote generations for atlas".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, NodError::Deployment { .. }));
+        assert!(err.to_string().contains("rollback failed"));
+        assert!(err
+            .to_string()
+            .contains("failed to query remote generations for atlas"));
+    }
+
+    #[tokio::test]
+    async fn run_ssh_surfaces_non_zero_exit_as_non_success_output() {
+        // A non-zero exit is *not* misclassified as a launch failure: it comes
+        // back as `Ok` output whose status the caller inspects to pick the
+        // right typed error (or, for `current_closure`, `Ok(None)`).
+        let args = vec!["-c".to_string(), "exit 3".to_string()];
+        let output = run_ssh("sh", &args, || NodError::deployment("boom".to_string()))
+            .await
+            .expect("spawn should succeed");
+        assert!(!output.status.success());
+    }
+
+    #[tokio::test]
+    async fn run_ssh_captures_stdout_on_success() {
+        let args = vec!["-c".to_string(), "printf hello".to_string()];
+        let output = run_ssh("sh", &args, || NodError::deployment("boom".to_string()))
+            .await
+            .expect("spawn should succeed");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello");
+    }
+
+    #[tokio::test]
+    async fn run_ssh_inherited_maps_launch_failure_to_the_provided_error() {
+        // The inherited-stdio helper exposes the same launch-failure seam as
+        // `run_ssh`: a spawn failure (missing binary) surfaces the injected
+        // constructor, preserving the per-site NodError variant and message.
+        let args = vec!["-x".to_string()];
+        let err = run_ssh_inherited("nod-no-such-binary-xyz", &args, || {
+            NodError::remote_activate("failed to launch `ssh` for atlas".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, NodError::Deployment { .. }));
+        assert!(err
+            .to_string()
+            .contains("failed to execute remote activation over SSH"));
+        assert!(err.to_string().contains("failed to launch `ssh` for atlas"));
+    }
+
+    #[tokio::test]
+    async fn run_ssh_inherited_surfaces_non_zero_exit_as_non_success_status() {
+        // A non-zero exit is *not* misclassified as a launch failure: it comes
+        // back as `Ok` exit status whose `success()` the caller inspects to
+        // pick the right typed error.
+        let args = vec!["-c".to_string(), "exit 3".to_string()];
+        let status = run_ssh_inherited("sh", &args, || NodError::deployment("boom".to_string()))
+            .await
+            .expect("spawn should succeed");
+        assert!(!status.success());
     }
 
     #[tokio::test]
