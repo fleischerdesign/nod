@@ -118,18 +118,94 @@ impl NixCliEvaluator {
         serde_json::from_slice::<FlakeMeta>(&output.stdout)
             .map_err(|_| NodError::parse_failure(format!("flake metadata JSON for host '{name}'")))
     }
-}
 
-#[async_trait]
-impl EvaluatorPort for NixCliEvaluator {
-    async fn discover_hosts(
+    /// Runs one host's `nix eval` subprocess for its `config.nod` metadata and
+    /// maps the outcome through [`Self::eval_meta`]. The subprocess launch is
+    /// kept here (async) so the pure [`Self::collect_hosts`] fold stays
+    /// unit-testable without a Nix toolchain.
+    async fn eval_host_meta(&self, flake_path: &Path, name: &str) -> Result<FlakeMeta, NodError> {
+        let meta_expr = Self::build_meta_expr(flake_path, name);
+        let meta_output = Command::new("nix")
+            .args(["eval", "--json", "--expr", &meta_expr])
+            .output()
+            .await;
+        Self::eval_meta(name, meta_output)
+    }
+
+    /// Pure per-host fold: converts each per-host metadata result into a
+    /// `HostEntity`, carrying any per-host eval/parse failure as
+    /// `Err((name, error))` so the caller decides whether to hard-fail
+    /// (strict) or skip-and-report (degraded). No subprocesses here, so the
+    /// entities and the failure pairing are unit-testable in isolation.
+    fn collect_hosts(
+        meta_results: Vec<(String, Result<FlakeMeta, NodError>)>,
+    ) -> Vec<Result<HostEntity, (String, NodError)>> {
+        let local_hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
+        meta_results
+            .into_iter()
+            .map(|(name, meta)| match meta {
+                Ok(meta) => {
+                    let mut entity =
+                        HostEntity::new(&name, &meta.target_host, name == local_hostname);
+                    entity.role = HostRole::parse(&meta.role);
+                    entity.tags = meta.tags.clone();
+                    if let Some(user) = meta.user {
+                        entity.target_user = user;
+                    }
+                    if let Some(port) = meta.port {
+                        entity.target_port = port;
+                    }
+                    // Materialize the full `config.nod` surface (tier 3) so
+                    // downstream adapters read the granular
+                    // ssh/build/rollout/health/hooks values.
+                    if let Some(nod) = meta.nod {
+                        entity.nod_config = nod;
+                    }
+                    Ok(entity)
+                }
+                Err(e) => Err((name, e)),
+            })
+            .collect()
+    }
+
+    /// Builds the operator-facing warning for a skipped host, naming the host
+    /// so the operator knows which fleet member was silently omitted (AC6).
+    fn skip_warning(name: &str, err: &NodError) -> String {
+        format!("warning: skipping host '{name}': {err}")
+    }
+
+    /// Resolves the per-host results into discovered hosts. In degraded mode a
+    /// failing host is skipped with a warning naming it; in strict mode any
+    /// failure is propagated as a hard error (which already carries the host
+    /// name from [`Self::eval_meta`]).
+    fn resolve_hosts(
+        results: Vec<Result<HostEntity, (String, NodError)>>,
+        degraded: bool,
+    ) -> Result<Vec<HostEntity>, NodError> {
+        let mut hosts = Vec::with_capacity(results.len());
+        for res in results {
+            match res {
+                Ok(host) => hosts.push(host),
+                Err((name, e)) if degraded => {
+                    eprintln!("{}", Self::skip_warning(&name, &e));
+                }
+                Err((_, e)) => return Err(e),
+            }
+        }
+        Ok(hosts)
+    }
+
+    /// Runs the whole-matrix `nix eval` (host name list) plus each per-host
+    /// metadata eval, returning the per-host results. The whole-matrix failure
+    /// is hard in both strict and degraded modes (AC2); only per-host
+    /// failures are deferred to [`Self::resolve_hosts`].
+    async fn eval_host_metas(
         &self,
         flake_path: &Path,
-        verbose: bool,
-    ) -> Result<Vec<HostEntity>, NodError> {
+    ) -> Result<Vec<(String, Result<FlakeMeta, NodError>)>, NodError> {
         let pb = Self::create_braille_spinner("Evaluating host matrix...");
-        let start = Instant::now();
-
         let output = Command::new("nix")
             .args([
                 "eval",
@@ -159,51 +235,67 @@ impl EvaluatorPort for NixCliEvaluator {
         }
         let host_names = parsed.unwrap();
 
-        let mut hosts = Vec::new();
-        let local_hostname = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_default();
-
+        let mut meta_results = Vec::with_capacity(host_names.len());
         for name in host_names {
-            let is_local = name == local_hostname;
-
-            // Per-host metadata from flake `config.nod` (tier 3), falling back
-            // to `deployment.*` / `networking.hostName` via the Nix expression
-            // (ADR-004). The whole `nod` object is emitted so every granular
-            // option (ssh/build/rollout/healthChecks/hooks) deserializes onto
-            // the `HostEntity`. A failed eval/parse propagates as a typed error
-            // (AC4) rather than silently defaulting `FlakeMeta`.
-            let meta_expr = Self::build_meta_expr(flake_path, &name);
-            let meta_output = Command::new("nix")
-                .args(["eval", "--json", "--expr", &meta_expr])
-                .output()
-                .await;
-            let meta = Self::eval_meta(&name, meta_output)?;
-
-            let mut entity = HostEntity::new(&name, &meta.target_host, is_local);
-            entity.role = HostRole::parse(&meta.role);
-            entity.tags = meta.tags.clone();
-            if let Some(user) = meta.user {
-                entity.target_user = user;
-            }
-            if let Some(port) = meta.port {
-                entity.target_port = port;
-            }
-            // Materialize the full `config.nod` surface (tier 3) so downstream
-            // adapters read the granular ssh/build/rollout/health/hooks values.
-            if let Some(nod) = meta.nod {
-                entity.nod_config = nod;
-            }
-            hosts.push(entity);
+            let meta = self.eval_host_meta(flake_path, &name).await;
+            meta_results.push((name, meta));
         }
+        Ok(meta_results)
+    }
+}
 
+#[async_trait]
+impl EvaluatorPort for NixCliEvaluator {
+    async fn discover_hosts(
+        &self,
+        flake_path: &Path,
+        verbose: bool,
+    ) -> Result<Vec<HostEntity>, NodError> {
+        // Kept for compatibility / the port contract; the default behaviour is
+        // strict (any per-host failure is a hard error), matching the legacy
+        // semantics this method always had.
+        self.discover_hosts_strict(flake_path, verbose).await
+    }
+
+    async fn discover_hosts_strict(
+        &self,
+        flake_path: &Path,
+        verbose: bool,
+    ) -> Result<Vec<HostEntity>, NodError> {
+        let start = Instant::now();
+        let meta_results = self.eval_host_metas(flake_path).await?;
+        let results = Self::collect_hosts(meta_results);
+        // Strict: the first per-host metadata eval/parse failure is a hard
+        // error carrying the failing host's name (AC3).
+        let hosts = Self::resolve_hosts(results, false)?;
         if verbose {
             println!(
                 "  {}",
                 format!("Discovered {} hosts in {:?}", hosts.len(), start.elapsed()).dimmed()
             );
         }
+        Ok(hosts)
+    }
 
+    async fn discover_hosts_degraded(
+        &self,
+        flake_path: &Path,
+        verbose: bool,
+    ) -> Result<Vec<HostEntity>, NodError> {
+        let start = Instant::now();
+        let meta_results = self.eval_host_metas(flake_path).await?;
+        let results = Self::collect_hosts(meta_results);
+        // Degraded: a failing host's metadata is skipped and reported via a
+        // warning naming it, while the rest of the fleet is still returned
+        // (AC2/AC6). Only a whole-matrix failure (already surfaced by
+        // `eval_host_metas`) hard-fails.
+        let hosts = Self::resolve_hosts(results, true)?;
+        if verbose {
+            println!(
+                "  {}",
+                format!("Discovered {} hosts in {:?}", hosts.len(), start.elapsed()).dimmed()
+            );
+        }
         Ok(hosts)
     }
 
@@ -445,5 +537,93 @@ mod tests {
         let meta = NixCliEvaluator::eval_meta("atlas", Ok(output)).unwrap();
         assert_eq!(meta.target_host, "10.0.0.8");
         assert_eq!(meta.role, "server");
+    }
+
+    /// Builds a per-host metadata result from a JSON body so tests can exercise
+    /// [`NixCliEvaluator::collect_hosts`] / [`NixCliEvaluator::resolve_hosts`]
+    /// without a Nix subprocess (AC5 injectable seam).
+    fn meta_ok(name: &str, target: &str, role: &str) -> (String, Result<FlakeMeta, NodError>) {
+        let json = format!(r#"{{"targetHost":"{target}","role":"{role}"}}"#);
+        let meta = serde_json::from_str::<FlakeMeta>(&json).unwrap();
+        (name.to_string(), Ok(meta))
+    }
+
+    fn meta_err(name: &str) -> (String, Result<FlakeMeta, NodError>) {
+        (
+            name.to_string(),
+            Err(NodError::parse_failure(format!(
+                "flake metadata JSON for host '{name}'"
+            ))),
+        )
+    }
+
+    #[test]
+    fn collect_hosts_carries_failures_alongside_entities() {
+        let metas = vec![
+            meta_ok("atlas", "10.0.0.8", "server"),
+            meta_err("broken"),
+            meta_ok("juno", "10.0.0.9", "desktop"),
+        ];
+        let results = NixCliEvaluator::collect_hosts(metas);
+        assert_eq!(results.len(), 3);
+        // Successful hosts materialize as entities (in order), the failure is
+        // carried with the host name for the caller to handle.
+        assert!(results[0].as_ref().unwrap().name == "atlas");
+        assert!(matches!(&results[1], Err((name, _)) if name == "broken"));
+        assert!(results[2].as_ref().unwrap().name == "juno");
+        assert_eq!(results[0].as_ref().unwrap().role.to_str(), "server");
+    }
+
+    #[test]
+    fn resolve_hosts_degraded_skips_failing_host_and_keeps_successes() {
+        let results = vec![
+            Ok(HostEntity::new("atlas", "10.0.0.8", false)),
+            Err((
+                "broken".to_string(),
+                NodError::parse_failure("flake metadata JSON for host 'broken'"),
+            )),
+            Ok(HostEntity::new("juno", "10.0.0.9", false)),
+        ];
+        let hosts = NixCliEvaluator::resolve_hosts(results, true).unwrap();
+        // Failing host omitted; succeeding hosts returned.
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].name, "atlas");
+        assert_eq!(hosts[1].name, "juno");
+    }
+
+    #[test]
+    fn resolve_hosts_strict_hard_fails_on_first_error_with_host() {
+        let results = vec![
+            Ok(HostEntity::new("atlas", "10.0.0.8", false)),
+            Err((
+                "broken".to_string(),
+                NodError::parse_failure("flake metadata JSON for host 'broken'"),
+            )),
+            Ok(HostEntity::new("juno", "10.0.0.9", false)),
+        ];
+        let err = NixCliEvaluator::resolve_hosts(results, false).unwrap_err();
+        assert!(err.to_string().contains("broken"));
+    }
+
+    #[test]
+    fn resolve_hosts_degraded_all_success_returns_every_host() {
+        let results = vec![
+            Ok(HostEntity::new("atlas", "10.0.0.8", false)),
+            Ok(HostEntity::new("juno", "10.0.0.9", false)),
+        ];
+        let hosts = NixCliEvaluator::resolve_hosts(results, true).unwrap();
+        assert_eq!(hosts.len(), 2);
+    }
+
+    #[test]
+    fn skip_warning_names_the_host_and_error() {
+        let warning = NixCliEvaluator::skip_warning(
+            "broken",
+            &NodError::parse_failure("flake metadata JSON for host 'broken'"),
+        );
+        assert!(warning.starts_with("warning: skipping host '"));
+        assert!(warning.contains("'broken'"));
+        // Warning echoes the underlying per-host failure detail too (AC6).
+        assert!(warning.contains("flake metadata JSON for host 'broken'"));
     }
 }

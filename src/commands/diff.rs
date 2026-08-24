@@ -20,7 +20,9 @@ pub async fn execute(
     let evaluator = ctx.evaluator();
     let store = ctx.config_store()?;
 
-    let hosts = evaluator.discover_hosts(flake_path, verbose).await?;
+    let hosts = evaluator
+        .discover_hosts_degraded(flake_path, verbose)
+        .await?;
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();

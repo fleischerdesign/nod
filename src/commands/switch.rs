@@ -61,7 +61,9 @@ pub async fn execute(
         builder: None,
     };
 
-    let hosts = evaluator.discover_hosts(flake_path, verbose).await?;
+    let hosts = evaluator
+        .discover_hosts_degraded(flake_path, verbose)
+        .await?;
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();

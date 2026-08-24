@@ -54,7 +54,7 @@ pub async fn execute(
     let concurrency = concurrency.unwrap_or(4);
 
     let evaluator = ctx.evaluator();
-    let hosts = evaluator.discover_hosts(flake_path, false).await?;
+    let hosts = evaluator.discover_hosts_degraded(flake_path, false).await?;
 
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())

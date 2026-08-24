@@ -30,7 +30,7 @@ pub async fn execute(
 ) -> Result<(), NodError> {
     let flake_path = flake.unwrap_or_else(|| Path::new("."));
     let evaluator = ctx.evaluator();
-    let hosts = evaluator.discover_hosts(flake_path, false).await?;
+    let hosts = evaluator.discover_hosts_strict(flake_path, false).await?;
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
