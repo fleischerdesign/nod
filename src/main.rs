@@ -493,6 +493,47 @@ async fn main() -> Result<()> {
             nod::commands::reboot::execute(ctx, &flake_path, &target_args, options, cli.verbose)
                 .await?;
         }
+        Commands::Secret { command } => match command {
+            nod::config::options::SecretCommands::Check {
+                target_args,
+                flake,
+                json,
+            } => {
+                let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+                let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+                nod::commands::secret::execute_check(
+                    ctx,
+                    &flake_path,
+                    &target_args,
+                    cli.verbose,
+                    json,
+                )
+                .await?;
+            }
+            nod::config::options::SecretCommands::Rekey {
+                target_args,
+                flake,
+                dry_run,
+                no_backup,
+                json,
+            } => {
+                let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+                let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+                let options = nod::domain::secret::RekeyOptions {
+                    dry_run,
+                    backup: !no_backup,
+                };
+                nod::commands::secret::execute_rekey(
+                    ctx,
+                    &flake_path,
+                    &target_args,
+                    options,
+                    cli.verbose,
+                    json,
+                )
+                .await?;
+            }
+        },
     }
 
     Ok(())

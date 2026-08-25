@@ -14,6 +14,7 @@ use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::flake::FlakePort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
+use crate::domain::ports::secret::SecretPort;
 use crate::domain::ports::store::StorePort;
 
 /// Resolves every port a use case may need from one seeded container.
@@ -27,6 +28,7 @@ pub struct AppContext {
     flake_port: Option<Arc<dyn FlakePort>>,
     local_store: Option<Arc<dyn StorePort>>,
     ssh_store: Option<Arc<dyn StorePort>>,
+    secret_port: Option<Arc<dyn SecretPort>>,
 }
 
 impl AppContext {
@@ -47,6 +49,7 @@ impl AppContext {
             flake_port: None,
             local_store: None,
             ssh_store: None,
+            secret_port: None,
         }
     }
 
@@ -154,6 +157,19 @@ impl AppContext {
         store
             .cloned()
             .ok_or_else(|| NodError::missing_binding("StorePort"))
+    }
+
+    /// Registers the secret management port.
+    pub fn with_secret_port(mut self, value: Arc<dyn SecretPort>) -> Self {
+        self.secret_port = Some(value);
+        self
+    }
+
+    /// Resolves the secret management port, or raises a config error when missing.
+    pub fn secret_port(&self) -> Result<Arc<dyn SecretPort>, NodError> {
+        self.secret_port
+            .clone()
+            .ok_or_else(|| NodError::missing_binding("SecretPort"))
     }
 }
 

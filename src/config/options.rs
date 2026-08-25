@@ -556,6 +556,51 @@ pub enum Commands {
         #[arg(long, value_name = "SECS", default_value = "180")]
         timeout: u64,
     },
+
+    /// Manage host secrets (verification and rekeying)
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretCommands {
+    /// Verify that declared secrets for target hosts are valid and decryptable
+    Check {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Emit verification report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Re-encrypt secrets across target hosts with updated recipient keys
+    Rekey {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Preview rekey actions without modifying files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Bypass creation of .bak backup files
+        #[arg(long)]
+        no_backup: bool,
+
+        /// Emit rekey report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]

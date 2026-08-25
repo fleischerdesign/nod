@@ -5,4 +5,5 @@ pub mod deployment;
 pub mod health;
 pub mod nix;
 pub mod quality_gate;
+pub mod secret;
 pub mod storage;

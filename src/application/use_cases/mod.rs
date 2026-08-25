@@ -2,6 +2,7 @@
 //! (ADR-001). These drive the pipeline; they never import Infrastructure.
 
 pub mod audit_log;
+pub mod check_secrets;
 pub mod collect_garbage;
 pub mod copy_closure;
 pub mod deploy_fleet;
@@ -15,5 +16,6 @@ pub mod inspect_metadata;
 pub mod list_generations;
 pub mod list_inputs;
 pub mod reboot_fleet;
+pub mod rekey_secrets;
 pub mod rollback;
 pub mod update_flake;

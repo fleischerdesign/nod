@@ -13,4 +13,5 @@ pub mod host;
 pub mod info;
 pub mod plan;
 pub mod ports;
+pub mod secret;
 pub mod ssh_args;

@@ -90,8 +90,8 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 | Command | Behavior | Status | Architectural fit |
 |---|---|---|---|
-| `nod secret check [TARGET/GLOB] [--tag] [--role] [--all]` | Pre-flight secret decryptability verification (sops/age). | Planned | Infra: sops/age store adapter. |
-| `nod secret rekey [TARGET/GLOB] [--tag] [--role] [--all]` | Fleet-wide age recipient rotation and re-encryption. | Planned | Infra: sops/age store adapter + rollout plan. |
+| `nod secret check [TARGET/GLOB] [--tag] [--role] [--all]` | Pre-flight secret decryptability and recipient verification (sops/age/custom/none). | ✅ shipped | `CheckSecretsUseCase` + `SecretPort` / `PluggableSecretStore` (ADR-018). |
+| `nod secret rekey [TARGET/GLOB] [--tag] [--role] [--all] [--dry-run]` | Fleet-wide age/sops recipient rotation and re-encryption. | ✅ shipped | `RekeySecretsUseCase` + `SecretPort` (ADR-018). |
 
 ---
 

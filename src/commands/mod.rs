@@ -18,6 +18,7 @@ pub mod plan;
 pub mod reboot;
 pub mod repl;
 pub mod rollback;
+pub mod secret;
 pub mod ssh;
 pub mod status;
 pub mod switch;

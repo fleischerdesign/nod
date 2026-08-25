@@ -23,6 +23,9 @@ pub enum NodError {
     /// Reachability and post-activation verification failures.
     #[error("health check error: {detail}")]
     HealthCheck { detail: String },
+    /// Secrets verification or rekeying failures.
+    #[error("secret error: {detail}")]
+    Secret { detail: String },
     /// Invariant / programming errors that should never surface in practice.
     #[error("internal error: {detail}")]
     Internal { detail: String },
@@ -132,6 +135,13 @@ impl NodError {
     /// Category constructor: health check failures.
     pub fn health_check(detail: impl Into<String>) -> Self {
         NodError::HealthCheck {
+            detail: detail.into(),
+        }
+    }
+
+    /// Category constructor: secret failures.
+    pub fn secret(detail: impl Into<String>) -> Self {
+        NodError::Secret {
             detail: detail.into(),
         }
     }
