@@ -204,6 +204,7 @@ impl DeployerPort for SshCliDeployer {
     }
 }
 
+use crate::domain::cache::{CachePushReport, StoreOptimizeReport};
 use crate::domain::generation::{CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration};
 use crate::domain::ports::store::StorePort;
 use crate::infrastructure::deployment::local_deployer::parse_system_profiles_stat_output;
@@ -301,6 +302,80 @@ impl StorePort for SshCliDeployer {
             closure_path: closure.to_path_buf(),
             success,
         })
+    }
+
+    async fn optimize_store(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+    ) -> Result<StoreOptimizeReport, NodError> {
+        let optimize_cmd = "sudo nix-store --optimise || nix-store --optimise".to_string();
+        let ssh_args = build_ssh_args(profile, &host.target_host, false, &[optimize_cmd]);
+        let output = Command::new("ssh").args(&ssh_args).output().await;
+
+        match output {
+            Ok(out) if out.status.success() => Ok(StoreOptimizeReport {
+                host_name: host.name.clone(),
+                ok: true,
+                freed_bytes: None,
+                error: None,
+            }),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Ok(StoreOptimizeReport {
+                    host_name: host.name.clone(),
+                    ok: false,
+                    freed_bytes: None,
+                    error: Some(stderr),
+                })
+            }
+            Err(e) => Ok(StoreOptimizeReport {
+                host_name: host.name.clone(),
+                ok: false,
+                freed_bytes: None,
+                error: Some(format!("failed to run remote nix-store --optimise: {e}")),
+            }),
+        }
+    }
+
+    async fn push_cache(
+        &self,
+        host: &HostEntity,
+        _profile: &SshProfile,
+        closure: &Path,
+        cache_uri: &str,
+    ) -> Result<CachePushReport, NodError> {
+        let output = Command::new("nix")
+            .args(["copy", "--to", cache_uri, &closure.to_string_lossy()])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => Ok(CachePushReport {
+                host_name: host.name.clone(),
+                closure_path: closure.to_path_buf(),
+                cache_uri: cache_uri.to_string(),
+                ok: true,
+                error: None,
+            }),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Ok(CachePushReport {
+                    host_name: host.name.clone(),
+                    closure_path: closure.to_path_buf(),
+                    cache_uri: cache_uri.to_string(),
+                    ok: false,
+                    error: Some(stderr),
+                })
+            }
+            Err(e) => Ok(CachePushReport {
+                host_name: host.name.clone(),
+                closure_path: closure.to_path_buf(),
+                cache_uri: cache_uri.to_string(),
+                ok: false,
+                error: Some(format!("failed to launch nix copy to cache: {e}")),
+            }),
+        }
     }
 }
 

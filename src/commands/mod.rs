@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod boot;
 pub mod build;
+pub mod cache;
 pub mod check;
 pub mod copy;
 pub mod dashboard;
@@ -21,6 +22,7 @@ pub mod rollback;
 pub mod secret;
 pub mod ssh;
 pub mod status;
+pub mod store;
 pub mod switch;
 pub mod test;
 pub mod update;

@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use std::path::Path;
 
+use crate::domain::cache::{CachePushReport, StoreOptimizeReport};
 use crate::domain::errors::NodError;
 use crate::domain::generation::{CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration};
 use crate::domain::host::{HostEntity, SshProfile};
@@ -33,4 +34,30 @@ pub trait StorePort: Send + Sync {
         closure: &Path,
         options: &CopyOptions,
     ) -> Result<CopyReport, NodError>;
+
+    /// Performs hardlink store deduplication (`nix-store --optimise`, ADR-019).
+    async fn optimize_store(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+    ) -> Result<StoreOptimizeReport, NodError> {
+        let _ = (host, profile);
+        Err(NodError::internal(
+            "optimize_store not implemented for this adapter",
+        ))
+    }
+
+    /// Pushes a closure to a remote binary cache (`nix copy --to <cache_uri>`, ADR-019).
+    async fn push_cache(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+        closure: &Path,
+        cache_uri: &str,
+    ) -> Result<CachePushReport, NodError> {
+        let _ = (host, profile, closure, cache_uri);
+        Err(NodError::internal(
+            "push_cache not implemented for this adapter",
+        ))
+    }
 }

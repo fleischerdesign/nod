@@ -562,6 +562,64 @@ pub enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+
+    /// Manage Nix store operations (optimization and deduplication)
+    Store {
+        #[command(subcommand)]
+        command: StoreCommands,
+    },
+
+    /// Manage binary cache operations (pushing closures)
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StoreCommands {
+    /// Deduplicate identical files in the Nix store via hardlinks
+    Optimize {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Emit optimization report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheCommands {
+    /// Push built system closures to a remote binary cache
+    Push {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Destination binary cache URI (e.g. s3://cache, ssh://cache, https://cache.example.com)
+        #[arg(long)]
+        cache: Option<String>,
+
+        /// Maximum concurrent uploads
+        #[arg(long, default_value = "4")]
+        concurrency: usize,
+
+        /// Preview cache push operations without uploading
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit cache push report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

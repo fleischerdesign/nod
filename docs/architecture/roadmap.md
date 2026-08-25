@@ -63,7 +63,8 @@ Manage store profiles, garbage collection, pre-staging, and deduplication.
 | `nod generations [TARGET/GLOB] [--tag] [--role] [--all]` | Inspect installed system profile generations, UTC creation dates, active status, and store paths. | ✅ shipped | `ListGenerationsUseCase` + `StorePort` (ADR-015). |
 | `nod gc [TARGET/GLOB] [--tag] [--role] [--all] [--keep N] [--older-than X] [--dry-run]` | Remote & local garbage collection with retention rules and dry-run preview. | ✅ shipped | `CollectGarbageUseCase` + `StorePort` (ADR-015). |
 | `nod copy [TARGET/GLOB] [--tag] [--role] [--all] [--to URI] [--from URI]` | Pre-stage system closures on remote targets without activating them. | ✅ shipped | `CopyClosureUseCase` + `StorePort` (ADR-015). |
-| `nod store optimize [TARGET/GLOB] [--tag] [--role] [--all]` | Hardlink deduplication via `nix-store --optimise`. | Planned | Infra: store adapter. |
+| `nod store optimize [TARGET/GLOB] [--tag] [--role] [--all]` | Hardlink deduplication via `nix-store --optimise`. | ✅ shipped | `OptimizeStoreUseCase` + `StorePort` (ADR-019). |
+| `nod cache push [TARGET/GLOB] [--tag] [--role] [--all] [--cache URI]` | Push built system closures to remote binary caches. | ✅ shipped | `PushCacheUseCase` + `StorePort` (ADR-019). |
 
 ---
 

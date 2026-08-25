@@ -534,6 +534,51 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
+        Commands::Store { command } => match command {
+            nod::config::options::StoreCommands::Optimize {
+                target_args,
+                flake,
+                json,
+            } => {
+                let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+                let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+                nod::commands::store::execute_optimize(
+                    ctx,
+                    &flake_path,
+                    &target_args,
+                    cli.verbose,
+                    json,
+                )
+                .await?;
+            }
+        },
+        Commands::Cache { command } => match command {
+            nod::config::options::CacheCommands::Push {
+                target_args,
+                flake,
+                cache,
+                concurrency,
+                dry_run,
+                json,
+            } => {
+                let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+                let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+                let options = nod::domain::cache::CachePushOptions {
+                    cache_uri: cache,
+                    dry_run,
+                    concurrency,
+                };
+                nod::commands::cache::execute_push(
+                    ctx,
+                    &flake_path,
+                    &target_args,
+                    options,
+                    cli.verbose,
+                    json,
+                )
+                .await?;
+            }
+        },
     }
 
     Ok(())

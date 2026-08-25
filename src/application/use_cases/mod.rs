@@ -15,6 +15,8 @@ pub mod inspect_info;
 pub mod inspect_metadata;
 pub mod list_generations;
 pub mod list_inputs;
+pub mod optimize_store;
+pub mod push_cache;
 pub mod reboot_fleet;
 pub mod rekey_secrets;
 pub mod rollback;

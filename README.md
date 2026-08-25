@@ -68,6 +68,12 @@ nod gc [TARGET/GLOB] [--all] [--keep 5] [--older-than 14d] [--dry-run] [--json]
 
 # Pre-stage system closures on remote nodes without activating
 nod copy [TARGET/GLOB] [--all] [--to <URI>] [--from <URI>]
+
+# Deduplicate identical files in Nix stores via hardlinks across hosts
+nod store optimize [TARGET/GLOB] [--all] [--json]
+
+# Push built system closures to remote binary caches (S3, SSH, HTTP)
+nod cache push [TARGET/GLOB] [--all] [--cache <URI>] [--concurrency 4] [--json]
 ```
 
 ### Secrets & Security
