@@ -96,7 +96,7 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 ---
 
-## Theme 7 — Topology Graphs & Inventory Export
+## Theme 6 — Topology Graphs & Inventory Export
 
 | Feature | Behavior | Status | Architectural fit |
 |---|---|---|---|
@@ -105,7 +105,7 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 ---
 
-## Theme 8 — Day-0 Provisioning & Scaffolding
+## Theme 7 — Day-0 Provisioning & Scaffolding
 
 | Feature | Behavior | Status | Architectural fit |
 |---|---|---|---|
@@ -115,7 +115,7 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 ---
 
-## Theme 9 — GitOps & Watch Mode
+## Theme 8 — GitOps & Watch Mode
 
 | Feature | Behavior | Status | Architectural fit |
 |---|---|---|---|
