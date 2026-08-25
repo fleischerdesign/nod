@@ -438,6 +438,40 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Eval {
+            expr,
+            target_args,
+            flake,
+            raw,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::eval::execute(
+                ctx,
+                &flake_path,
+                &target_args,
+                &expr,
+                raw,
+                cli.verbose,
+                json,
+            )
+            .await?;
+        }
+        Commands::Repl { target, flake } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::repl::execute(ctx, &flake_path, target.as_deref(), cli.verbose).await?;
+        }
+        Commands::Info {
+            target_args,
+            flake,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::info::execute(ctx, &flake_path, &target_args, cli.verbose, json).await?;
+        }
     }
 
     Ok(())

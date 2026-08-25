@@ -41,6 +41,12 @@ impl HostRole {
     }
 }
 
+impl std::fmt::Display for HostRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_str())
+    }
+}
+
 /// A NixOS configurable target host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostEntity {

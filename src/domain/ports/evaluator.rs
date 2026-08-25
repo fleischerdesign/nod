@@ -56,4 +56,18 @@ pub trait EvaluatorPort: Send + Sync {
         builder: Option<&'a BuilderHost>,
         verbose: bool,
     ) -> Result<PathBuf, NodError>;
+
+    /// Evaluates a Nix attribute expression in the context of a host configuration (ADR-016).
+    async fn eval_expr(
+        &self,
+        flake_path: &Path,
+        host_name: &str,
+        expr: &str,
+        json: bool,
+    ) -> Result<String, NodError> {
+        let _ = (flake_path, host_name, expr, json);
+        Err(NodError::internal(
+            "eval_expr not implemented for this evaluator",
+        ))
+    }
 }

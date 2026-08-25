@@ -6,9 +6,11 @@
 pub mod audit;
 pub mod config;
 pub mod errors;
+pub mod eval;
 pub mod flake;
 pub mod generation;
 pub mod host;
+pub mod info;
 pub mod plan;
 pub mod ports;
 pub mod ssh_args;

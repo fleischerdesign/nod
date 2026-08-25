@@ -481,6 +481,51 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Evaluate a Nix expression in the host configuration context
+    Eval {
+        /// Nix attribute expression to evaluate (e.g. 'services.nginx.enable')
+        expr: String,
+
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Output raw unquoted string representation
+        #[arg(long)]
+        raw: bool,
+
+        /// Emit evaluated value as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Launch interactive Nix REPL with host configuration pre-loaded
+    Repl {
+        /// Target host name (defaults to local host if omitted)
+        target: Option<String>,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+    },
+
+    /// Inspect comprehensive configuration and live host diagnostics
+    Info {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Emit host diagnostics as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]

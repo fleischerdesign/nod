@@ -439,6 +439,51 @@ impl EvaluatorPort for NixCliEvaluator {
 
         Ok(PathBuf::from(out_path))
     }
+
+    async fn eval_expr(
+        &self,
+        flake_path: &Path,
+        host_name: &str,
+        expr: &str,
+        json: bool,
+    ) -> Result<String, NodError> {
+        let clean_expr = expr.trim();
+        let attr_path = if clean_expr.starts_with("config.")
+            || clean_expr.starts_with("options.")
+            || clean_expr.starts_with("pkgs.")
+        {
+            format!(
+                "{}#nixosConfigurations.{host_name}.{clean_expr}",
+                flake_path.display()
+            )
+        } else {
+            format!(
+                "{}#nixosConfigurations.{host_name}.config.{clean_expr}",
+                flake_path.display()
+            )
+        };
+
+        let mut args = vec!["eval".to_string(), attr_path];
+        if json {
+            args.push("--json".to_string());
+        }
+
+        let output = Command::new("nix")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| NodError::evaluation(format!("failed to launch nix eval: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NodError::evaluation(format!(
+                "nix eval failed for {host_name}: {stderr}"
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.trim().to_string())
+    }
 }
 
 /// Builds the Nix `--builders` SSH transport URI for a builder host
