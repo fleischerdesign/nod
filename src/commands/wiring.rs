@@ -29,14 +29,15 @@ use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 /// [`JsonAuditStore`] as the `AuditStorePort`, and [`NixCliFlakeStore`] as
 /// the `FlakePort`.
 pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppContext, NodError> {
-    Ok(AppContext::new(
-        Arc::new(NixCliEvaluator::new()),
-        Arc::new(LocalDeployer::new()),
-        Arc::new(SshCliDeployer::new()),
+    let local = Arc::new(LocalDeployer::new());
+    let ssh = Arc::new(SshCliDeployer::new());
+    Ok(
+        AppContext::new(Arc::new(NixCliEvaluator::new()), local.clone(), ssh.clone())
+            .with_config_store(Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?))
+            .with_audit_store(Arc::new(JsonAuditStore::new()))
+            .with_flake_port(Arc::new(NixCliFlakeStore::new()))
+            .with_stores(local, ssh),
     )
-    .with_config_store(Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?))
-    .with_audit_store(Arc::new(JsonAuditStore::new()))
-    .with_flake_port(Arc::new(NixCliFlakeStore::new())))
 }
 
 #[cfg(test)]

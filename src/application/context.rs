@@ -14,6 +14,7 @@ use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::flake::FlakePort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
+use crate::domain::ports::store::StorePort;
 
 /// Resolves every port a use case may need from one seeded container.
 pub struct AppContext {
@@ -24,6 +25,8 @@ pub struct AppContext {
     config_store: Option<Arc<dyn ConfigStorePort>>,
     audit_store: Option<Arc<dyn AuditStorePort>>,
     flake_port: Option<Arc<dyn FlakePort>>,
+    local_store: Option<Arc<dyn StorePort>>,
+    ssh_store: Option<Arc<dyn StorePort>>,
 }
 
 impl AppContext {
@@ -42,6 +45,8 @@ impl AppContext {
             config_store: None,
             audit_store: None,
             flake_port: None,
+            local_store: None,
+            ssh_store: None,
         }
     }
 
@@ -130,6 +135,25 @@ impl AppContext {
         self.flake_port
             .clone()
             .ok_or_else(|| NodError::missing_binding("FlakePort"))
+    }
+
+    /// Registers the local and SSH store management ports.
+    pub fn with_stores(mut self, local: Arc<dyn StorePort>, ssh: Arc<dyn StorePort>) -> Self {
+        self.local_store = Some(local);
+        self.ssh_store = Some(ssh);
+        self
+    }
+
+    /// Resolves the store port matching the host's target: local vs SSH.
+    pub fn store_for(&self, host: &HostEntity) -> Result<Arc<dyn StorePort>, NodError> {
+        let store = if host.is_local {
+            self.local_store.as_ref()
+        } else {
+            self.ssh_store.as_ref()
+        };
+        store
+            .cloned()
+            .ok_or_else(|| NodError::missing_binding("StorePort"))
     }
 }
 

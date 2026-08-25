@@ -114,9 +114,217 @@ impl DeployerPort for LocalDeployer {
     }
 }
 
+use crate::domain::generation::{CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration};
+use crate::domain::ports::store::StorePort;
+
+#[async_trait]
+impl StorePort for LocalDeployer {
+    async fn list_generations(
+        &self,
+        _host: &HostEntity,
+        _profile: &SshProfile,
+    ) -> Result<Vec<SystemGeneration>, NodError> {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg("stat -c '%n %Y %N' /nix/var/nix/profiles/system* 2>/dev/null || true")
+            .output()
+            .await
+            .map_err(|e| NodError::evaluation(format!("failed to stat system profiles: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_system_profiles_stat_output(&stdout))
+    }
+
+    async fn collect_garbage(
+        &self,
+        host: &HostEntity,
+        _profile: &SshProfile,
+        options: &GcOptions,
+    ) -> Result<GcReport, NodError> {
+        let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
+        let mut cmd = if options.dry_run || is_root {
+            Command::new("nix-collect-garbage")
+        } else {
+            let mut c = Command::new("sudo");
+            c.arg("nix-collect-garbage");
+            c
+        };
+
+        if let Some(keep) = options.keep {
+            if !options.dry_run {
+                let mut env_cmd = if is_root {
+                    Command::new("nix-env")
+                } else {
+                    let mut c = Command::new("sudo");
+                    c.arg("nix-env");
+                    c
+                };
+                let _ = env_cmd
+                    .args([
+                        "-p",
+                        "/nix/var/nix/profiles/system",
+                        "--delete-generations",
+                        &format!("+{keep}"),
+                    ])
+                    .output()
+                    .await;
+            }
+        } else if let Some(ref older_than) = options.older_than {
+            cmd.args(["--delete-older-than", older_than]);
+        } else if !options.dry_run {
+            cmd.arg("-d");
+        }
+
+        if options.dry_run {
+            cmd.arg("--dry-run");
+        }
+
+        let output = cmd.output().await.map_err(|e| {
+            NodError::deployment(format!("failed to execute nix-collect-garbage: {e}"))
+        })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let success = output.status.success();
+        let output_summary = if success {
+            stdout.lines().last().unwrap_or("done").trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+
+        Ok(GcReport {
+            host_name: host.name.clone(),
+            success,
+            output_summary,
+        })
+    }
+
+    async fn copy_closure(
+        &self,
+        host: &HostEntity,
+        _profile: &SshProfile,
+        closure: &Path,
+        options: &CopyOptions,
+    ) -> Result<CopyReport, NodError> {
+        let mut cmd = Command::new("nix");
+        cmd.arg("copy");
+        if let Some(ref to) = options.to {
+            cmd.args(["--to", to]);
+        }
+        if let Some(ref from) = options.from {
+            cmd.args(["--from", from]);
+        }
+        cmd.arg(closure.to_str().unwrap_or(""));
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| NodError::deployment(format!("failed to execute nix copy: {e}")))?;
+
+        let success = output.status.success();
+        Ok(CopyReport {
+            host_name: host.name.clone(),
+            closure_path: closure.to_path_buf(),
+            success,
+        })
+    }
+}
+
+/// Parses the output of `stat -c "%n %Y %N" /nix/var/nix/profiles/system*` into structured generations.
+pub fn parse_system_profiles_stat_output(output: &str) -> Vec<SystemGeneration> {
+    let mut current_gen = None;
+
+    // Pass 1: extract active generation from `/nix/var/nix/profiles/system` symlink target
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("/nix/var/nix/profiles/system ") {
+            if let Some(idx) = trimmed.find("system-") {
+                let rest = &trimmed[idx + 7..];
+                if let Some(end) = rest.find("-link") {
+                    if let Ok(gen_num) = rest[..end].parse::<u32>() {
+                        current_gen = Some(gen_num);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: parse each `system-<N>-link`
+    let mut generations = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("/nix/var/nix/profiles/system-") {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let path_part = parts[0];
+        let gen_str = path_part
+            .trim_start_matches("/nix/var/nix/profiles/system-")
+            .trim_end_matches("-link");
+        let generation = match gen_str.parse::<u32>() {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        let created_at = parts[1].parse::<u64>().ok();
+
+        let target_part = if let Some(idx) = trimmed.find("->") {
+            trimmed[idx + 2..]
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+        } else {
+            ""
+        };
+
+        if target_part.is_empty() {
+            continue;
+        }
+
+        let is_current = current_gen == Some(generation);
+
+        generations.push(SystemGeneration {
+            generation,
+            is_current,
+            created_at,
+            closure_path: PathBuf::from(target_part),
+        });
+    }
+
+    generations.sort_by_key(|g| std::cmp::Reverse(g.generation));
+    generations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAMPLE_STAT_OUTPUT: &str = "\
+/nix/var/nix/profiles/system 1787560497 '/nix/var/nix/profiles/system' -> 'system-120-link'
+/nix/var/nix/profiles/system-119-link 1787559159 '/nix/var/nix/profiles/system-119-link' -> '/nix/store/r98640x8xsmgga8y8bc39xw4dk5lxg8z-nixos-system-yorke'
+/nix/var/nix/profiles/system-120-link 1787560497 '/nix/var/nix/profiles/system-120-link' -> '/nix/store/8rc43cvqzvg01jj10lv2x0h6kwhly52y-nixos-system-yorke'";
+
+    #[test]
+    fn parse_system_profiles_stat_output_extracts_generations() {
+        let gens = parse_system_profiles_stat_output(SAMPLE_STAT_OUTPUT);
+        assert_eq!(gens.len(), 2);
+
+        assert_eq!(gens[0].generation, 120);
+        assert!(gens[0].is_current);
+        assert_eq!(gens[0].created_at, Some(1787560497));
+        assert_eq!(
+            gens[0].closure_path,
+            PathBuf::from("/nix/store/8rc43cvqzvg01jj10lv2x0h6kwhly52y-nixos-system-yorke")
+        );
+
+        assert_eq!(gens[1].generation, 119);
+        assert!(!gens[1].is_current);
+    }
 
     #[test]
     fn heuristics() {

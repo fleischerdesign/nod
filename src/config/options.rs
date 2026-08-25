@@ -415,6 +415,72 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// List installed NixOS profile generations across the fleet
+    Generations {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Emit generations list as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Collect garbage and remove old generations across target hosts
+    Gc {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Delete generations older than specified duration (e.g. '14d', '30d')
+        #[arg(long, value_name = "AGE")]
+        older_than: Option<String>,
+
+        /// Retain at least N recent generations
+        #[arg(long, value_name = "N")]
+        keep: Option<usize>,
+
+        /// Preview reclaimable space without deleting closures
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum concurrent garbage collection runs
+        #[arg(long, value_name = "N", default_value = "4")]
+        concurrency: usize,
+
+        /// Emit GC report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pre-stage store closures on target hosts without activation
+    Copy {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Destination store URI (e.g. 'ssh://user@host')
+        #[arg(long, value_name = "URI")]
+        to: Option<String>,
+
+        /// Source store URI to copy closures from
+        #[arg(long, value_name = "URI")]
+        from: Option<String>,
+
+        /// Emit copy report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]

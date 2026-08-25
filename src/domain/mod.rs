@@ -7,6 +7,7 @@ pub mod audit;
 pub mod config;
 pub mod errors;
 pub mod flake;
+pub mod generation;
 pub mod host;
 pub mod plan;
 pub mod ports;

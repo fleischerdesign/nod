@@ -388,6 +388,56 @@ async fn main() -> Result<()> {
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
             nod::commands::update::execute(ctx, &flake_path, inputs, json).await?;
         }
+        Commands::Generations {
+            target_args,
+            flake,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::generations::execute(ctx, &flake_path, &target_args, cli.verbose, json)
+                .await?;
+        }
+        Commands::Gc {
+            target_args,
+            flake,
+            older_than,
+            keep,
+            dry_run,
+            concurrency,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::domain::generation::GcOptions {
+                older_than,
+                keep,
+                dry_run,
+                concurrency,
+            };
+            nod::commands::gc::execute(ctx, &flake_path, &target_args, options, cli.verbose, json)
+                .await?;
+        }
+        Commands::Copy {
+            target_args,
+            flake,
+            to,
+            from,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::domain::generation::CopyOptions { to, from };
+            nod::commands::copy::execute(
+                ctx,
+                &flake_path,
+                &target_args,
+                options,
+                cli.verbose,
+                json,
+            )
+            .await?;
+        }
     }
 
     Ok(())

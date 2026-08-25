@@ -9,3 +9,4 @@ pub mod deployer;
 pub mod evaluator;
 pub mod flake;
 pub mod health_checker;
+pub mod store;

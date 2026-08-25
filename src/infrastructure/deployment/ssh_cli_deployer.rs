@@ -194,6 +194,106 @@ impl DeployerPort for SshCliDeployer {
     }
 }
 
+use crate::domain::generation::{CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration};
+use crate::domain::ports::store::StorePort;
+use crate::infrastructure::deployment::local_deployer::parse_system_profiles_stat_output;
+
+#[async_trait]
+impl StorePort for SshCliDeployer {
+    async fn list_generations(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+    ) -> Result<Vec<SystemGeneration>, NodError> {
+        let remote_cmd =
+            "stat -c '%n %Y %N' /nix/var/nix/profiles/system* 2>/dev/null || true".to_string();
+        let ssh_args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
+
+        let output = run_ssh("ssh", &ssh_args, || {
+            NodError::health_check(format!(
+                "failed to query generations over SSH for {}",
+                host.name
+            ))
+        })
+        .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_system_profiles_stat_output(&stdout))
+    }
+
+    async fn collect_garbage(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+        options: &GcOptions,
+    ) -> Result<GcReport, NodError> {
+        let dry_flag = if options.dry_run { " --dry-run" } else { "" };
+        let remote_cmd = if let Some(keep) = options.keep {
+            format!("sudo nix-env -p /nix/var/nix/profiles/system --delete-generations +{keep} && sudo nix-collect-garbage{dry_flag}")
+        } else if let Some(ref older_than) = options.older_than {
+            format!("sudo nix-collect-garbage --delete-older-than {older_than}{dry_flag}")
+        } else {
+            format!("sudo nix-collect-garbage -d{dry_flag}")
+        };
+
+        let ssh_args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
+        let output = run_ssh("ssh", &ssh_args, || {
+            NodError::deployment(format!(
+                "failed to execute remote garbage collection on {}",
+                host.name
+            ))
+        })
+        .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let success = output.status.success();
+        let output_summary = if success {
+            stdout.lines().last().unwrap_or("done").trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+
+        Ok(GcReport {
+            host_name: host.name.clone(),
+            success,
+            output_summary,
+        })
+    }
+
+    async fn copy_closure(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+        closure: &Path,
+        options: &CopyOptions,
+    ) -> Result<CopyReport, NodError> {
+        let mut cmd = Command::new("nix");
+        cmd.arg("copy");
+        if let Some(ref to) = options.to {
+            cmd.args(["--to", to]);
+        } else {
+            let target_uri = format!("ssh://{}@{}", profile.user(), host.target_host);
+            cmd.args(["--to", &target_uri]);
+        }
+        if let Some(ref from) = options.from {
+            cmd.args(["--from", from]);
+        }
+        cmd.arg(closure.to_str().unwrap_or(""));
+
+        let output = cmd.output().await.map_err(|e| {
+            NodError::deployment(format!("failed to execute nix copy over SSH: {e}"))
+        })?;
+
+        let success = output.status.success();
+        Ok(CopyReport {
+            host_name: host.name.clone(),
+            closure_path: closure.to_path_buf(),
+            success,
+        })
+    }
+}
+
 /// Spawns `program` with `args`, capturing stdout/stderr into buffers and
 /// waiting for the process to exit. Returns `Ok(output)` once the process has
 /// launched and finished; a launch failure is mapped to `map_launch`. The
