@@ -658,6 +658,43 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Watch {
+            target_args,
+            flake,
+            interval,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::domain::watch::WatchOptions {
+                poll_interval_secs: interval,
+                debounce_ms: 500,
+            };
+            nod::commands::watch::execute(ctx, &flake_path, &target_args, options, cli.verbose)
+                .await?;
+        }
+        Commands::Sync {
+            flake,
+            remote,
+            branch,
+            once,
+            interval,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::domain::watch::SyncOptions {
+                remote,
+                branch,
+                interval_secs: interval,
+                dry_run: false,
+                once,
+            };
+            nod::commands::sync::execute(ctx, &flake_path, options, cli.verbose).await?;
+        }
+        Commands::Daemon { flake, interval } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            nod::commands::daemon::execute(ctx, &flake_path, interval, cli.verbose).await?;
+        }
     }
 
     Ok(())

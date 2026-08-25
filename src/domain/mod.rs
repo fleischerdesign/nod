@@ -18,3 +18,4 @@ pub mod provision;
 pub mod secret;
 pub mod ssh_args;
 pub mod topology;
+pub mod watch;

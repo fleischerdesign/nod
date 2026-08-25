@@ -135,6 +135,18 @@ nod bootstrap <TARGET> --ip <IP> [--no-disko] [--no-kexec]
 nod iso [TARGET] [--format iso|raw-efi|qcow2]
 ```
 
+### GitOps & Watch Mode
+```bash
+# Live auto-preview: rebuild and preview plan diffs on file changes
+nod watch [TARGET/GLOB] [--tag] [--role] [--all] [--interval 2]
+
+# Automated pull-based GitOps synchronization
+nod sync [--remote origin] [--branch main] [--once] [--interval 300]
+
+# Background systemd GitOps daemon
+nod daemon [--interval 300]
+```
+
 ---
 
 ## 🏛 Architecture

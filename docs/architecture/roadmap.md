@@ -119,5 +119,5 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 | Feature | Behavior | Status | Architectural fit |
 |---|---|---|---|
-| `nod watch [TARGET]` | Live auto-preview: rebuild and diff on file changes. | Planned | App file watcher + plan use case. |
-| `nod sync` / `nod daemon` | Pull-based GitOps background reconciler. | Planned | Daemon service + rollout controller. |
+| `nod watch [TARGET]` | Live auto-preview: rebuild and diff on file changes. | ✅ shipped | `WatchFlakeUseCase` + `GeneratePlanUseCase` (ADR-022). |
+| `nod sync` / `nod daemon` | Pull-based GitOps background reconciler. | ✅ shipped | `SyncDaemonUseCase` (ADR-022). |

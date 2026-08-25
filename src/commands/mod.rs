@@ -5,6 +5,7 @@ pub mod build;
 pub mod cache;
 pub mod check;
 pub mod copy;
+pub mod daemon;
 pub mod dashboard;
 pub mod diff;
 pub mod drift;
@@ -29,8 +30,10 @@ pub mod ssh;
 pub mod status;
 pub mod store;
 pub mod switch;
+pub mod sync;
 pub mod test;
 pub mod update;
+pub mod watch;
 pub mod wiring;
 
 use colored::Colorize;

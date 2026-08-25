@@ -666,6 +666,54 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Watch flake repository and trigger live preview rebuild and diff on file save
+    Watch {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Polling interval in seconds
+        #[arg(long, default_value = "2")]
+        interval: u64,
+    },
+
+    /// Pull-based GitOps synchronization from upstream Git repository
+    Sync {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Upstream Git remote name
+        #[arg(long, default_value = "origin")]
+        remote: String,
+
+        /// Target Git branch
+        #[arg(long, default_value = "main")]
+        branch: String,
+
+        /// Run a single reconciliation cycle and exit
+        #[arg(long)]
+        once: bool,
+
+        /// Polling interval in seconds when running continuously
+        #[arg(long, default_value = "300")]
+        interval: u64,
+    },
+
+    /// Run as a background systemd GitOps reconciler daemon
+    Daemon {
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Reconciliation interval in seconds
+        #[arg(long, default_value = "300")]
+        interval: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
