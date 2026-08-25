@@ -96,7 +96,16 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 ---
 
-## Theme 6 — Day-0 Provisioning & GitOps
+## Theme 7 — Topology Graphs & Inventory Export
+
+| Feature | Behavior | Status | Architectural fit |
+|---|---|---|---|
+| `nod graph [--format mermaid\|dot\|json]` | Render fleet topology diagram and role relationships. | ✅ shipped | `RenderGraphUseCase` + `FleetTopology` (ADR-020). |
+| `nod export <ansible\|prometheus\|json>` | Export fleet inventory to Ansible YAML or Prometheus Service Discovery JSON. | ✅ shipped | `ExportInventoryUseCase` + `FleetTopology` (ADR-020). |
+
+---
+
+## Theme 8 — Day-0 Provisioning & GitOps
 
 | Feature | Behavior | Status | Architectural fit |
 |---|---|---|---|

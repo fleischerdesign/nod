@@ -574,6 +574,28 @@ pub enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+
+    /// Render fleet topology as a diagram (Mermaid, DOT/Graphviz, or JSON)
+    Graph {
+        /// Diagram format: 'mermaid', 'dot', or 'json'
+        #[arg(long, default_value = "mermaid")]
+        format: String,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+    },
+
+    /// Export fleet inventory to external tooling (Ansible, Prometheus, JSON)
+    Export {
+        /// Target export format: 'ansible', 'prometheus', or 'json'
+        #[arg(value_name = "FORMAT")]
+        format: String,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

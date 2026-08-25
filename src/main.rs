@@ -579,6 +579,22 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
+        Commands::Graph { format, flake } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let parsed_format = format
+                .parse::<nod::domain::topology::GraphFormat>()
+                .map_err(nod::domain::errors::NodError::config)?;
+            nod::commands::graph::execute(ctx, &flake_path, parsed_format, cli.verbose).await?;
+        }
+        Commands::Export { format, flake } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let parsed_format = format
+                .parse::<nod::domain::topology::ExportFormat>()
+                .map_err(nod::domain::errors::NodError::config)?;
+            nod::commands::export::execute(ctx, &flake_path, parsed_format, cli.verbose).await?;
+        }
     }
 
     Ok(())

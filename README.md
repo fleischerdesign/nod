@@ -112,6 +112,17 @@ nod dashboard
 nod audit [TARGET] [--limit 20] [--json]
 ```
 
+### Topology Graphs & Inventory Export
+```bash
+# Render fleet topology diagram in Mermaid, Graphviz DOT, or JSON
+nod graph [--format mermaid|dot|json]
+
+# Export fleet inventory to Ansible YAML or Prometheus Service Discovery JSON
+nod export ansible
+nod export prometheus
+nod export json
+```
+
 ---
 
 ## 🏛 Architecture
