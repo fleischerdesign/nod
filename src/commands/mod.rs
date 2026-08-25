@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod boot;
+pub mod bootstrap;
 pub mod build;
 pub mod cache;
 pub mod check;
@@ -14,7 +15,9 @@ pub mod gc;
 pub mod generations;
 pub mod graph;
 pub mod info;
+pub mod init;
 pub mod inputs;
+pub mod iso;
 pub mod lifecycle;
 pub mod metadata;
 pub mod plan;

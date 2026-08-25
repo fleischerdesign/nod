@@ -596,6 +596,76 @@ pub enum Commands {
         #[arg(long, default_value = ".")]
         flake: String,
     },
+
+    /// Bootstrap a bare-metal machine from live ISO using nixos-anywhere and disko
+    Bootstrap {
+        /// Target host defined in flake
+        target: String,
+
+        /// IP address or hostname of machine in live installer environment
+        #[arg(long)]
+        ip: String,
+
+        /// SSH username for live target (default: root)
+        #[arg(long, default_value = "root")]
+        user: String,
+
+        /// SSH port on live target
+        #[arg(long, default_value = "22")]
+        port: u16,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Bypass disko partitioning phase
+        #[arg(long)]
+        no_disko: bool,
+
+        /// Skip kexec and assume machine is already in an installer kernel
+        #[arg(long)]
+        no_kexec: bool,
+
+        /// Enable verbose debug output from nixos-anywhere
+        #[arg(long)]
+        debug: bool,
+
+        /// Emit report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Scaffold a new Nix flake repository with nod configuration templates
+    Init {
+        /// Destination directory (default: current directory)
+        dir: Option<String>,
+
+        /// Template style: 'minimal', 'fleet', or 'server'
+        #[arg(long, default_value = "minimal")]
+        template: String,
+
+        /// Descriptive name for the fleet
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Build a bootable installer ISO or disk image for a host
+    Iso {
+        /// Target host configuration (default: first discovered host)
+        target: Option<String>,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Output format (e.g. iso, raw-efi, qcow2)
+        #[arg(long, default_value = "iso")]
+        format: String,
+
+        /// Emit image path as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

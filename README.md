@@ -123,6 +123,18 @@ nod export prometheus
 nod export json
 ```
 
+### Day-0 Provisioning & Scaffolding
+```bash
+# Scaffold a fresh Nix flake repository with nod configuration templates
+nod init [DIR] [--template minimal|fleet|server]
+
+# Bootstrap a bare-metal machine from live ISO using nixos-anywhere and disko
+nod bootstrap <TARGET> --ip <IP> [--no-disko] [--no-kexec]
+
+# Build a bootable installer ISO or disk image for a host
+nod iso [TARGET] [--format iso|raw-efi|qcow2]
+```
+
 ---
 
 ## 🏛 Architecture

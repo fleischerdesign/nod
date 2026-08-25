@@ -17,10 +17,11 @@ use crate::infrastructure::deployment::local_deployer::LocalDeployer;
 use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
 use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 use crate::infrastructure::nix::cli_flake::NixCliFlakeStore;
+use crate::infrastructure::provision::NixosAnywhereProvisioner;
 use crate::infrastructure::secret::PluggableSecretStore;
 use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 
-/// Builds the complete production graph (ADR-008, ADR-013, ADR-014, ADR-018). This is the single
+/// Builds the complete production graph (ADR-008, ADR-013, ADR-014, ADR-018, ADR-021). This is the single
 /// composition root: `main` calls it for every command arm and passes the
 /// resulting context into `execute`.
 ///
@@ -28,7 +29,8 @@ use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 /// dependency-free contexts), `production` binds the real evaluator, both
 /// deployers, [`TomlConfigStore`] as the `ConfigStorePort`,
 /// [`JsonAuditStore`] as the `AuditStorePort`, [`NixCliFlakeStore`] as
-/// the `FlakePort`, and [`PluggableSecretStore`] as the `SecretPort`.
+/// the `FlakePort`, [`PluggableSecretStore`] as the `SecretPort`, and
+/// [`NixosAnywhereProvisioner`] as the `ProvisionerPort`.
 pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppContext, NodError> {
     let local = Arc::new(LocalDeployer::new());
     let ssh = Arc::new(SshCliDeployer::new());
@@ -38,6 +40,7 @@ pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppC
             .with_audit_store(Arc::new(JsonAuditStore::new()))
             .with_flake_port(Arc::new(NixCliFlakeStore::new()))
             .with_secret_port(Arc::new(PluggableSecretStore::new()))
+            .with_provisioner_port(Arc::new(NixosAnywhereProvisioner::new()))
             .with_stores(local, ssh),
     )
 }

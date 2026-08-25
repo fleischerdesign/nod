@@ -105,11 +105,19 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 
 ---
 
-## Theme 8 — Day-0 Provisioning & GitOps
+## Theme 8 — Day-0 Provisioning & Scaffolding
 
 | Feature | Behavior | Status | Architectural fit |
 |---|---|---|---|
-| `nod bootstrap <TARGET> --ip <IP> [--disko]` | Bare-metal installer from live ISO using `nixos-anywhere` and `disko`. | Planned | `ProvisioningPort` + nixos-anywhere adapter. |
-| `nod init [--template ...]` | Scaffold a new flake repository with `nod.nixosModules.default`. | Planned | App template engine. |
+| `nod bootstrap <TARGET> --ip <IP> [--disko] [--no-kexec]` | Bare-metal installer from live ISO using `nixos-anywhere` and `disko`. | ✅ shipped | `BootstrapHostUseCase` + `ProvisionerPort` / `NixosAnywhereProvisioner` (ADR-021). |
+| `nod init [DIR] [--template ...]` | Scaffold a new flake repository with `nod.nixosModules.default`. | ✅ shipped | `ScaffoldFlakeUseCase` (ADR-021). |
+| `nod iso [TARGET] [--format ...]` | Build bootable installer ISO or disk image for target host. | ✅ shipped | `GenerateIsoUseCase` + `ProvisionerPort` (ADR-021). |
+
+---
+
+## Theme 9 — GitOps & Watch Mode
+
+| Feature | Behavior | Status | Architectural fit |
+|---|---|---|---|
 | `nod watch [TARGET]` | Live auto-preview: rebuild and diff on file changes. | Planned | App file watcher + plan use case. |
 | `nod sync` / `nod daemon` | Pull-based GitOps background reconciler. | Planned | Daemon service + rollout controller. |

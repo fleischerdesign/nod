@@ -14,6 +14,7 @@ use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::flake::FlakePort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
+use crate::domain::ports::provisioner::ProvisionerPort;
 use crate::domain::ports::secret::SecretPort;
 use crate::domain::ports::store::StorePort;
 
@@ -29,6 +30,7 @@ pub struct AppContext {
     local_store: Option<Arc<dyn StorePort>>,
     ssh_store: Option<Arc<dyn StorePort>>,
     secret_port: Option<Arc<dyn SecretPort>>,
+    provisioner_port: Option<Arc<dyn ProvisionerPort>>,
 }
 
 impl AppContext {
@@ -50,6 +52,7 @@ impl AppContext {
             local_store: None,
             ssh_store: None,
             secret_port: None,
+            provisioner_port: None,
         }
     }
 
@@ -170,6 +173,19 @@ impl AppContext {
         self.secret_port
             .clone()
             .ok_or_else(|| NodError::missing_binding("SecretPort"))
+    }
+
+    /// Registers the provisioner port.
+    pub fn with_provisioner_port(mut self, value: Arc<dyn ProvisionerPort>) -> Self {
+        self.provisioner_port = Some(value);
+        self
+    }
+
+    /// Resolves the provisioner port, or raises a config error when missing.
+    pub fn provisioner_port(&self) -> Result<Arc<dyn ProvisionerPort>, NodError> {
+        self.provisioner_port
+            .clone()
+            .ok_or_else(|| NodError::missing_binding("ProvisionerPort"))
     }
 }
 

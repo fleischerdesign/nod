@@ -595,6 +595,69 @@ async fn main() -> Result<()> {
                 .map_err(nod::domain::errors::NodError::config)?;
             nod::commands::export::execute(ctx, &flake_path, parsed_format, cli.verbose).await?;
         }
+        Commands::Bootstrap {
+            target,
+            ip,
+            user,
+            port,
+            flake,
+            no_disko,
+            no_kexec,
+            debug,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::domain::provision::BootstrapOptions {
+                target_ip: ip,
+                ssh_user: user,
+                ssh_port: port,
+                disko: !no_disko,
+                no_kexec,
+                debug,
+            };
+            nod::commands::bootstrap::execute(
+                ctx,
+                &flake_path,
+                &target,
+                options,
+                cli.verbose,
+                json,
+            )
+            .await?;
+        }
+        Commands::Init {
+            dir,
+            template,
+            name,
+        } => {
+            let parsed_template = template
+                .parse::<nod::domain::provision::InitTemplate>()
+                .map_err(nod::domain::errors::NodError::config)?;
+            let path_buf = dir.map(std::path::PathBuf::from);
+            nod::commands::init::execute(path_buf, parsed_template, name)?;
+        }
+        Commands::Iso {
+            target,
+            flake,
+            format,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::domain::provision::IsoOptions {
+                target_format: format,
+            };
+            nod::commands::iso::execute(
+                ctx,
+                &flake_path,
+                target.as_deref(),
+                options,
+                cli.verbose,
+                json,
+            )
+            .await?;
+        }
     }
 
     Ok(())
