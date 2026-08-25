@@ -526,6 +526,36 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Reboot target hosts with rollout orchestration and recovery verification
+    Reboot {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Rollout strategy: 'all', 'canary', or 'batch'
+        #[arg(long, value_name = "STRATEGY", default_value = "batch")]
+        strategy: String,
+
+        /// Wave size for --strategy batch
+        #[arg(long, value_name = "N", default_value = "1")]
+        batch_size: usize,
+
+        /// Maximum concurrent reboots per wave
+        #[arg(long, value_name = "N", default_value = "4")]
+        concurrency: usize,
+
+        /// Do not wait for hosts to cycle and recover online
+        #[arg(long)]
+        no_wait: bool,
+
+        /// Maximum seconds to wait for host recovery
+        #[arg(long, value_name = "SECS", default_value = "180")]
+        timeout: u64,
+    },
 }
 
 #[cfg(test)]

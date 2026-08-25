@@ -43,4 +43,10 @@ pub trait DeployerPort: Send + Sync {
 
     /// Reverts a host to its previously known-good generation profile.
     async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
+
+    /// Triggers a system reboot on the target host (ADR-017).
+    async fn reboot(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
+        let _ = (host, profile);
+        Err(NodError::internal("reboot not supported for this deployer"))
+    }
 }

@@ -112,6 +112,21 @@ impl DeployerPort for LocalDeployer {
         }
         Ok(())
     }
+
+    async fn reboot(&self, host: &HostEntity, _profile: &SshProfile) -> Result<(), NodError> {
+        tracing::info!(host = %host.name, "Initiating local system reboot...");
+        let status = Command::new("sudo")
+            .args(["systemctl", "reboot"])
+            .status()
+            .await;
+        if status.is_err() || !status.unwrap().success() {
+            return Err(NodError::deployment(format!(
+                "failed to execute local reboot for {}",
+                host.name
+            )));
+        }
+        Ok(())
+    }
 }
 
 use crate::domain::generation::{CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration};

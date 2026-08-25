@@ -192,6 +192,16 @@ impl DeployerPort for SshCliDeployer {
         }
         Ok(())
     }
+
+    async fn reboot(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
+        tracing::info!(host = %host.name, "Initiating remote system reboot over SSH...");
+        let remote_cmd = "sudo systemctl reboot || sudo reboot".to_string();
+        let ssh_args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
+
+        // Spawning reboot over SSH often exits with status 255 because sshd terminates the socket on shutdown
+        let _ = Command::new("ssh").args(&ssh_args).status().await;
+        Ok(())
+    }
 }
 
 use crate::domain::generation::{CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration};

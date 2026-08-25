@@ -15,6 +15,7 @@ pub mod inputs;
 pub mod lifecycle;
 pub mod metadata;
 pub mod plan;
+pub mod reboot;
 pub mod repl;
 pub mod rollback;
 pub mod ssh;

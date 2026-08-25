@@ -472,6 +472,27 @@ async fn main() -> Result<()> {
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
             nod::commands::info::execute(ctx, &flake_path, &target_args, cli.verbose, json).await?;
         }
+        Commands::Reboot {
+            target_args,
+            flake,
+            strategy,
+            batch_size,
+            concurrency,
+            no_wait,
+            timeout,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = nod::application::use_cases::reboot_fleet::RebootOptions {
+                strategy,
+                batch_size,
+                concurrency,
+                wait: !no_wait,
+                timeout_secs: timeout,
+            };
+            nod::commands::reboot::execute(ctx, &flake_path, &target_args, options, cli.verbose)
+                .await?;
+        }
     }
 
     Ok(())

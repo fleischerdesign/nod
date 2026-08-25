@@ -14,5 +14,6 @@ pub mod inspect_info;
 pub mod inspect_metadata;
 pub mod list_generations;
 pub mod list_inputs;
+pub mod reboot_fleet;
 pub mod rollback;
 pub mod update_flake;
