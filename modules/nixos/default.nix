@@ -57,6 +57,14 @@
       '';
     };
 
+    dependsOn = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = ''
+        List of host names that must be successfully deployed before this host.
+      '';
+    };
+
     description = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -267,6 +275,13 @@
               How long the magic rollback waits for quiescence.
             '';
           };
+          dependsOn = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            description = ''
+              List of host names that must be successfully deployed before this host.
+            '';
+          };
         };
       };
       default = {
@@ -276,6 +291,7 @@
         reboot = false;
         magicRollback = true;
         magicRollbackTimeoutSecs = 60;
+        dependsOn = [];
       };
       description = ''
         Rollout / activation options (1:1 with `options.nod.rollout`).

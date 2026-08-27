@@ -135,7 +135,8 @@ impl DeployFleetUseCase {
             aborted: false,
         };
 
-        for wave in plan.wave_indices() {
+        let wave_indices = plan.wave_indices()?;
+        for wave in wave_indices {
             let wave_outcomes = self
                 .run_wave(&hosts, &wave, options.clone(), flake_path)
                 .await;
@@ -798,5 +799,29 @@ mod tests {
         assert_eq!(outcome.state, DeploymentState::Completed);
         assert!(outcome.ok);
         assert_eq!(outcome.health_verified, Some(true));
+    }
+
+    #[tokio::test]
+    async fn cyclic_dependency_in_hosts_fails_early_without_deploying() {
+        let eval = MockFakeEvaluator::new();
+        let local = MockFakeDeployer::new();
+        let ssh = MockFakeDeployer::new();
+        let ctx = ctx_with(eval, local, ssh);
+        let mut host_a = HostEntity::new("host-a", "host-a", true);
+        let mut host_b = HostEntity::new("host-b", "host-b", true);
+        host_a.nod_config.depends_on = vec!["host-b".to_string()];
+        host_b.nod_config.depends_on = vec!["host-a".to_string()];
+
+        let use_case = DeployFleetUseCase::new(ctx);
+        let result = use_case
+            .execute(
+                vec![host_a, host_b],
+                options_with(DeploymentAction::Switch),
+                Path::new("/tmp/flake"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NodError::Config { .. }));
     }
 }

@@ -121,3 +121,13 @@ Interactive management, remote execution, expression evaluation, and fleet orche
 |---|---|---|---|
 | `nod watch [TARGET]` | Live auto-preview: rebuild and diff on file changes. | ✅ shipped | `WatchFlakeUseCase` + `GeneratePlanUseCase` (ADR-022). |
 | `nod sync` / `nod daemon` | Pull-based GitOps background reconciler. | ✅ shipped | `SyncDaemonUseCase` (ADR-022). |
+
+---
+
+## Theme 9 — Performance, Transport & DAG Orchestration
+
+| Feature | Behavior | Status | Architectural fit |
+|---|---|---|---|
+| TCP Socket Reachability & SSH Multiplexing | Asynchronous TCP connect probes and OpenSSH `ControlMaster` socket reuse. | ✅ shipped | `SshCliDeployer` + `ssh_args` (ADR-023). |
+| Single-Batch Flake Evaluation | $O(1)$ single-invocation evaluation of all `nixosConfigurations` via `builtins.mapAttrs` with degraded fallback. | ✅ shipped | `NixCliEvaluator` (ADR-024). |
+| DAG Dependency-based Wave Deployments | Topological wave partitioning using Kahn's algorithm over `dependsOn` with cycle detection. | ✅ shipped | `DeploymentPlan` + `DeployFleetUseCase` (ADR-025). |

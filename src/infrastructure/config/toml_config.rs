@@ -121,6 +121,7 @@ pub struct TomlRollout {
     pub reboot: Option<bool>,
     pub magic_rollback: Option<bool>,
     pub magic_rollback_timeout_secs: Option<u32>,
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// `[hosts.<name>.health_checks.systemd]`.
@@ -474,6 +475,7 @@ fn to_rollout_config(r: &TomlRollout) -> RolloutConfig {
         reboot: r.reboot,
         magic_rollback: r.magic_rollback,
         magic_rollback_timeout_secs: r.magic_rollback_timeout_secs,
+        depends_on: r.depends_on.clone().unwrap_or_default(),
     }
 }
 

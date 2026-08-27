@@ -85,6 +85,8 @@ pub struct RolloutConfig {
     pub magic_rollback: Option<bool>,
     #[serde(alias = "magic_rollback_timeout_secs")]
     pub magic_rollback_timeout_secs: Option<u32>,
+    #[serde(alias = "depends_on", default)]
+    pub depends_on: Vec<String>,
 }
 
 /// systemd unit verification sub-settings (1:1 with `options.nod.healthChecks.systemd`).
@@ -159,6 +161,8 @@ pub struct NodConfig {
     pub role: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(alias = "depends_on", default)]
+    pub depends_on: Vec<String>,
     pub description: Option<String>,
     pub ssh: SshProfileConfig,
     pub build: BuildConfig,

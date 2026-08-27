@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::domain::errors::NodError;
 use crate::domain::host::{BuilderHost, HostEntity};
 
 /// What an individual target plan asks the pipeline to do.
@@ -153,6 +154,9 @@ pub struct TargetPlan {
     pub new_closure: Option<PathBuf>,
     /// The live/current closure, when discoverable.
     pub current_closure: Option<PathBuf>,
+    /// Hosts that must be deployed before this target.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 /// A full, ordered deployment preview (ADR-003 planning stage).
@@ -177,11 +181,19 @@ impl DeploymentPlan {
     pub fn from_hosts(hosts: Vec<HostEntity>, action: DeploymentAction) -> DeploymentPlan {
         let targets = hosts
             .into_iter()
-            .map(|host| TargetPlan {
-                host_name: host.name,
-                action: action.clone(),
-                new_closure: None,
-                current_closure: None,
+            .map(|host| {
+                let depends_on = if !host.nod_config.rollout.depends_on.is_empty() {
+                    host.nod_config.rollout.depends_on.clone()
+                } else {
+                    host.nod_config.depends_on.clone()
+                };
+                TargetPlan {
+                    host_name: host.name,
+                    action: action.clone(),
+                    new_closure: None,
+                    current_closure: None,
+                    depends_on,
+                }
             })
             .collect();
         DeploymentPlan {
@@ -190,62 +202,142 @@ impl DeploymentPlan {
         }
     }
 
-    /// Partitions target indices into rollout waves for the active strategy.
-    ///
-    /// - `All`: a single wave containing every index.
-    /// - `Batch`: fixed waves of `batch_size` (one wave when 0).
-    /// - `Canary`: `[0]` alone, then the remainder in `batch_size` chunks
-    ///   (or a single remainder wave when `batch_size` is 0).
-    pub fn wave_indices(&self) -> Vec<Vec<usize>> {
+    /// Partitions target indices into topological DAG levels based on `depends_on`.
+    /// Returns an error if a cyclic dependency is detected.
+    pub fn topological_levels(&self) -> Result<Vec<Vec<usize>>, NodError> {
         let count = self.targets.len();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Map host_name -> index
+        let name_to_idx: std::collections::HashMap<&str, usize> = self
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| (t.host_name.as_str(), idx))
+            .collect();
+
+        // Build adjacency and in-degree counts
+        let mut in_degrees = vec![0usize; count];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); count];
+
+        for (idx, target) in self.targets.iter().enumerate() {
+            for dep in &target.depends_on {
+                if let Some(&dep_idx) = name_to_idx.get(dep.as_str()) {
+                    if dep_idx != idx {
+                        in_degrees[idx] += 1;
+                        dependents[dep_idx].push(idx);
+                    }
+                }
+            }
+        }
+
+        // Collect initial 0-degree nodes
+        let mut current_level: Vec<usize> = in_degrees
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &deg)| if deg == 0 { Some(idx) } else { None })
+            .collect();
+
+        let mut levels = Vec::<Vec<usize>>::new();
+        let mut processed_count = 0usize;
+
+        while !current_level.is_empty() {
+            processed_count += current_level.len();
+            let mut next_level = Vec::<usize>::new();
+
+            for &node in &current_level {
+                for &dependent in &dependents[node] {
+                    in_degrees[dependent] -= 1;
+                    if in_degrees[dependent] == 0 {
+                        next_level.push(dependent);
+                    }
+                }
+            }
+
+            levels.push(current_level);
+            current_level = next_level;
+        }
+
+        if processed_count < count {
+            let unresolved: Vec<String> = in_degrees
+                .iter()
+                .enumerate()
+                .filter(|(_, &deg)| deg > 0)
+                .map(|(idx, _)| self.targets[idx].host_name.clone())
+                .collect();
+            return Err(NodError::config(format!(
+                "cyclic dependency detected in deployment plan involving hosts: {}",
+                unresolved.join(", ")
+            )));
+        }
+
+        Ok(levels)
+    }
+
+    /// Partitions target indices into rollout waves for the active strategy,
+    /// respecting DAG dependencies and topological levels.
+    pub fn wave_indices(&self) -> Result<Vec<Vec<usize>>, NodError> {
+        let levels = self.topological_levels()?;
         let batch_size = self.options.batch_size;
         let mut waves = Vec::<Vec<usize>>::new();
 
-        match self.options.strategy {
-            RolloutStrategy::Canary => {
-                if count == 0 {
-                    return waves;
-                }
-                let canary = vec![0];
-                waves.push(canary);
-                if count > 1 {
-                    let size = if batch_size == 0 {
-                        count - 1
+        let mut is_first_level = true;
+
+        for level in levels {
+            let count = level.len();
+            if count == 0 {
+                continue;
+            }
+
+            match self.options.strategy {
+                RolloutStrategy::Canary => {
+                    if is_first_level {
+                        let canary = vec![level[0]];
+                        waves.push(canary);
+                        if count > 1 {
+                            let size = if batch_size == 0 {
+                                count - 1
+                            } else {
+                                batch_size
+                            };
+                            Self::append_slices_from_vec(&mut waves, &level, 1, size);
+                        }
                     } else {
-                        batch_size
-                    };
-                    Self::append_slices(&mut waves, 1, count, size);
+                        let size = if batch_size == 0 { count } else { batch_size };
+                        Self::append_slices_from_vec(&mut waves, &level, 0, size);
+                    }
+                }
+                RolloutStrategy::Batch => {
+                    let size = if batch_size == 0 { count } else { batch_size };
+                    Self::append_slices_from_vec(&mut waves, &level, 0, size);
+                }
+                RolloutStrategy::All => {
+                    waves.push(level);
                 }
             }
-            RolloutStrategy::Batch => {
-                let size = if batch_size == 0 { count } else { batch_size };
-                Self::append_slices(&mut waves, 0, count, size);
-            }
-            RolloutStrategy::All => {
-                if count == 0 {
-                    return waves;
-                }
-                let mut all = Vec::<usize>::with_capacity(count);
-                let mut i = 0;
-                while i < count {
-                    all.push(i);
-                    i += 1;
-                }
-                waves.push(all);
-            }
+            is_first_level = false;
         }
-        waves
+
+        Ok(waves)
     }
 
-    /// Appends `[start, count)` sliced into `size`-sized subsequences.
-    fn append_slices(waves: &mut Vec<Vec<usize>>, start: usize, count: usize, size: usize) {
+    /// Appends slices of `items[start..]` of length `size` into `waves`.
+    fn append_slices_from_vec(
+        waves: &mut Vec<Vec<usize>>,
+        items: &[usize],
+        start: usize,
+        size: usize,
+    ) {
+        let total = items.len();
         let mut first = start;
-        while first < count {
+        while first < total {
             let mut wave = Vec::<usize>::new();
             let mut i = first;
             let mut taken = 0;
-            while i < count && taken < size {
-                wave.push(i);
+            while i < total && taken < size {
+                wave.push(items[i]);
                 i += 1;
                 taken += 1;
             }
@@ -268,6 +360,7 @@ mod tests {
                 action: DeploymentAction::Switch,
                 new_closure: None,
                 current_closure: None,
+                depends_on: Vec::new(),
             });
             i += 1;
         }
@@ -280,7 +373,7 @@ mod tests {
     #[test]
     fn all_strategy_is_a_single_wave() {
         let plan = plan(6, RolloutStrategy::All, 0);
-        let waves = plan.wave_indices();
+        let waves = plan.wave_indices().unwrap();
         assert_eq!(waves.len(), 1);
         assert_eq!(waves[0], vec![0, 1, 2, 3, 4, 5]);
     }
@@ -298,13 +391,13 @@ mod tests {
                 targets: Vec::new(),
                 options,
             };
-            assert!(plan.wave_indices().is_empty());
+            assert!(plan.wave_indices().unwrap().is_empty());
         }
     }
 
     #[test]
     fn batch_splits_fixed_size_slices() {
-        let waves = plan(6, RolloutStrategy::Batch, 2).wave_indices();
+        let waves = plan(6, RolloutStrategy::Batch, 2).wave_indices().unwrap();
         assert_eq!(waves.len(), 3);
         assert_eq!(waves[0], vec![0, 1]);
         assert_eq!(waves[1], vec![2, 3]);
@@ -313,7 +406,7 @@ mod tests {
 
     #[test]
     fn batch_zero_is_one_remaining_wave() {
-        let waves = plan(5, RolloutStrategy::Batch, 0).wave_indices();
+        let waves = plan(5, RolloutStrategy::Batch, 0).wave_indices().unwrap();
         assert_eq!(waves.len(), 1);
         assert_eq!(waves[0], vec![0, 1, 2, 3, 4]);
     }
@@ -323,7 +416,7 @@ mod tests {
         // Matches the documented semantics: `[0]` alone, then the remainder in
         // `batch_size` chunks (`wave_indices` doc comment), so the tail `[5]`
         // is its own final wave, not absorbed into the previous one.
-        let waves = plan(6, RolloutStrategy::Canary, 2).wave_indices();
+        let waves = plan(6, RolloutStrategy::Canary, 2).wave_indices().unwrap();
         assert_eq!(waves.len(), 4);
         assert_eq!(waves[0], vec![0]);
         assert_eq!(waves[1], vec![1, 2]);
@@ -333,9 +426,35 @@ mod tests {
 
     #[test]
     fn canary_single_host_has_no_second_wave() {
-        let waves = plan(1, RolloutStrategy::Canary, 2).wave_indices();
+        let waves = plan(1, RolloutStrategy::Canary, 2).wave_indices().unwrap();
         assert_eq!(waves.len(), 1);
         assert_eq!(waves[0], vec![0]);
+    }
+
+    #[test]
+    fn dag_dependency_levels_partition_correctly() {
+        // h0 (db) -> h1 (api1), h2 (api2) -> h3 (proxy)
+        let mut plan = plan(4, RolloutStrategy::All, 0);
+        plan.targets[1].depends_on = vec!["h0".to_string()];
+        plan.targets[2].depends_on = vec!["h0".to_string()];
+        plan.targets[3].depends_on = vec!["h1".to_string(), "h2".to_string()];
+
+        let waves = plan.wave_indices().unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec![0]);
+        assert_eq!(waves[1], vec![1, 2]);
+        assert_eq!(waves[2], vec![3]);
+    }
+
+    #[test]
+    fn dag_cycle_detection_returns_error() {
+        let mut plan = plan(2, RolloutStrategy::All, 0);
+        plan.targets[0].depends_on = vec!["h1".to_string()];
+        plan.targets[1].depends_on = vec!["h0".to_string()];
+
+        let err = plan.wave_indices().unwrap_err();
+        assert!(matches!(err, NodError::Config { .. }));
+        assert!(err.to_string().contains("cyclic dependency detected"));
     }
 
     #[test]

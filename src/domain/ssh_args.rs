@@ -14,7 +14,14 @@ use crate::domain::host::SshProfile;
 /// `NIX_SSHOPTS` value that `nix copy --to ssh://` forwards to its internal
 /// ssh, so identity/proxy/extra-args are honoured on every transport path.
 pub fn build_ssh_opts(profile: &SshProfile) -> Vec<String> {
-    let mut opts = Vec::<String>::new();
+    let mut opts = vec![
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPath=/tmp/nod-ssh-%r@%h:%p".to_string(),
+        "-o".to_string(),
+        "ControlPersist=60s".to_string(),
+    ];
     if profile.port() != 22 {
         opts.push("-p".to_string());
         opts.push(profile.port().to_string());
@@ -89,28 +96,78 @@ mod tests {
     fn default_root_at_host() {
         let profile = SshProfile::for_host(&HostEntity::new("atlas", "atlas", false));
         let args = build_ssh_args(&profile, "atlas", false, &[]);
-        assert_eq!(args, ["root@atlas"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "root@atlas"
+            ]
+        );
     }
 
     #[test]
     fn custom_port_adds_dash_p() {
         let profile = profile_with("root", 2200, None, None, &[]);
         let args = build_ssh_args(&profile, "atlas", false, &[]);
-        assert_eq!(args, ["-p", "2200", "root@atlas"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "-p",
+                "2200",
+                "root@atlas"
+            ]
+        );
     }
 
     #[test]
     fn identity_file_adds_dash_i() {
         let profile = profile_with("root", 22, Some("/path/key"), None, &[]);
         let args = build_ssh_args(&profile, "atlas", false, &[]);
-        assert_eq!(args, ["-i", "/path/key", "root@atlas"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "-i",
+                "/path/key",
+                "root@atlas"
+            ]
+        );
     }
 
     #[test]
     fn proxy_jump_adds_dash_j() {
         let profile = profile_with("root", 22, None, Some("bastion"), &[]);
         let args = build_ssh_args(&profile, "atlas", false, &[]);
-        assert_eq!(args, ["-J", "bastion", "root@atlas"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "-J",
+                "bastion",
+                "root@atlas"
+            ]
+        );
     }
 
     #[test]
@@ -120,6 +177,12 @@ mod tests {
         assert_eq!(
             args,
             [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
                 "-p",
                 "2200",
                 "-i",
@@ -135,14 +198,40 @@ mod tests {
     fn extra_ssh_args_are_preserved_positionally() {
         let profile = profile_with("root", 22, None, None, &["-o", "KeepAlive=1"]);
         let args = build_ssh_args(&profile, "atlas", false, &[]);
-        assert_eq!(args, ["-o", "KeepAlive=1", "root@atlas"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "-o",
+                "KeepAlive=1",
+                "root@atlas"
+            ]
+        );
     }
 
     #[test]
     fn sudo_with_interactive_shell_runs_sudo_i() {
         let profile = SshProfile::for_host(&HostEntity::new("atlas", "atlas", false));
         let args = build_ssh_args(&profile, "atlas", true, &[]);
-        assert_eq!(args, ["root@atlas", "sudo", "-i"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "root@atlas",
+                "sudo",
+                "-i"
+            ]
+        );
     }
 
     #[test]
@@ -154,7 +243,21 @@ mod tests {
             true,
             &["apt-get".to_string(), "update".to_string()],
         );
-        assert_eq!(args, ["root@atlas", "sudo", "apt-get", "update"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "root@atlas",
+                "sudo",
+                "apt-get",
+                "update"
+            ]
+        );
     }
 
     #[test]
@@ -166,6 +269,19 @@ mod tests {
             false,
             &["uname".to_string(), "-a".to_string()],
         );
-        assert_eq!(args, ["root@atlas", "uname", "-a"]);
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
+                "root@atlas",
+                "uname",
+                "-a"
+            ]
+        );
     }
 }

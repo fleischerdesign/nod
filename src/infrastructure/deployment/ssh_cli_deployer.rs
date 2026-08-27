@@ -33,19 +33,19 @@ impl Default for SshCliDeployer {
 #[async_trait]
 impl DeployerPort for SshCliDeployer {
     async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError> {
-        let output = Command::new("ping")
-            .args(["-c", "1", "-W", "2", &host.target_host])
-            .output()
-            .await;
+        let port = host.nod_config.ssh.port.unwrap_or(host.target_port);
+        let timeout_secs = host.nod_config.ssh.connect_timeout_secs.unwrap_or(3) as u64;
 
-        if output.is_err() {
-            return Err(NodError::unreachable(host.name.clone()));
+        let addr = (host.target_host.as_str(), port);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(_stream)) => Ok(true),
+            _ => Err(NodError::unreachable(host.name.clone())),
         }
-        let output = output.unwrap();
-        if !output.status.success() {
-            return Err(NodError::unreachable(host.name.clone()));
-        }
-        Ok(true)
     }
 
     async fn current_closure(
@@ -577,5 +577,34 @@ mod tests {
             .deploy_and_activate(&host, &profile, closure, "evil", false)
             .await;
         assert!(matches!(result, Err(NodError::Config { .. })));
+    }
+
+    #[tokio::test]
+    async fn check_reachability_succeeds_on_open_tcp_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let mut host = HostEntity::new("local-test", "127.0.0.1", false);
+        host.target_port = port;
+
+        let deployer = SshCliDeployer::new();
+        let reachable = deployer.check_reachability(&host).await;
+        assert!(reachable.is_ok());
+        assert!(reachable.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_reachability_fails_on_closed_port() {
+        let mut host = HostEntity::new("local-test", "127.0.0.1", false);
+        host.target_port = 1; // Unlikely to be listening
+        host.nod_config.ssh.connect_timeout_secs = Some(1);
+
+        let deployer = SshCliDeployer::new();
+        let reachable = deployer.check_reachability(&host).await;
+        assert!(reachable.is_err());
+        assert!(matches!(
+            reachable.unwrap_err(),
+            NodError::HealthCheck { .. }
+        ));
     }
 }

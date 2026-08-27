@@ -380,6 +380,12 @@ mod tests {
         assert_eq!(
             args,
             [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/nod-ssh-%r@%h:%p",
+                "-o",
+                "ControlPersist=60s",
                 "-p",
                 "2200",
                 "-i",

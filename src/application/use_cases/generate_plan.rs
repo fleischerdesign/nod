@@ -40,11 +40,17 @@ impl GeneratePlanUseCase {
             } else {
                 None
             };
+            let depends_on = if !host.nod_config.rollout.depends_on.is_empty() {
+                host.nod_config.rollout.depends_on.clone()
+            } else {
+                host.nod_config.depends_on.clone()
+            };
             targets.push(TargetPlan {
                 host_name: host.name,
                 action: options.action.clone(),
                 new_closure: Some(closure),
                 current_closure: current,
+                depends_on,
             });
         }
         Ok(DeploymentPlan { targets, options })

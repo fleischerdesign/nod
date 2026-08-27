@@ -243,20 +243,59 @@ impl NixCliEvaluator {
         Ok(hosts)
     }
 
-    /// Runs the whole-matrix `nix eval` (host name list) plus each per-host
-    /// metadata eval, returning the per-host results. The whole-matrix failure
-    /// is hard in both strict and degraded modes (AC2); only per-host
-    /// failures are deferred to [`Self::resolve_hosts`].
+    /// Builds the single-batch `--apply` lambda that extracts the metadata for
+    /// all host configurations in one `nix eval` invocation.
+    fn build_batch_meta_expr() -> &'static str {
+        "configs: builtins.mapAttrs (name: host: let x = host.config; in { targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else name)); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null; }) configs"
+    }
+
+    /// Evaluates all host metadata across the fleet. First attempts a single-batch
+    /// evaluation via `builtins.mapAttrs`. If batch evaluation fails, automatically
+    /// falls back to per-host evaluation.
     async fn eval_host_metas(
         &self,
         flake_path: &Path,
     ) -> Result<Vec<(String, Result<FlakeMeta, NodError>)>, NodError> {
-        // Canonicalize the flake path once so downstream references
-        // (`import "<abs>"`, `#nixosConfigurations`) are absolute. A relative
-        // path such as `.` otherwise embeds as `import "."`, which Lix rejects
-        // with "string '.' doesn't represent an absolute path".
-        let flake_path = Self::canonical_flake(flake_path)?;
+        let canonical_flake = Self::canonical_flake(flake_path)?;
         let pb = Self::create_braille_spinner("Evaluating host matrix...");
+        let lambda = Self::build_batch_meta_expr();
+        let output = Command::new("nix")
+            .args([
+                "eval",
+                "--json",
+                &format!("{}#nixosConfigurations", canonical_flake.display()),
+                "--apply",
+                lambda,
+            ])
+            .output()
+            .await;
+
+        pb.finish_and_clear();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                if let Ok(parsed) = serde_json::from_slice::<
+                    std::collections::BTreeMap<String, FlakeMeta>,
+                >(&output.stdout)
+                {
+                    return Ok(parsed
+                        .into_iter()
+                        .map(|(name, meta)| (name, Ok(meta)))
+                        .collect());
+                }
+            }
+        }
+
+        // Fallback to per-host evaluation if batch evaluation failed
+        self.eval_per_host_metas(&canonical_flake).await
+    }
+
+    /// Fallback per-host evaluator: lists host names and evaluates each host individually in parallel.
+    async fn eval_per_host_metas(
+        &self,
+        flake_path: &Path,
+    ) -> Result<Vec<(String, Result<FlakeMeta, NodError>)>, NodError> {
+        let pb = Self::create_braille_spinner("Evaluating host matrix (per-host fallback)...");
         let output = Command::new("nix")
             .args([
                 "eval",
@@ -291,7 +330,7 @@ impl NixCliEvaluator {
 
         for name in host_names.iter().cloned() {
             let sem = semaphore.clone();
-            let flake_path_buf = flake_path.clone();
+            let flake_path_buf = flake_path.to_path_buf();
             join_set.spawn(async move {
                 let _permit = sem.acquire().await;
                 let meta = Self::eval_host_meta(&flake_path_buf, &name).await;
@@ -664,6 +703,14 @@ mod tests {
             before_close.trim_end().ends_with(';'),
             "the value before the closing brace must end with ';' (Lix 2.95 strict parser)"
         );
+    }
+
+    #[test]
+    fn batch_meta_expr_is_well_formed_and_semicolon_terminated() {
+        let expr = NixCliEvaluator::build_batch_meta_expr();
+        assert!(expr.starts_with("configs: builtins.mapAttrs"));
+        assert!(!expr.contains("null }"));
+        assert!(!expr.contains("] }"));
     }
 
     #[test]
