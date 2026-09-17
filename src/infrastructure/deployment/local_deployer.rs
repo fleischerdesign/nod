@@ -60,22 +60,30 @@ impl DeployerPort for LocalDeployer {
         verbose: bool,
     ) -> Result<(), NodError> {
         let start = Instant::now();
-        tracing::info!(host = %host.name, "Activating local configuration...");
+        tracing::info!(host = %host.name, "Activating configuration...");
 
-        let switch_bin = closure.join("bin/switch-to-configuration");
-        let status = Command::new("sudo")
-            .args([switch_bin.to_str().unwrap(), action])
-            .status()
-            .await;
+        let is_agentless = host.target_kind == crate::domain::host::TargetKind::Agentless
+            || !closure.join("bin/switch-to-configuration").exists();
+
+        let status = if is_agentless {
+            let activate_bin = resolve_activation_binary(closure, &host.name)?;
+            Command::new(&activate_bin).args([action]).status().await
+        } else {
+            let switch_bin = closure.join("bin/switch-to-configuration");
+            Command::new("sudo")
+                .args([switch_bin.to_str().unwrap(), action])
+                .status()
+                .await
+        };
 
         if status.is_err() {
             return Err(NodError::local_activate(
-                "failed to launch sudo switch-to-configuration",
+                "failed to launch activation executable",
             ));
         }
         if !status.unwrap().success() {
             return Err(NodError::local_activate(
-                "switch-to-configuration reported failure",
+                "activation reported non-zero failure exit code",
             ));
         }
 
@@ -83,7 +91,7 @@ impl DeployerPort for LocalDeployer {
             tracing::debug!(
                 host = %host.name,
                 elapsed = ?start.elapsed(),
-                "Local activation finished"
+                "Activation finished"
             );
         }
         Ok(())
@@ -127,6 +135,60 @@ impl DeployerPort for LocalDeployer {
         }
         Ok(())
     }
+}
+
+/// Discovers the executable entrypoint inside an activation closure (ADR-026).
+fn resolve_activation_binary(closure: &Path, name: &str) -> Result<PathBuf, NodError> {
+    let bin_dir = closure.join("bin");
+
+    // 1. Standard activate
+    let activate = bin_dir.join("activate");
+    if activate.exists() {
+        return Ok(activate);
+    }
+
+    // 2. Standard switch-to-configuration
+    let switch = bin_dir.join("switch-to-configuration");
+    if switch.exists() {
+        return Ok(switch);
+    }
+
+    // 3. Named binary: bin/<name>
+    let by_name = bin_dir.join(name);
+    if by_name.exists() {
+        return Ok(by_name);
+    }
+
+    // 4. Prefixed binary: bin/activate-<name>
+    let by_activate_name = bin_dir.join(format!("activate-{}", name));
+    if by_activate_name.exists() {
+        return Ok(by_activate_name);
+    }
+
+    // 5. If exactly one executable file exists in bin/
+    if let Ok(entries) = std::fs::read_dir(&bin_dir) {
+        let mut binaries = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                binaries.push(path);
+            }
+        }
+        if binaries.len() == 1 {
+            return Ok(binaries.pop().unwrap());
+        }
+    }
+
+    // 6. Direct executable file
+    if closure.is_file() {
+        return Ok(closure.to_path_buf());
+    }
+
+    Err(NodError::local_activate(format!(
+        "could not find activation executable in {} for target '{}'",
+        closure.display(),
+        name
+    )))
 }
 
 use crate::domain::cache::{CachePushReport, StoreOptimizeReport};

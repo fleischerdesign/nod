@@ -15,6 +15,9 @@ pub enum HostRole {
     Desktop,
     Notebook,
     Server,
+    Router,
+    Embedded,
+    Cloud,
     Unknown(String),
 }
 
@@ -26,6 +29,9 @@ impl HostRole {
             "desktop" => HostRole::Desktop,
             "notebook" => HostRole::Notebook,
             "server" => HostRole::Server,
+            "router" => HostRole::Router,
+            "embedded" => HostRole::Embedded,
+            "cloud" => HostRole::Cloud,
             _ => HostRole::Unknown(s.to_string()),
         }
     }
@@ -36,6 +42,9 @@ impl HostRole {
             HostRole::Desktop => String::from("desktop"),
             HostRole::Notebook => String::from("notebook"),
             HostRole::Server => String::from("server"),
+            HostRole::Router => String::from("router"),
+            HostRole::Embedded => String::from("embedded"),
+            HostRole::Cloud => String::from("cloud"),
             HostRole::Unknown(s) => s.clone(),
         }
     }
@@ -47,7 +56,30 @@ impl std::fmt::Display for HostRole {
     }
 }
 
-/// A NixOS configurable target host.
+/// The deployment execution modality of a target host (ADR-026).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKind {
+    /// Standard NixOS host with switch-to-configuration.
+    #[default]
+    Nixos,
+    /// Agentless target executing an activation package locally against APIs/devices.
+    Agentless,
+    /// Remote script target copied and executed on the target host.
+    RemoteScript,
+}
+
+impl TargetKind {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "agentless" | "api" | "local" => TargetKind::Agentless,
+            "remote" | "remote_script" | "remotescript" => TargetKind::RemoteScript,
+            _ => TargetKind::Nixos,
+        }
+    }
+}
+
+/// A NixOS or generic configurable target host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostEntity {
     pub name: String,
@@ -55,6 +87,8 @@ pub struct HostEntity {
     pub target_user: String,
     pub target_port: u16,
     pub role: HostRole,
+    #[serde(default)]
+    pub target_kind: TargetKind,
     pub is_local: bool,
     pub active_closure: Option<PathBuf>,
     /// Operator-assignable tags for fleet filtering (`--tag`).
@@ -76,6 +110,7 @@ impl HostEntity {
             target_user: "root".to_string(),
             target_port: 22,
             role: HostRole::Server,
+            target_kind: TargetKind::Nixos,
             is_local,
             active_closure: None,
             tags: Vec::new(),

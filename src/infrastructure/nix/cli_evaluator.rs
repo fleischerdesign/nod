@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 
 use crate::domain::config::NodConfig;
 use crate::domain::errors::NodError;
-use crate::domain::host::{BuilderHost, HostEntity, HostRole};
+use crate::domain::host::{BuilderHost, HostEntity, HostRole, TargetKind};
 use crate::domain::ports::evaluator::EvaluatorPort;
 use serde::Deserialize;
 
@@ -30,6 +30,8 @@ struct FlakeMeta {
     tags: Vec<String>,
     user: Option<String>,
     port: Option<u16>,
+    #[serde(default)]
+    target_type: Option<String>,
     /// The raw `config.nod` object; `null` when the host does not use the
     /// nod module.
     #[serde(default)]
@@ -203,6 +205,12 @@ impl NixCliEvaluator {
                     if let Some(port) = meta.port {
                         entity.target_port = port;
                     }
+                    if let Some(tt) = &meta.target_type {
+                        entity.target_kind = TargetKind::parse(tt);
+                        if entity.target_kind == TargetKind::Agentless {
+                            entity.is_local = true;
+                        }
+                    }
                     // Materialize the full `config.nod` surface (tier 3) so
                     // downstream adapters read the granular
                     // ssh/build/rollout/health/hooks values.
@@ -244,14 +252,21 @@ impl NixCliEvaluator {
     }
 
     /// Builds the single-batch `--apply` lambda that extracts the metadata for
+    /// Builds the single-batch `--apply` lambda that extracts the metadata for
     /// all host configurations in one `nix eval` invocation.
     fn build_batch_meta_expr() -> &'static str {
         "configs: builtins.mapAttrs (name: host: let x = host.config; in { targetHost = if x ? nod && x.nod ? targetHost then x.nod.targetHost else (if x ? deployment && x.deployment ? targetHost then x.deployment.targetHost else (if x ? networking && x.networking ? hostName then x.networking.hostName else name)); role = if x ? nod && x.nod ? role then x.nod.role else (if x ? deployment && x.deployment ? role then x.deployment.role else \"server\"); tags = if x ? nod && x.nod ? tags && builtins.isList x.nod.tags then map toString x.nod.tags else []; user = if x ? nod && x.nod ? ssh && x.nod.ssh ? user then x.nod.ssh.user else (if x ? nod && x.nod ? user then x.nod.user else null); port = if x ? nod && x.nod ? ssh && x.nod.ssh ? port && builtins.isInt x.nod.ssh.port then x.nod.ssh.port else (if x ? nod && x.nod ? port && builtins.isInt x.nod.port then x.nod.port else null); nod = if x ? nod then x.nod else null; }) configs"
     }
 
+    /// Builds the single-batch `--apply` lambda that extracts metadata for
+    /// universal nodTargets (ADR-026).
+    fn build_batch_nod_targets_expr() -> &'static str {
+        "targets: builtins.mapAttrs (name: t: let isDrv = builtins.isAttrs t && t ? type && t.type == \"derivation\"; meta = if isDrv then {} else t; in { targetHost = if meta ? targetHost then meta.targetHost else \"127.0.0.1\"; role = if meta ? role then meta.role else \"router\"; tags = if meta ? tags && builtins.isList meta.tags then map toString meta.tags else []; user = if meta ? user then meta.user else null; port = if meta ? port && builtins.isInt meta.port then meta.port else null; targetType = if meta ? targetType then meta.targetType else \"agentless\"; nod = if meta ? nod then meta.nod else null; }) (if builtins.isAttrs targets then targets else {})"
+    }
+
     /// Evaluates all host metadata across the fleet. First attempts a single-batch
     /// evaluation via `builtins.mapAttrs`. If batch evaluation fails, automatically
-    /// falls back to per-host evaluation.
+    /// falls back to per-host evaluation. Also merges universal `nodTargets` (ADR-026).
     async fn eval_host_metas(
         &self,
         flake_path: &Path,
@@ -272,22 +287,51 @@ impl NixCliEvaluator {
 
         pb.finish_and_clear();
 
+        let mut all_results = Vec::new();
+
         if let Ok(output) = output {
             if output.status.success() {
                 if let Ok(parsed) = serde_json::from_slice::<
                     std::collections::BTreeMap<String, FlakeMeta>,
                 >(&output.stdout)
                 {
-                    return Ok(parsed
-                        .into_iter()
-                        .map(|(name, meta)| (name, Ok(meta)))
-                        .collect());
+                    all_results.extend(parsed.into_iter().map(|(name, meta)| (name, Ok(meta))));
                 }
             }
         }
 
-        // Fallback to per-host evaluation if batch evaluation failed
-        self.eval_per_host_metas(&canonical_flake).await
+        if all_results.is_empty() {
+            // Fallback to per-host evaluation if batch evaluation failed
+            if let Ok(per_host) = self.eval_per_host_metas(&canonical_flake).await {
+                all_results = per_host;
+            }
+        }
+
+        // Query universal nodTargets if present in the flake (ADR-026)
+        let targets_lambda = Self::build_batch_nod_targets_expr();
+        let targets_output = Command::new("nix")
+            .args([
+                "eval",
+                "--json",
+                &format!("{}#nodTargets", canonical_flake.display()),
+                "--apply",
+                targets_lambda,
+            ])
+            .output()
+            .await;
+
+        if let Ok(output) = targets_output {
+            if output.status.success() {
+                if let Ok(parsed) = serde_json::from_slice::<
+                    std::collections::BTreeMap<String, FlakeMeta>,
+                >(&output.stdout)
+                {
+                    all_results.extend(parsed.into_iter().map(|(name, meta)| (name, Ok(meta))));
+                }
+            }
+        }
+
+        Ok(all_results)
     }
 
     /// Fallback per-host evaluator: lists host names and evaluates each host individually in parallel.
@@ -355,6 +399,38 @@ impl NixCliEvaluator {
 
         Ok(meta_results)
     }
+
+    /// Resolves the Nix build attribute for a host or universal nodTarget (ADR-026).
+    async fn resolve_build_attr(flake_path: &Path, host_name: &str) -> String {
+        let check_expr = format!(
+            "let f = builtins.getFlake (toString \"{}\"); in if f ? nodTargets && f.nodTargets ? \"{}\" then (let t = f.nodTargets.\"{}\"; in if builtins.isAttrs t && t ? package then \"#nodTargets.{}.package\" else \"#nodTargets.{}\") else \"#nixosConfigurations.{}.config.system.build.toplevel\"",
+            flake_path.display(),
+            host_name,
+            host_name,
+            host_name,
+            host_name,
+            host_name,
+        );
+        let output = Command::new("nix")
+            .args(["eval", "--raw", "--expr", &check_expr])
+            .output()
+            .await;
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return format!("{}{}", flake_path.display(), s);
+                }
+            }
+        }
+
+        format!(
+            "{}#nixosConfigurations.{}.config.system.build.toplevel",
+            flake_path.display(),
+            host_name
+        )
+    }
 }
 
 #[async_trait]
@@ -421,11 +497,7 @@ impl EvaluatorPort for NixCliEvaluator {
     ) -> Result<PathBuf, NodError> {
         let pb = Self::create_braille_spinner(&format!("Building closure for {}...", host_name));
 
-        let flake_attr = format!(
-            "{}#nixosConfigurations.{}.config.system.build.toplevel",
-            flake_path.display(),
-            host_name
-        );
+        let flake_attr = Self::resolve_build_attr(flake_path, host_name).await;
 
         let start = Instant::now();
 
