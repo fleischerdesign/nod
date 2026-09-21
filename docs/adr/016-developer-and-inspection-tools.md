@@ -9,7 +9,7 @@ Developers and operators need interactive and programmatically accessible tools 
 ## Decision
 1. **Domain Extensions**:
    - `EvalResult` (`host_name`, `expression`, `value`, `raw_output`).
-   - `HostInfo` (`host_name`, `target_host`, `is_local`, `role`, `tags`, `ssh_user`, `ssh_port`, `current_closure`, `booted_closure`, `kernel_version`, `uptime`, `health_status`, `active_generation`, `builder`).
+   - `HostInfo` (`host_name`, `target_host`, `is_self`, `role`, `tags`, `ssh_user`, `ssh_port`, `current_closure`, `booted_closure`, `kernel_version`, `uptime`, `health_status`, `active_generation`, `builder`).
 2. **Ports**:
    - `EvaluatorPort::eval_expr(flake_path: &Path, host_name: &str, expr: &str, json: bool) -> Result<String, NodError>`
 3. **Application Use Cases**:

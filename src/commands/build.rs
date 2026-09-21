@@ -85,13 +85,18 @@ pub async fn execute(
 
     let mut builder_profile: Option<BuilderHost> = None;
     if let Some(sel) = builder_selector {
-        let builder_host = TargetSelection::select_exact_one(
+        let builder_host = targets::select_one(
             hosts.clone(),
-            Some(sel),
-            None,
-            None,
-            false,
             &local_hostname,
+            TargetAxes {
+                target: Some(sel),
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
+            TargetRequirement::Shell,
+            "build builder",
         )?;
         if builder_host.is_self {
             // Identity-to-local: the builder selector resolves to this machine,

@@ -10,7 +10,7 @@ Approved (ADR-012)
 
 ### AC1: Polymorphic Active Closure Resolution
 - `nod diff` must resolve the target host's active closure using `DeployerPort::current_closure(&host, &profile)`.
-- The presentation layer must not branch on `host.is_local` for retrieving active closure paths.
+- The presentation layer must not branch on `host.is_self` for retrieving active closure paths.
 
 ### AC2: In-Sync Short-Circuiting
 - If `active_closure == Some(new_closure)`, `nod diff` must output:

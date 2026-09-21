@@ -281,16 +281,48 @@ impl TargetSelection {
     /// returns the single winning host.
     pub fn select_exact_one(
         hosts: Vec<HostEntity>,
-        target: Option<&str>,
-        tag: Option<&str>,
-        role: Option<&str>,
-        all: bool,
+        axes: TargetAxes<'_>,
         local_hostname: &str,
+        requirement: TargetRequirement,
     ) -> Result<HostEntity, NodError> {
-        let matched = Self::select(hosts, target, tag, role, all, local_hostname);
-        match matched.len() {
+        // `axes.scope` is unused here on purpose: an exact-one selection always states a
+        // criterion, so there is no empty case for a default scope to resolve.
+        let matched = Self::select(
+            hosts,
+            axes.target,
+            axes.tag,
+            axes.role,
+            axes.all,
+            local_hostname,
+        );
+        let eligible: Vec<HostEntity> = matched
+            .iter()
+            .filter(|host| requirement.admits(host))
+            .cloned()
+            .collect();
+
+        // A target that exists but cannot satisfy the requirement is its own error: "no
+        // hosts matched" would read as a typo in the name and hide the reason (ADR-026).
+        if eligible.is_empty() && !matched.is_empty() {
+            let names: Vec<&str> = matched.iter().map(|host| host.name.as_str()).collect();
+            return Err(NodError::config(format!(
+                "target '{}' {}",
+                names.join("', '"),
+                match requirement {
+                    TargetRequirement::Shell =>
+                        "is activated through a device API and has no shell to open",
+                    TargetRequirement::Closure => "declares no closure (an inventory target)",
+                    TargetRequirement::RunningSystem =>
+                        "is activated through a device API and has no running system to compare",
+                    TargetRequirement::Reachability => "is unreachable",
+                }
+            )));
+        }
+
+        match eligible.len() {
             0 => {
-                let criteria = Self::criteria_parts(target, tag, role, all).join(", ");
+                let criteria =
+                    Self::criteria_parts(axes.target, axes.tag, axes.role, axes.all).join(", ");
                 let msg = if criteria.is_empty() {
                     "no hosts matched".to_string()
                 } else {
@@ -299,12 +331,13 @@ impl TargetSelection {
                 Err(NodError::config(msg))
             }
             1 => {
-                let mut matched = matched.into_iter();
-                Ok(matched.next().expect("exactly one host matched"))
+                let mut eligible = eligible.into_iter();
+                Ok(eligible.next().expect("exactly one host matched"))
             }
             _ => {
-                let names: Vec<String> = matched.iter().map(|h| h.name.clone()).collect();
-                let criteria = Self::criteria_parts(target, tag, role, all).join(", ");
+                let names: Vec<String> = eligible.iter().map(|h| h.name.clone()).collect();
+                let criteria =
+                    Self::criteria_parts(axes.target, axes.tag, axes.role, axes.all).join(", ");
                 let msg = if criteria.is_empty() {
                     format!(
                         "multiple hosts matched [{}]; use a single host name or narrow the filters",
@@ -752,19 +785,70 @@ mod tests {
 
     // --- ADR-006: single-target restriction (select_exact_one) ---
 
+    // ADR-026: an exact-one command states its requirement like every other command, and a
+    // target that exists but cannot satisfy it is refused with its reason - not silently
+    // replaced by a local run, which is what the old `is_local` flag caused.
+    #[test]
+    fn select_exact_one_refuses_a_target_without_a_shell() {
+        let mut fleet = spec_fleet();
+        let mut device = HostEntity::new("home-ap-01", "10.10.10.20", false);
+        device.target_kind = crate::domain::host::TargetKind::Agentless;
+        fleet.push(device);
+
+        let err = TargetSelection::select_exact_one(
+            fleet,
+            TargetAxes {
+                target: Some("home-ap-01"),
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
+            "n",
+            TargetRequirement::Shell,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("home-ap-01"));
+        assert!(
+            msg.contains("no shell"),
+            "the reason has to be in the message: {msg}"
+        );
+    }
+
     #[test]
     fn select_exact_one_resolves_a_single_exact_host() {
-        let host =
-            TargetSelection::select_exact_one(spec_fleet(), Some("web-01"), None, None, false, "n")
-                .expect("exact name matches exactly one host");
+        let host = TargetSelection::select_exact_one(
+            spec_fleet(),
+            TargetAxes {
+                target: Some("web-01"),
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
+            "n",
+            TargetRequirement::Reachability,
+        )
+        .expect("exact name matches exactly one host");
         assert_eq!(host.name, "web-01");
     }
 
     #[test]
     fn select_exact_one_resolves_a_single_narrowed_host() {
-        let host =
-            TargetSelection::select_exact_one(spec_fleet(), None, Some("edge"), None, true, "n")
-                .expect("tag filter matches exactly one host");
+        let host = TargetSelection::select_exact_one(
+            spec_fleet(),
+            TargetAxes {
+                target: None,
+                tag: Some("edge"),
+                role: None,
+                all: true,
+                scope: DefaultScope::All,
+            },
+            "n",
+            TargetRequirement::Reachability,
+        )
+        .expect("tag filter matches exactly one host");
         assert_eq!(host.name, "edge-prod");
     }
 
@@ -772,11 +856,15 @@ mod tests {
     fn select_exact_one_rejects_zero_matches() {
         let err = TargetSelection::select_exact_one(
             spec_fleet(),
-            Some("nonexistent-*"),
-            None,
-            None,
-            false,
+            TargetAxes {
+                target: Some("nonexistent-*"),
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
             "n",
+            TargetRequirement::Reachability,
         )
         .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
@@ -789,11 +877,15 @@ mod tests {
     fn select_exact_one_zero_match_error_lists_the_criteria() {
         let err = TargetSelection::select_exact_one(
             spec_fleet(),
-            Some("web-*"),
-            Some("prod"),
-            Some("notebook"),
-            false,
+            TargetAxes {
+                target: Some("web-*"),
+                tag: Some("prod"),
+                role: Some("notebook"),
+                all: false,
+                scope: DefaultScope::All,
+            },
             "n",
+            TargetRequirement::Reachability,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -805,9 +897,19 @@ mod tests {
 
     #[test]
     fn select_exact_one_rejects_multiple_matches_and_lists_them() {
-        let err =
-            TargetSelection::select_exact_one(spec_fleet(), Some("web-*"), None, None, false, "n")
-                .unwrap_err();
+        let err = TargetSelection::select_exact_one(
+            spec_fleet(),
+            TargetAxes {
+                target: Some("web-*"),
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
+            "n",
+            TargetRequirement::Reachability,
+        )
+        .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
         let msg = err.to_string();
         assert!(msg.contains("multiple hosts matched"));

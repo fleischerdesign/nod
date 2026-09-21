@@ -127,7 +127,7 @@ Feature: `nod ssh` opens a shell or runs a remote command
 Feature: a directly addressed local host may run its shell/command locally
 
   Scenario: a local host with a remote command
-    Given a host whose `is_local` is true and no remote target is configured
+    Given a host whose `is_self` is true and no remote target is configured
     When `nod ssh local -- uname -a` runs
     Then the command runs on the local machine without ssh
 

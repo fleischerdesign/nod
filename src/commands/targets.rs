@@ -11,7 +11,10 @@
 
 use colored::Colorize;
 
-use crate::application::selection::{resolve_targets, skipped_by, TargetAxes, TargetRequirement};
+use crate::application::selection::{
+    resolve_targets, skipped_by, TargetAxes, TargetRequirement, TargetSelection,
+};
+use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 
 /// Selects the targets of `action`, naming every discovered target it cannot act on.
@@ -45,6 +48,22 @@ pub fn report_skipped(discovered: &[HostEntity], requirement: TargetRequirement,
         )
         .dimmed()
     );
+}
+
+/// Selects the one target of `action`, naming every discovered target it cannot act on.
+///
+/// An exact-one command states its requirement like every other command: `ssh` needs a
+/// shell, `rollback` a closure, a build host a shell. A target that exists but cannot
+/// satisfy it is refused with its reason instead of being silently replaced by a local run.
+pub fn select_one(
+    hosts: Vec<HostEntity>,
+    local_hostname: &str,
+    axes: TargetAxes<'_>,
+    requirement: TargetRequirement,
+    action: &str,
+) -> Result<HostEntity, NodError> {
+    report_skipped(&hosts, requirement, action);
+    TargetSelection::select_exact_one(hosts, axes, local_hostname, requirement)
 }
 
 /// Refuses a target that cannot satisfy a requirement, for the commands that select one

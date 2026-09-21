@@ -5,7 +5,7 @@
 > `TargetSelection::select`; per-host execution lives in
 > `ExecFleetUseCase` (`src/application/use_cases/exec_fleet.rs`) which
 > derives each host's `SshProfile` and runs the command over `ssh` — or
-> locally through `sh -c` when `host.is_local` is true. Presentation
+> locally through `sh -c` when `host.is_self` is true. Presentation
 > (`src/commands/exec.rs`) renders per-host prefixed output or a JSON result
 > array, and surfaces an aggregate `NodError` when any host failed.
 

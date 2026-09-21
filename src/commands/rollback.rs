@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement};
 use crate::application::use_cases::rollback::RollbackUseCase;
 use crate::commands::targets;
 use crate::domain::errors::NodError;
@@ -44,8 +44,19 @@ pub async fn execute(
         TargetRequirement::Closure,
         "rollback",
     );
-    let host =
-        TargetSelection::select_exact_one(resolved, None, None, None, false, &local_hostname)?;
+    let host = targets::select_one(
+        resolved,
+        &local_hostname,
+        TargetAxes {
+            target: None,
+            tag: None,
+            role: None,
+            all: false,
+            scope: DefaultScope::Local,
+        },
+        TargetRequirement::Closure,
+        "rollback",
+    )?;
     println!(
         "{}",
         format!("> Rolling back {}", host.name).bold().yellow()

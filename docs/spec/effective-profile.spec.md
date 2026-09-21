@@ -10,7 +10,7 @@
 
 `SshCliDeployer` and `ExecFleetUseCase` re-derive a *primitive* connection profile via
 `SshProfile::for_host(host)`, which only materializes `user`, `port`, and
-`sudo = host.is_local`. Every other resolved setting — `identity_file`, `proxy_jump`,
+`sudo = host.is_self`. Every other resolved setting — `identity_file`, `proxy_jump`,
 `proxy_command`, `timeout_secs`, `connect_timeout_secs`, `extra_ssh_args`,
 `allow_insecure` — is silently discarded, so SSH hosts configured with a non-default
 port, an identity file, or a jump host are connected to as `root@target:22` with none of

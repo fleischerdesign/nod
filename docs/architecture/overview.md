@@ -106,7 +106,7 @@ Concrete implementations of the Domain ports. Each wraps a particular external m
 | Storage       | `StoreAdapter`                     | local closure store / store paths |
 | HealthCheck   | `PingHealthProbe`, `SshHealthProbe`| reachability + service probes |
 
-The `SshDeployerAdapter` vs `LocalDeployerAdapter` split removes the `is_local` branching currently baked into a single deployer (see `src/infrastructure/tokio_ssh.rs` in the current tree) — each host resolves through its own deployer based on target identity.
+The `SshDeployerAdapter` vs `LocalDeployerAdapter` split removes the local-vs-SSH branching that used to be baked into a single deployer (see `src/infrastructure/tokio_ssh.rs` in the current tree) — each host resolves through its own deployer by *where its activation runs* (`HostEntity::activation_executes_locally`, ADR-026), which is not the same question as whether the host *is* this machine (`HostEntity::is_self`).
 
 ## Data Flow
 

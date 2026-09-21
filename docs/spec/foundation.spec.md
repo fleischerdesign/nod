@@ -14,14 +14,14 @@ Feature: A Host identifies a NixOS configurable target
   Scenario: constructing a local host
     Given a target user not otherwise specified
     When a Host is constructed with name "jello" and targetHost "jello-machine"
-      And `is_local` is true
+      And `is_self` is true
     Then the host's role is `server`
     And the host's target_user is "root"
     And the host's target_port is 22
     And the host has no active closure
 
   Scenario: constructing a remote host
-    When a Host is constructed with name "atlas", targetHost "10.0.0.8", and is_local false
+    When a Host is constructed with name "atlas", targetHost "10.0.0.8", and is_self false
     Then the host is NOT local
     And the host's active closure is empty
 
