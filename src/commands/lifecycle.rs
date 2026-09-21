@@ -1,16 +1,14 @@
 //! Shared execution pipeline for fleet deployment lifecycle commands
 //! (`switch`, `test`, `boot`).
 
-use crate::commands::report_skipped_targets;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
 use crate::application::pipeline::state_machine::DeploymentState;
-use crate::application::selection::{
-    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
-};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
 use crate::application::use_cases::deploy_fleet::DeployFleetUseCase;
+use crate::commands::targets;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 use crate::domain::plan::{DeploymentAction, DeploymentOptions, RolloutStrategy};
@@ -69,16 +67,18 @@ pub async fn execute_lifecycle(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    report_skipped_targets(&hosts, TargetRequirement::Closure, "switch/test/boot");
-    let targets = resolve_targets(
+    let targets = targets::select(
         hosts,
         &local_hostname,
-        params.target,
-        params.tag,
-        params.role,
-        params.all,
-        DefaultScope::Local,
+        TargetAxes {
+            target: params.target,
+            tag: params.tag,
+            role: params.role,
+            all: params.all,
+            scope: DefaultScope::Local,
+        },
         TargetRequirement::Closure,
+        "switch/test/boot",
     );
 
     if targets.is_empty() {

@@ -61,9 +61,14 @@ impl AppContext {
         self.evaluator.clone()
     }
 
-    /// Resolves the deployer matching the host's target: local vs SSH.
+    /// Resolves the deployer matching the host's *activation locality*: this machine and
+    /// targets whose modality reconciles from here are deployed locally, everyone else over
+    /// SSH.
+    ///
+    /// `host.is_self` alone would answer a different question - a device is not this machine
+    /// and is still deployed here - which is why the question has a name of its own.
     pub fn deployer_for(&self, host: &HostEntity) -> Arc<dyn DeployerPort> {
-        if host.is_local {
+        if host.activation_executes_locally() {
             self.local_deployer.clone()
         } else {
             self.ssh_deployer.clone()
@@ -150,9 +155,10 @@ impl AppContext {
         self
     }
 
-    /// Resolves the store port matching the host's target: local vs SSH.
+    /// Resolves the store port matching the host's activation locality: the closure of a
+    /// locally activated target is built and read here, every other target's over SSH.
     pub fn store_for(&self, host: &HostEntity) -> Result<Arc<dyn StorePort>, NodError> {
-        let store = if host.is_local {
+        let store = if host.activation_executes_locally() {
             self.local_store.as_ref()
         } else {
             self.ssh_store.as_ref()

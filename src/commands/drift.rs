@@ -1,17 +1,15 @@
 //! `nod drift` command: compare live host closures against the flake (ADR-003
 //! observability). Backed by `DetectDriftUseCase` and rendered text/JSON.
 
-use crate::commands::report_skipped_targets;
 use colored::Colorize;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{
-    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
-};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
 use crate::application::use_cases::detect_drift::{DetectDriftUseCase, DriftReport};
+use crate::commands::targets;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 
@@ -73,16 +71,18 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    report_skipped_targets(&hosts, TargetRequirement::RunningSystem, "drift");
-    let targets = resolve_targets(
+    let targets = targets::select(
         hosts,
         &local_hostname,
-        target,
-        tag,
-        role,
-        all,
-        DefaultScope::Local,
+        TargetAxes {
+            target,
+            tag,
+            role,
+            all,
+            scope: DefaultScope::Local,
+        },
         TargetRequirement::RunningSystem,
+        "drift",
     );
 
     if targets.is_empty() {

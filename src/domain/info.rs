@@ -11,7 +11,7 @@ pub struct HostInfo {
     /// Destination IP or host address used for connections.
     pub target_host: String,
     /// True if targeted host is the current local machine.
-    pub is_local: bool,
+    pub is_self: bool,
     /// Declared role (e.g. `desktop`, `server`).
     pub role: String,
     /// Declared tags (e.g. `["builder", "workstation"]`).
@@ -45,7 +45,7 @@ mod tests {
         let info = HostInfo {
             host_name: "yorke".to_string(),
             target_host: "127.0.0.1".to_string(),
-            is_local: true,
+            is_self: true,
             role: "desktop".to_string(),
             tags: vec!["workstation".to_string()],
             ssh_user: "philipp".to_string(),

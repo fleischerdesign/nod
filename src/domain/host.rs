@@ -77,6 +77,32 @@ impl TargetKind {
             _ => TargetKind::Nixos,
         }
     }
+
+    /// Whether a target of this kind is activated *on the machine running nod*.
+    ///
+    /// This is a property of the modality and needs no separate field: an agentless
+    /// target reconciles through a device API from here, while a NixOS or remote-script
+    /// target is activated where it lives. It answers "does the activation run here",
+    /// which is a different question from "is this machine the target"
+    /// ([`HostEntity::is_self`]) - conflating the two is what once made `drift` compare a
+    /// device's reconciler package against this machine's running system.
+    pub fn activation_executes_locally(&self) -> bool {
+        matches!(self, TargetKind::Agentless)
+    }
+
+    /// Whether a target of this kind has a shell nod can open over SSH.
+    ///
+    /// A device activated through an API has none: `ssh` and `exec` are not subjects it
+    /// can satisfy, however reachable it is. Asking the modality keeps that answer in one
+    /// place instead of in every command's condition.
+    pub fn has_command_channel(&self) -> bool {
+        matches!(self, TargetKind::Nixos | TargetKind::RemoteScript)
+    }
+
+    /// Whether a target of this kind has a running system whose generation can be compared.
+    pub fn has_running_system(&self) -> bool {
+        matches!(self, TargetKind::Nixos)
+    }
 }
 
 /// A NixOS or generic configurable target host.
@@ -89,7 +115,7 @@ pub struct HostEntity {
     pub role: HostRole,
     #[serde(default)]
     pub target_kind: TargetKind,
-    pub is_local: bool,
+    pub is_self: bool,
     pub active_closure: Option<PathBuf>,
     /// The flake attribute this target's closure is built from, or `None` when the
     /// target declares none at all - an inventory-only target such as the router,
@@ -115,7 +141,7 @@ impl HostEntity {
     /// something says otherwise. Discovery overrides both explicitly - the attribute
     /// with what the flake actually declares, the kind with what the target declares -
     /// so an inventory target never inherits this one.
-    pub fn new(name: impl Into<String>, target_host: impl Into<String>, is_local: bool) -> Self {
+    pub fn new(name: impl Into<String>, target_host: impl Into<String>, is_self: bool) -> Self {
         let name = name.into();
         Self {
             name: name.clone(),
@@ -124,7 +150,7 @@ impl HostEntity {
             target_port: 22,
             role: HostRole::Server,
             target_kind: TargetKind::Nixos,
-            is_local,
+            is_self,
             active_closure: None,
             closure_attr: Some(format!(
                 "#nixosConfigurations.{name}.config.system.build.toplevel"
@@ -162,6 +188,19 @@ impl HostEntity {
         self.closure_attr.is_some()
     }
 
+    /// Whether this target's activation executes on the machine running nod.
+    ///
+    /// True for the local machine itself - a NixOS host that *is* this machine is activated
+    /// here - and for a target whose modality reconciles from here
+    /// ([`TargetKind::activation_executes_locally`], a device configured through its API).
+    ///
+    /// It is deliberately *not* [`HostEntity::is_self`]: a device is not this machine and its
+    /// activation still runs here. The deployment dispatch asks this; every question about
+    /// reading a running system or opening a shell on the target asks `is_self`.
+    pub fn activation_executes_locally(&self) -> bool {
+        self.is_self || self.target_kind.activation_executes_locally()
+    }
+
     /// Returns the SSH user to use when targeting this host.
     pub fn target_user(&self) -> &str {
         &self.target_user
@@ -173,8 +212,8 @@ impl HostEntity {
     }
 
     /// Returns `true` when the host is the machine nod runs on.
-    pub fn is_local(&self) -> bool {
-        self.is_local
+    pub fn is_self(&self) -> bool {
+        self.is_self
     }
 
     /// Derives the connection descriptor (SshProfile) for this host.
@@ -219,7 +258,7 @@ impl SshProfile {
             timeout_secs: 30,
             connect_timeout_secs: 10,
             extra_ssh_args: Vec::new(),
-            sudo: host.is_local,
+            sudo: host.is_self,
             allow_insecure: false,
         }
     }
@@ -361,7 +400,7 @@ impl SshProfile {
 pub struct TargetHost {
     pub name: String,
     pub profile: SshProfile,
-    pub is_local: bool,
+    pub is_self: bool,
 }
 
 /// A builder fleet host: the CONNECT address of the single configured host on
@@ -381,7 +420,7 @@ impl TargetHost {
         Self {
             name: host.name.clone(),
             profile: SshProfile::for_host(host),
-            is_local: host.is_local,
+            is_self: host.is_self,
         }
     }
 }
@@ -390,11 +429,34 @@ impl TargetHost {
 mod tests {
     use super::*;
 
+    /// Identity and modality are separate questions, and one boolean could never carry
+    /// them: conflating them once made `drift` compare a device's reconciler package
+    /// against this machine's running system (ADR-026 amendment).
+    #[test]
+    fn identity_and_modality_are_independent() {
+        // A device reconciled from this machine: it is not this machine, its activation
+        // runs here, it has no shell and no running system - but it does have a closure.
+        let mut bridge = HostEntity::new("home-ap-01", "10.10.10.20", false);
+        bridge.target_kind = TargetKind::Agentless;
+        assert!(!bridge.is_self);
+        assert!(bridge.target_kind.activation_executes_locally());
+        assert!(!bridge.target_kind.has_command_channel());
+        assert!(!bridge.target_kind.has_running_system());
+        assert!(bridge.has_closure(), "its reconciler package is built");
+
+        // A NixOS host somewhere else: nothing about it runs here.
+        let remote = HostEntity::new("remote", "10.0.0.9", false);
+        assert!(!remote.is_self);
+        assert!(!remote.target_kind.activation_executes_locally());
+        assert!(remote.target_kind.has_command_channel());
+        assert!(remote.target_kind.has_running_system());
+    }
+
     #[test]
     fn local_host_defaults() {
         let host = HostEntity::new("jello", "jello-machine", true);
         assert_eq!(host.name, "jello");
-        assert!(host.is_local());
+        assert!(host.is_self());
         assert_eq!(host.role, HostRole::Server);
         assert_eq!(host.target_user(), "root");
         assert_eq!(host.target_port(), 22);
@@ -405,7 +467,7 @@ mod tests {
     #[test]
     fn remote_host_has_no_active_closure() {
         let host = HostEntity::new("atlas", "10.0.0.8", false);
-        assert!(!host.is_local());
+        assert!(!host.is_self());
         assert!(host.active_closure.is_none());
         assert_eq!(host.role, HostRole::Server);
     }
@@ -507,7 +569,7 @@ mod tests {
         assert_eq!(target.name, "atlas");
         assert_eq!(target.profile.user(), "root");
         assert_eq!(target.profile.port(), 22);
-        assert!(!target.is_local);
+        assert!(!target.is_self);
     }
 
     #[test]

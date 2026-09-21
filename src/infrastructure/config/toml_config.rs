@@ -810,7 +810,7 @@ mod tests {
         let materialized = s.apply_to(h.clone()).await.unwrap();
         assert_eq!(materialized.target_user, "philipp");
         assert_eq!(materialized.target_port, 2222);
-        assert!(!materialized.is_local);
+        assert!(!materialized.is_self);
     }
 
     #[tokio::test]

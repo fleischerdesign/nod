@@ -4,7 +4,7 @@
 //! Target resolution is the caller's concern (ADR-006 `TargetSelection`); the
 //! use case receives the resolved `HostEntity` list. Each host derives its
 //! `SshProfile` and executes the command remotely over `ssh` — or locally via
-//! `sh -c` when `host.is_local` — capturing the numeric exit code, stdout,
+//! `sh -c` when `host.is_self` — capturing the numeric exit code, stdout,
 //! stderr and wall-clock duration into an `ExecResult`. A
 //! `tokio::sync::Semaphore` bounds in-flight hosts to `--concurrency N`;
 //! `--fail-fast` clears a shared abort flag so hosts that have not yet
@@ -171,7 +171,7 @@ async fn run_one(
     }
 
     let start = Instant::now();
-    let result = if host.is_local {
+    let result = if host.is_self {
         run_local(&host, &command, sudo, start).await
     } else {
         let profile = match ctx.resolved_profile(&host).await {
@@ -266,8 +266,8 @@ mod tests {
     use crate::application::context::AppContext;
     use std::sync::Arc;
 
-    fn host(name: &str, is_local: bool) -> HostEntity {
-        HostEntity::new(name, name, is_local)
+    fn host(name: &str, is_self: bool) -> HostEntity {
+        HostEntity::new(name, name, is_self)
     }
 
     /// A minimal context (no config store, so `resolved_profile` falls back to

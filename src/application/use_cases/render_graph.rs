@@ -36,7 +36,7 @@ impl RenderGraphUseCase {
                 tags: h.tags,
                 role: Some(h.role.to_str()),
                 system: None,
-                is_local: h.is_local,
+                is_self: h.is_self,
             })
             .collect();
 

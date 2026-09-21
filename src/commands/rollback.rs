@@ -6,10 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{
-    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
-};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
 use crate::application::use_cases::rollback::RollbackUseCase;
+use crate::commands::targets;
 use crate::domain::errors::NodError;
 
 pub async fn execute(
@@ -32,15 +31,18 @@ pub async fn execute(
     // default/filters, then `select_exact_one` rejects both an empty match
     // and a multi-match instead of silently operating on a subset of the
     // fleet (audit B3).
-    let resolved = resolve_targets(
+    let resolved = targets::select(
         hosts,
         &local_hostname,
-        target,
-        tag,
-        role,
-        all,
-        DefaultScope::Local,
+        TargetAxes {
+            target,
+            tag,
+            role,
+            all,
+            scope: DefaultScope::Local,
+        },
         TargetRequirement::Closure,
+        "rollback",
     );
     let host =
         TargetSelection::select_exact_one(resolved, None, None, None, false, &local_hostname)?;

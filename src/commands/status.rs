@@ -4,7 +4,8 @@ use colored::Colorize;
 use std::path::Path;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetRequirement};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement};
+use crate::commands::targets;
 use crate::domain::errors::NodError;
 
 pub async fn execute(
@@ -27,15 +28,18 @@ pub async fn execute(
         .unwrap_or_default();
 
     // No target and no filters defaults to showing every discovered host.
-    let selected = resolve_targets(
+    let selected = targets::select(
         hosts,
         &local_hostname,
-        target,
-        tag,
-        role,
-        all,
-        DefaultScope::All,
+        TargetAxes {
+            target,
+            tag,
+            role,
+            all,
+            scope: DefaultScope::All,
+        },
         TargetRequirement::Reachability,
+        "status",
     );
 
     if selected.is_empty() {

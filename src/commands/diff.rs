@@ -1,14 +1,12 @@
 //! `nod diff` use case: package & systemd unit diff preview before switching.
 
-use crate::commands::report_skipped_targets;
 use colored::Colorize;
 use std::path::Path;
 use tokio::process::Command;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{
-    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
-};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
+use crate::commands::targets;
 use crate::domain::errors::NodError;
 
 pub async fn execute(
@@ -29,16 +27,18 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    report_skipped_targets(&hosts, TargetRequirement::Closure, "diff");
-    let targets = resolve_targets(
+    let targets = targets::select(
         hosts,
         &local_hostname,
-        target,
-        tag,
-        role,
-        all,
-        DefaultScope::Local,
+        TargetAxes {
+            target,
+            tag,
+            role,
+            all,
+            scope: DefaultScope::Local,
+        },
         TargetRequirement::Closure,
+        "diff",
     );
 
     if targets.is_empty() {

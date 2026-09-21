@@ -233,7 +233,7 @@ fn closure_text(host: &HostEntity) -> String {
 
 /// Human-readable locality for the detail pane.
 fn locality_text(host: &HostEntity) -> String {
-    if host.is_local {
+    if host.is_self {
         String::from("localhost")
     } else {
         String::from("remote")

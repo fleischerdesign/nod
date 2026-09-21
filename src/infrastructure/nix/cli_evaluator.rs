@@ -222,9 +222,6 @@ impl NixCliEvaluator {
                     entity.closure_attr = meta.closure_attr.clone();
                     if let Some(tt) = &meta.target_type {
                         entity.target_kind = TargetKind::parse(tt);
-                        if entity.target_kind == TargetKind::Agentless {
-                            entity.is_local = true;
-                        }
                     }
                     // Materialize the full `config.nod` surface (tier 3) so
                     // downstream adapters read the granular

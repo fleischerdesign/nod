@@ -56,7 +56,7 @@ impl InspectInfoUseCase {
                     }
                 }
 
-                if host.is_local {
+                if host.is_self {
                     let booted = Path::new("/run/booted-system");
                     if booted.exists() {
                         booted_closure = std::fs::canonicalize(booted).ok();
@@ -117,7 +117,7 @@ impl InspectInfoUseCase {
             results.push(HostInfo {
                 host_name: host.name.clone(),
                 target_host: host.target_host.clone(),
-                is_local: host.is_local,
+                is_self: host.is_self,
                 role: host.role.to_string(),
                 tags: host.tags.clone(),
                 ssh_user: profile.user().to_string(),

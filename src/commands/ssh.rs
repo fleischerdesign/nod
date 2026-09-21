@@ -10,10 +10,9 @@
 use std::path::Path;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{
-    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
-};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
 use crate::application::spawn::{run_inherited, split_program_args};
+use crate::commands::targets;
 use crate::domain::errors::NodError;
 use crate::domain::ssh_args::build_ssh_args;
 
@@ -39,20 +38,32 @@ pub async fn execute(
     // `ssh` is single-host: resolve the default set (the whole fleet when no
     // criteria are given — `DefaultScope::All` — so a bare `nod ssh` still
     // connects to a sole fleet host), then gate on exactly one.
-    let resolved = resolve_targets(
+    let resolved = targets::select(
         hosts,
         &local_hostname,
-        target,
-        tag,
-        role,
-        false,
-        DefaultScope::All,
+        TargetAxes {
+            target,
+            tag,
+            role,
+            all: false,
+            scope: DefaultScope::All,
+        },
         TargetRequirement::Reachability,
+        "ssh",
     );
     let host =
         TargetSelection::select_exact_one(resolved, None, None, None, false, &local_hostname)?;
 
-    if host.is_local {
+    // A device activated through an API has no shell to open: refusing here keeps the
+    // quiet failure out, where `is_self` would have run the command on *this* machine
+    // under the device's name.
+    if let Some(refusal) =
+        crate::commands::targets::refuse_ineligible(&host, TargetRequirement::Shell)
+    {
+        return Err(NodError::config(refusal));
+    }
+
+    if host.is_self {
         return run_local(sudo, command).await;
     }
 

@@ -83,3 +83,26 @@ that builds or compares closures has nothing to compare.
 - **Invariant**: a `Nixos` and an `Agentless` target both declare a closure; an
   inventory target declares none. `HostEntity::new` defaults to declaring one, matching
   `TargetKind::default()`.
+
+## Amendment (2026-09-21, second): identity is not modality
+
+A target answers three separate questions, and one boolean was carrying two of them:
+
+| Question | Where it lives now |
+|---|---|
+| *Is this target the machine nod runs on?* | `HostEntity::is_self`, written once, from name equality |
+| *Does its activation execute on this machine?* | derived: `TargetKind::activation_executes_locally()` (`Agentless`) |
+| *What does the caller need from it?* | `TargetRequirement` (`Closure`, `Reachability`, `Shell`, `RunningSystem`) |
+
+The two were conflated: discovery marked every agentless target `is_local = true` because its
+reconciler runs here, and every reader that meant *is this machine* then believed it - it read
+`/run/current-system` of the operator's machine as a device's generation (`drift` reported nine
+false alarms), and `nod ssh <device>` / `nod exec <device>` ran the command on the operator's
+machine under the device's name. The flag is now `is_self` with a single writer, the modality
+answers the deployment dispatch (`deployer_for`, `store_for`), and the command layer refuses a
+target that cannot satisfy its requirement instead of quietly choosing a local path.
+
+Selection gained the `Shell` requirement for that reason, and the ADR-006 axes became a struct
+(`TargetAxes`): four of them have the same type, so a caller that swapped two would have compiled.
+The filter is enforced in `selection::resolve_targets`, the naming of what it excluded lives where
+presentation does (`commands::targets::select`), and every command goes through that one function.

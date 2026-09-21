@@ -57,7 +57,7 @@ pub struct FleetNode {
     pub tags: Vec<String>,
     pub role: Option<String>,
     pub system: Option<String>,
-    pub is_local: bool,
+    pub is_self: bool,
 }
 
 /// Complete fleet topology graph and inventory collection.
@@ -228,7 +228,7 @@ mod tests {
                     tags: vec!["core".to_string()],
                     role: Some("server".to_string()),
                     system: Some("x86_64-linux".to_string()),
-                    is_local: false,
+                    is_self: false,
                 },
                 FleetNode {
                     name: "selway".to_string(),
@@ -236,7 +236,7 @@ mod tests {
                     tags: vec!["edge".to_string()],
                     role: Some("gateway".to_string()),
                     system: Some("aarch64-linux".to_string()),
-                    is_local: false,
+                    is_self: false,
                 },
             ],
             flake_uri: ".".to_string(),

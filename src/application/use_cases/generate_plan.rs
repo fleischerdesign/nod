@@ -41,7 +41,7 @@ impl GeneratePlanUseCase {
                     options.verbose,
                 )
                 .await?;
-            let current = if host.is_local {
+            let current = if host.is_self {
                 Some(PathBuf::from("/run/current-system"))
             } else {
                 None

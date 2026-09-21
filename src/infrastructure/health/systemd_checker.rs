@@ -94,7 +94,7 @@ impl SystemdHealthChecker {
 #[async_trait]
 impl HealthCheckerPort for SystemdHealthChecker {
     async fn verify_health(&self, host: &HostEntity) -> Result<bool, NodError> {
-        if !host.is_local {
+        if !host.is_self {
             return Err(NodError::health_check(format!(
                 "host '{}' is remote; the systemd checker only verifies local systems",
                 host.name

@@ -1,6 +1,3 @@
-use crate::application::selection::{skipped_by, TargetRequirement};
-use crate::domain::host::HostEntity;
-
 pub mod audit;
 pub mod boot;
 pub mod bootstrap;
@@ -34,6 +31,7 @@ pub mod status;
 pub mod store;
 pub mod switch;
 pub mod sync;
+pub mod targets;
 pub mod test;
 pub mod update;
 pub mod watch;
@@ -97,34 +95,6 @@ pub(crate) fn report_summary(summary: &FleetSummary, quiet: bool) -> Result<(), 
     Ok(())
 }
 
-/// Names every discovered target the action cannot act on, once, before it acts.
-///
-/// A lifecycle command that silently ignored an inventory target would look exactly
-/// like one that lost a fleet member (ADR-026): the operator sees a shorter list and
-/// cannot tell which of the two happened. So the skip is printed with its reason -
-/// and the *eligibility* itself is decided in one place
-/// (`selection::TargetRequirement`), not by each command.
-pub fn report_skipped_targets(
-    discovered: &[HostEntity],
-    requirement: TargetRequirement,
-    action: &str,
-) {
-    let skipped = skipped_by(discovered, requirement);
-    if skipped.is_empty() {
-        return;
-    }
-    let names: Vec<&str> = skipped.iter().map(|host| host.name.as_str()).collect();
-    println!(
-        "{}",
-        format!(
-            "{action}: {} target(s) {} - skipped: {}",
-            names.len(),
-            requirement.skip_reason(),
-            names.join(", ")
-        )
-        .dimmed()
-    );
-}
 #[cfg(test)]
 mod tests {
     use super::report_summary;

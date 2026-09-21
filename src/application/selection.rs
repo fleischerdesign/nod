@@ -21,8 +21,11 @@ use crate::domain::host::HostEntity;
 pub enum TargetRequirement {
     /// The action builds, compares, transfers or activates a closure.
     Closure,
-    /// The action only talks to the host: reachability, ssh, inventory, garbage.
+    /// The action only talks to the host: reachability, inventory, garbage.
     Reachability,
+    /// The action opens a command channel on the target (`ssh`, `exec`). A target
+    /// activated through a device API has no shell to open, however reachable it is.
+    Shell,
     /// The action compares what runs *on a machine* against the flake. A target activated
     /// through a device API has a closure to build and nothing to compare it with, so it
     /// is not a drift subject even though it has something to build.
@@ -35,9 +38,8 @@ impl TargetRequirement {
         match self {
             TargetRequirement::Closure => host.has_closure(),
             TargetRequirement::Reachability => true,
-            TargetRequirement::RunningSystem => {
-                host.target_kind == crate::domain::host::TargetKind::Nixos
-            }
+            TargetRequirement::Shell => host.target_kind.has_command_channel(),
+            TargetRequirement::RunningSystem => host.target_kind.has_running_system(),
         }
     }
 
@@ -48,6 +50,7 @@ impl TargetRequirement {
         match self {
             TargetRequirement::Closure => "declare no closure (inventory targets)",
             TargetRequirement::Reachability => "are unreachable",
+            TargetRequirement::Shell => "are activated through a device API (no shell to open)",
             TargetRequirement::RunningSystem => {
                 "are activated through a device API (no running system to compare)"
             }
@@ -61,6 +64,40 @@ pub fn skipped_by(hosts: &[HostEntity], requirement: TargetRequirement) -> Vec<&
         .iter()
         .filter(|host| !requirement.admits(host))
         .collect()
+}
+
+/// The selection axes of one command invocation (ADR-006): what to target and what
+/// narrows it.
+///
+/// A struct rather than positional arguments, because several axes have the same type -
+/// a caller that swapped `tag` and `role` would otherwise still compile. The axes carry no
+/// decision about eligibility; that is the caller's [`TargetRequirement`], applied below.
+#[derive(Debug, Clone, Copy)]
+pub struct TargetAxes<'a> {
+    /// A name, a glob, `all`, `local`, or nothing - then `scope` decides.
+    pub target: Option<&'a str>,
+    /// Only hosts carrying this tag.
+    pub tag: Option<&'a str>,
+    /// Only hosts with this role.
+    pub role: Option<&'a str>,
+    /// Select every discovered host, regardless of `target`.
+    pub all: bool,
+    /// What to select when no criterion is given at all.
+    pub scope: DefaultScope,
+}
+
+impl<'a> TargetAxes<'a> {
+    /// The axes of a command that takes filters and a default scope: everything but the
+    /// name selector, which most commands set to the caller's `--target`.
+    pub fn new(scope: DefaultScope) -> Self {
+        Self {
+            target: None,
+            tag: None,
+            role: None,
+            all: false,
+            scope,
+        }
+    }
 }
 
 /// Which host set to target when no `target`/`tag`/`role` and `!all` is
@@ -81,34 +118,28 @@ pub enum DefaultScope {
 /// default-when-empty block each command previously hand-rolled.
 ///
 /// Delegates to [`TargetSelection::select`]; it is a pure selection function
-/// and never touches Nix or SSH.
-/// The eight criteria are the ADR-006 selection axes plus the ADR-026 requirement;
-/// a struct would hide which axis a caller forgot.
-#[allow(clippy::too_many_arguments)]
+/// and never touches Nix or SSH - naming what a requirement excluded is a presentation
+/// decision and lives in the command layer (`commands::targets`).
 pub fn resolve_targets(
     hosts: Vec<HostEntity>,
     local_hostname: &str,
-    target: Option<&str>,
-    tag: Option<&str>,
-    role: Option<&str>,
-    all: bool,
-    default_scope: DefaultScope,
+    axes: TargetAxes<'_>,
     requirement: TargetRequirement,
 ) -> Vec<HostEntity> {
     let (effective_target, effective_all) =
-        if !all && target.is_none() && tag.is_none() && role.is_none() {
-            match default_scope {
+        if !axes.all && axes.target.is_none() && axes.tag.is_none() && axes.role.is_none() {
+            match axes.scope {
                 DefaultScope::Local => (Some("local"), false),
                 DefaultScope::All => (None, true),
             }
         } else {
-            (target, all)
+            (axes.target, axes.all)
         };
     TargetSelection::select(
         hosts,
         effective_target,
-        tag,
-        role,
+        axes.tag,
+        axes.role,
         effective_all,
         local_hostname,
     )
@@ -173,7 +204,7 @@ impl TargetSelection {
         }
         match target {
             Some("all") => true,
-            Some("local") => host.is_local || host.name == local_hostname,
+            Some("local") => host.is_self || host.name == local_hostname,
             Some(t) if Self::is_glob(t) => Self::glob_match(t, &host.name),
             Some(t) => host.name == t,
             // Degenerate call: no target and no `--all` is the empty
@@ -217,7 +248,7 @@ impl TargetSelection {
     /// Semantics (ADR-006):
     /// - `all == true` (or the target sentinel `all`) makes every discovered
     ///   host a candidate; tag/role filters still narrow the set via AND.
-    /// - target `local` selects the host whose `is_local` flag is set or
+    /// - target `local` selects the host whose `is_self` flag is set or
     ///   whose name equals `local_hostname`.
     /// - a target containing `*` / `?` glob-matches host names.
     /// - any other target is an exact host-name match.
@@ -315,11 +346,13 @@ mod tests {
         let local = resolve_targets(
             fleet(),
             "jello",
-            None,
-            None,
-            None,
-            false,
-            DefaultScope::Local,
+            TargetAxes {
+                target: None,
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::Local,
+            },
             TargetRequirement::Reachability,
         );
         assert_eq!(local.len(), 1);
@@ -328,11 +361,13 @@ mod tests {
         let all = resolve_targets(
             fleet(),
             "jello",
-            None,
-            None,
-            None,
-            false,
-            DefaultScope::All,
+            TargetAxes {
+                target: None,
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
             TargetRequirement::Reachability,
         );
         assert_eq!(all.len(), 3);
@@ -344,11 +379,13 @@ mod tests {
         let via_target = resolve_targets(
             fleet(),
             "jello",
-            Some("atlas"),
-            None,
-            None,
-            false,
-            DefaultScope::All,
+            TargetAxes {
+                target: Some("atlas"),
+                tag: None,
+                role: None,
+                all: false,
+                scope: DefaultScope::All,
+            },
             TargetRequirement::Reachability,
         );
         assert_eq!(via_target.len(), 1);
@@ -357,11 +394,13 @@ mod tests {
         let via_all = resolve_targets(
             fleet(),
             "jello",
-            None,
-            None,
-            None,
-            true,
-            DefaultScope::Local,
+            TargetAxes {
+                target: None,
+                tag: None,
+                role: None,
+                all: true,
+                scope: DefaultScope::Local,
+            },
             TargetRequirement::Reachability,
         );
         assert_eq!(via_all.len(), 3);
@@ -369,11 +408,13 @@ mod tests {
         let via_tag = resolve_targets(
             fleet(),
             "jello",
-            None,
-            Some("server"),
-            None,
-            false,
-            DefaultScope::Local,
+            TargetAxes {
+                target: None,
+                tag: Some("server"),
+                role: None,
+                all: false,
+                scope: DefaultScope::Local,
+            },
             TargetRequirement::Reachability,
         );
         assert_eq!(via_tag.len(), 2);
@@ -417,11 +458,13 @@ mod tests {
         let reachable = resolve_targets(
             hosts.clone(),
             "jello",
-            Some("all"),
-            None,
-            None,
-            true,
-            DefaultScope::All,
+            TargetAxes {
+                target: Some("all"),
+                tag: None,
+                role: None,
+                all: true,
+                scope: DefaultScope::All,
+            },
             TargetRequirement::Reachability,
         );
         assert_eq!(reachable.len(), 4, "reachability keeps every member");
@@ -429,11 +472,13 @@ mod tests {
         let buildable = resolve_targets(
             hosts.clone(),
             "jello",
-            Some("all"),
-            None,
-            None,
-            true,
-            DefaultScope::All,
+            TargetAxes {
+                target: Some("all"),
+                tag: None,
+                role: None,
+                all: true,
+                scope: DefaultScope::All,
+            },
             TargetRequirement::Closure,
         );
         assert_eq!(buildable.len(), 3, "a lifecycle action acts on closures");
@@ -458,11 +503,13 @@ mod tests {
         let comparable = resolve_targets(
             hosts.clone(),
             "jello",
-            Some("all"),
-            None,
-            None,
-            true,
-            DefaultScope::All,
+            TargetAxes {
+                target: Some("all"),
+                tag: None,
+                role: None,
+                all: true,
+                scope: DefaultScope::All,
+            },
             TargetRequirement::RunningSystem,
         );
         assert_eq!(comparable.len(), 3, "only a machine runs a generation");
@@ -471,17 +518,45 @@ mod tests {
         let buildable = resolve_targets(
             hosts.clone(),
             "jello",
-            Some("all"),
-            None,
-            None,
-            true,
-            DefaultScope::All,
+            TargetAxes {
+                target: Some("all"),
+                tag: None,
+                role: None,
+                all: true,
+                scope: DefaultScope::All,
+            },
             TargetRequirement::Closure,
         );
         assert_eq!(buildable.len(), 4, "its reconciler package is still built");
 
         let skipped = skipped_by(&hosts, TargetRequirement::RunningSystem);
         assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "home-ap-01");
+    }
+
+    // ADR-026 amendment: identity and modality are independent questions, and a target
+    // activated through a device API has no shell even though it is reachable.
+    #[test]
+    fn shell_requirement_excludes_device_activated_targets() {
+        let mut hosts = fleet();
+        let mut bridge = HostEntity::new("home-ap-01", "10.10.10.20", false);
+        bridge.target_kind = crate::domain::host::TargetKind::Agentless;
+        hosts.push(bridge);
+
+        let shells = resolve_targets(
+            hosts.clone(),
+            "jello",
+            TargetAxes {
+                target: Some("all"),
+                tag: None,
+                role: None,
+                all: true,
+                scope: DefaultScope::All,
+            },
+            TargetRequirement::Shell,
+        );
+        assert_eq!(shells.len(), 3, "a device has no shell to open");
+        let skipped = skipped_by(&hosts, TargetRequirement::Shell);
         assert_eq!(skipped[0].name, "home-ap-01");
     }
 
@@ -518,7 +593,7 @@ mod tests {
         let hosts2 =
             TargetSelection::select(fleet(), Some("local"), None, None, false, "unknown-machine");
         assert_eq!(hosts2.len(), 1);
-        assert!(hosts2[0].is_local);
+        assert!(hosts2[0].is_self);
     }
 
     #[test]

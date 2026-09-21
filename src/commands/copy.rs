@@ -7,10 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{
-    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
-};
+use crate::application::selection::{DefaultScope, TargetAxes, TargetRequirement, TargetSelection};
 use crate::application::use_cases::copy_closure::CopyClosureUseCase;
+use crate::commands::targets;
 use crate::config::options::TargetArgs;
 use crate::domain::errors::NodError;
 use crate::domain::generation::CopyOptions;
@@ -31,15 +30,18 @@ pub async fn execute(
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let targets = resolve_targets(
+    let targets = targets::select(
         hosts,
         &local_hostname,
-        target_args.target.as_deref(),
-        target_args.tag.as_deref(),
-        target_args.role.as_deref(),
-        target_args.all,
-        DefaultScope::Local,
+        TargetAxes {
+            target: target_args.target.as_deref(),
+            tag: target_args.tag.as_deref(),
+            role: target_args.role.as_deref(),
+            all: target_args.all,
+            scope: DefaultScope::Local,
+        },
         TargetRequirement::Closure,
+        "copy",
     );
 
     if targets.is_empty() {
