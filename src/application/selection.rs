@@ -23,6 +23,10 @@ pub enum TargetRequirement {
     Closure,
     /// The action only talks to the host: reachability, ssh, inventory, garbage.
     Reachability,
+    /// The action compares what runs *on a machine* against the flake. A target activated
+    /// through a device API has a closure to build and nothing to compare it with, so it
+    /// is not a drift subject even though it has something to build.
+    RunningSystem,
 }
 
 impl TargetRequirement {
@@ -31,6 +35,9 @@ impl TargetRequirement {
         match self {
             TargetRequirement::Closure => host.has_closure(),
             TargetRequirement::Reachability => true,
+            TargetRequirement::RunningSystem => {
+                host.target_kind == crate::domain::host::TargetKind::Nixos
+            }
         }
     }
 
@@ -41,6 +48,9 @@ impl TargetRequirement {
         match self {
             TargetRequirement::Closure => "declare no closure (inventory targets)",
             TargetRequirement::Reachability => "are unreachable",
+            TargetRequirement::RunningSystem => {
+                "are activated through a device API (no running system to compare)"
+            }
         }
     }
 }
@@ -433,6 +443,46 @@ mod tests {
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].name, "relay");
         assert!(skipped_by(&hosts, TargetRequirement::Reachability).is_empty());
+    }
+
+    // ADR-026 amendment: having a closure and running a generation are different
+    // questions. A device activated through an API is a build subject (its reconciler
+    // package) and not a drift subject (there is no generation to compare).
+    #[test]
+    fn running_system_requirement_excludes_device_activated_targets() {
+        let mut hosts = fleet();
+        let mut bridge = HostEntity::new("home-ap-01", "10.10.10.20", false);
+        bridge.target_kind = crate::domain::host::TargetKind::Agentless;
+        hosts.push(bridge);
+
+        let comparable = resolve_targets(
+            hosts.clone(),
+            "jello",
+            Some("all"),
+            None,
+            None,
+            true,
+            DefaultScope::All,
+            TargetRequirement::RunningSystem,
+        );
+        assert_eq!(comparable.len(), 3, "only a machine runs a generation");
+        assert!(!comparable.iter().any(|host| host.name == "home-ap-01"));
+
+        let buildable = resolve_targets(
+            hosts.clone(),
+            "jello",
+            Some("all"),
+            None,
+            None,
+            true,
+            DefaultScope::All,
+            TargetRequirement::Closure,
+        );
+        assert_eq!(buildable.len(), 4, "its reconciler package is still built");
+
+        let skipped = skipped_by(&hosts, TargetRequirement::RunningSystem);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "home-ap-01");
     }
 
     /// The ADR-006 spec fixture fleet (`unified-target-selection.spec.md`).

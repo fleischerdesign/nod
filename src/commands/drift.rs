@@ -73,7 +73,7 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
-    report_skipped_targets(&hosts, TargetRequirement::Closure, "drift");
+    report_skipped_targets(&hosts, TargetRequirement::RunningSystem, "drift");
     let targets = resolve_targets(
         hosts,
         &local_hostname,
@@ -82,7 +82,7 @@ pub async fn execute(
         role,
         all,
         DefaultScope::Local,
-        TargetRequirement::Closure,
+        TargetRequirement::RunningSystem,
     );
 
     if targets.is_empty() {
