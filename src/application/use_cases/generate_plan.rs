@@ -33,7 +33,13 @@ impl GeneratePlanUseCase {
         let mut targets = Vec::<TargetPlan>::with_capacity(hosts.len());
         for host in hosts {
             let closure = evaluator
-                .build_toplevel(flake_path, &host.name, None, options.verbose)
+                .build_toplevel(
+                    flake_path,
+                    &host.name,
+                    host.closure_attr.clone(),
+                    None,
+                    options.verbose,
+                )
                 .await?;
             let current = if host.is_local {
                 Some(PathBuf::from("/run/current-system"))

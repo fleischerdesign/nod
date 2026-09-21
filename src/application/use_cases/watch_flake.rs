@@ -75,7 +75,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -101,7 +101,7 @@ mod tests {
         let mut eval_mock = MockFakeEvaluator::new();
         eval_mock
             .expect_build_toplevel()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-closure")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/test-closure")));
 
         let mut deploy_mock = MockFakeDeployer::new();
         deploy_mock

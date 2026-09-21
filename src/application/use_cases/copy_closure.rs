@@ -30,7 +30,13 @@ impl CopyClosureUseCase {
 
         for host in targets {
             let closure = evaluator
-                .build_toplevel(flake_path, &host.name, None, verbose)
+                .build_toplevel(
+                    flake_path,
+                    &host.name,
+                    host.closure_attr.clone(),
+                    None,
+                    verbose,
+                )
                 .await?;
 
             let store = self.ctx.store_for(&host)?;
@@ -83,7 +89,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -91,7 +97,7 @@ mod tests {
     async fn copy_closure_builds_and_copies() {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
-            .returning(|_, host_name, _, _| {
+            .returning(|_, host_name, _, _, _| {
                 Ok(PathBuf::from(format!("/nix/store/test-{}", host_name)))
             });
 

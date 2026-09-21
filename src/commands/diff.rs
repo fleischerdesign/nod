@@ -1,11 +1,14 @@
 //! `nod diff` use case: package & systemd unit diff preview before switching.
 
+use crate::commands::report_skipped_targets;
 use colored::Colorize;
 use std::path::Path;
 use tokio::process::Command;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::domain::errors::NodError;
 
 pub async fn execute(
@@ -26,6 +29,7 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
+    report_skipped_targets(&hosts, TargetRequirement::Closure, "diff");
     let targets = resolve_targets(
         hosts,
         &local_hostname,
@@ -34,6 +38,7 @@ pub async fn execute(
         role,
         all,
         DefaultScope::Local,
+        TargetRequirement::Closure,
     );
 
     if targets.is_empty() {
@@ -57,7 +62,13 @@ pub async fn execute(
         );
 
         let new_closure = evaluator
-            .build_toplevel(flake_path, &host.name, None, verbose)
+            .build_toplevel(
+                flake_path,
+                &host.name,
+                host.closure_attr.clone(),
+                None,
+                verbose,
+            )
             .await?;
 
         let deployer = ctx.deployer_for(&host);
@@ -185,7 +196,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -244,7 +255,7 @@ mod tests {
         eval.expect_discover_hosts()
             .returning(|_, _| Ok(vec![HostEntity::new("rollins", "100.126.5.72", false)]));
         eval.expect_build_toplevel()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-system-hash")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/test-system-hash")));
 
         let mut ssh = MockFakeDeployer::new();
         ssh.expect_current_closure()
@@ -276,7 +287,7 @@ mod tests {
         eval.expect_discover_hosts()
             .returning(|_, _| Ok(vec![HostEntity::new("rollins", "100.126.5.72", false)]));
         eval.expect_build_toplevel()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/new-system-hash")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/new-system-hash")));
 
         let mut ssh = MockFakeDeployer::new();
         ssh.expect_current_closure().returning(|_, _| Ok(None));

@@ -1,12 +1,15 @@
 //! Shared execution pipeline for fleet deployment lifecycle commands
 //! (`switch`, `test`, `boot`).
 
+use crate::commands::report_skipped_targets;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
 use crate::application::pipeline::state_machine::DeploymentState;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::application::use_cases::deploy_fleet::DeployFleetUseCase;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
@@ -66,6 +69,7 @@ pub async fn execute_lifecycle(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
+    report_skipped_targets(&hosts, TargetRequirement::Closure, "switch/test/boot");
     let targets = resolve_targets(
         hosts,
         &local_hostname,
@@ -74,6 +78,7 @@ pub async fn execute_lifecycle(
         params.role,
         params.all,
         DefaultScope::Local,
+        TargetRequirement::Closure,
     );
 
     if targets.is_empty() {
@@ -143,7 +148,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -258,7 +263,7 @@ mod tests {
         eval.expect_discover_hosts()
             .returning(|_, _| Ok(vec![HostEntity::new("jello", "jello-machine", true)]));
         eval.expect_build_toplevel()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-system")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/test-system")));
 
         let mut local = MockFakeDeployer::new();
         local.expect_check_reachability().returning(|_| Ok(true));
@@ -286,7 +291,7 @@ mod tests {
         eval.expect_discover_hosts()
             .returning(|_, _| Ok(vec![HostEntity::new("jello", "jello-machine", true)]));
         eval.expect_build_toplevel()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-system")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/test-system")));
 
         let mut local = MockFakeDeployer::new();
         local.expect_check_reachability().returning(|_| Ok(true));

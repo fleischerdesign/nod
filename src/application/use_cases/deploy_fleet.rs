@@ -199,9 +199,16 @@ impl DeployFleetUseCase {
             let out_link_c = out_link.clone();
             let builder_c = builder.clone();
             let name_c = host.name.clone();
+            let closure_attr_c = host.closure_attr.clone();
             tasks.push(Box::pin(async move {
                 let built = evaluator_c
-                    .build_toplevel(Path::new(&flake_c), &name_c, builder_c.as_ref(), verbose)
+                    .build_toplevel(
+                        Path::new(&flake_c),
+                        &name_c,
+                        closure_attr_c.clone(),
+                        builder_c.as_ref(),
+                        verbose,
+                    )
                     .await;
                 match built {
                     Ok(closure) => {
@@ -275,6 +282,7 @@ async fn run_host(
         .build_toplevel(
             std::path::Path::new(&flake),
             &host.name,
+            host.closure_attr.clone(),
             None,
             options.verbose,
         )
@@ -452,7 +460,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -505,7 +513,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-test")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-test")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -538,7 +546,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-boot")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-boot")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -570,7 +578,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-build")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-build")));
 
         // The build action must never reach a deployer (no transfer, no
         // activation, no rollback).
@@ -607,7 +615,7 @@ mod tests {
         let closure_c = closure.clone();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(move |_, _, _, _| Ok(closure_c.clone()));
+            .returning(move |_, _, _, _, _| Ok(closure_c.clone()));
 
         let local = MockFakeDeployer::new();
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
@@ -631,7 +639,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Err(NodError::build_failure("jello", "eval failed")));
+            .returning(|_, _, _, _, _| Err(NodError::build_failure("jello", "eval failed")));
 
         let local = MockFakeDeployer::new();
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
@@ -666,8 +674,10 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .withf(|_, _, builder, _| builder.map(|b| b.target_host == "buildy").unwrap_or(false))
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-remote")));
+            .withf(|_, _, _, builder, _| {
+                builder.map(|b| b.target_host == "buildy").unwrap_or(false)
+            })
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-remote")));
 
         let local = MockFakeDeployer::new();
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
@@ -694,7 +704,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-nocheck")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-nocheck")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -727,7 +737,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-healthfail")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-healthfail")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -766,7 +776,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-healthpass")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-healthpass")));
 
         let mut local = MockFakeDeployer::new();
         local

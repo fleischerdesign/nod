@@ -51,7 +51,13 @@ impl PushCacheUseCase {
             };
 
             let closure = evaluator
-                .build_toplevel(flake_path, &host.name, None, verbose)
+                .build_toplevel(
+                    flake_path,
+                    &host.name,
+                    host.closure_attr.clone(),
+                    None,
+                    verbose,
+                )
                 .await?;
 
             if options.dry_run {
@@ -95,7 +101,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -127,7 +133,7 @@ mod tests {
         let mut eval_mock = MockFakeEvaluator::new();
         eval_mock
             .expect_build_toplevel()
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/test-closure")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/test-closure")));
 
         let mut store_mock = MockFakeStorePort::new();
         store_mock

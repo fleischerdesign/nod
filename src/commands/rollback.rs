@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::application::use_cases::rollback::RollbackUseCase;
 use crate::domain::errors::NodError;
 
@@ -38,6 +40,7 @@ pub async fn execute(
         role,
         all,
         DefaultScope::Local,
+        TargetRequirement::Closure,
     );
     let host =
         TargetSelection::select_exact_one(resolved, None, None, None, false, &local_hostname)?;
@@ -94,7 +97,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 

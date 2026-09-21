@@ -10,7 +10,9 @@
 use std::path::Path;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::application::spawn::{run_inherited, split_program_args};
 use crate::domain::errors::NodError;
 use crate::domain::ssh_args::build_ssh_args;
@@ -45,6 +47,7 @@ pub async fn execute(
         role,
         false,
         DefaultScope::All,
+        TargetRequirement::Reachability,
     );
     let host =
         TargetSelection::select_exact_one(resolved, None, None, None, false, &local_hostname)?;

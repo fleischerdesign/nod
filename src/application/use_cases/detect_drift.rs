@@ -46,7 +46,13 @@ impl DetectDriftUseCase {
     ) -> Result<DriftReport, NodError> {
         let evaluator = self.ctx.evaluator();
         let flake_closure = evaluator
-            .build_toplevel(flake_path, &host.name, None, verbose)
+            .build_toplevel(
+                flake_path,
+                &host.name,
+                host.closure_attr.clone(),
+                None,
+                verbose,
+            )
             .await?;
 
         let deployer = self.ctx.deployer_for(host);
@@ -91,7 +97,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -113,7 +119,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -145,7 +151,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -169,7 +175,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local
@@ -194,7 +200,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut ssh = MockFakeDeployer::new();
         ssh.expect_current_closure()
@@ -217,7 +223,7 @@ mod tests {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
-            .returning(|_, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/aaa-flake")));
 
         let mut local = MockFakeDeployer::new();
         local

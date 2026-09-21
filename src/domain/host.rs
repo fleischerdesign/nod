@@ -91,6 +91,12 @@ pub struct HostEntity {
     pub target_kind: TargetKind,
     pub is_local: bool,
     pub active_closure: Option<PathBuf>,
+    /// The flake attribute this target's closure is built from, or `None` when the
+    /// target declares none at all - an inventory-only target such as the router,
+    /// the access point or a relay: nod tracks its reachability and nothing else
+    /// (ADR-026).
+    #[serde(default)]
+    pub closure_attr: Option<String>,
     /// Operator-assignable tags for fleet filtering (`--tag`).
     #[serde(default)]
     pub tags: Vec<String>,
@@ -103,9 +109,16 @@ pub struct HostEntity {
 impl HostEntity {
     /// Constructs a host with the compiled-in defaults (user `root`,
     /// port `22`, role `server`, no tags, no active closure).
+    ///
+    /// It declares the toplevel closure of a `nixosConfigurations` host, which is the
+    /// same default `target_kind` carries: a host built by name is a NixOS host until
+    /// something says otherwise. Discovery overrides both explicitly - the attribute
+    /// with what the flake actually declares, the kind with what the target declares -
+    /// so an inventory target never inherits this one.
     pub fn new(name: impl Into<String>, target_host: impl Into<String>, is_local: bool) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            name: name.clone(),
             target_host: target_host.into(),
             target_user: "root".to_string(),
             target_port: 22,
@@ -113,6 +126,9 @@ impl HostEntity {
             target_kind: TargetKind::Nixos,
             is_local,
             active_closure: None,
+            closure_attr: Some(format!(
+                "#nixosConfigurations.{name}.config.system.build.toplevel"
+            )),
             tags: Vec::new(),
             nod_config: NodConfig::default(),
         }
@@ -132,6 +148,18 @@ impl HostEntity {
     /// Returns the functional role of this host.
     pub fn role(&self) -> &HostRole {
         &self.role
+    }
+
+    /// True when this target declares something to build, compare and activate.
+    ///
+    /// This is the one definition of the question every lifecycle command has to
+    /// answer (ADR-026): a target without a closure cannot drift, be rolled back or
+    /// be switched. It is a property of the declaration, not of the activation
+    /// modality - a `Nixos` and an `Agentless` target both have one, an
+    /// inventory-only target has none - so callers ask *this*, never
+    /// `target_kind`.
+    pub fn has_closure(&self) -> bool {
+        self.closure_attr.is_some()
     }
 
     /// Returns the SSH user to use when targeting this host.

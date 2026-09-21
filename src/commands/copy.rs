@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::application::use_cases::copy_closure::CopyClosureUseCase;
 use crate::config::options::TargetArgs;
 use crate::domain::errors::NodError;
@@ -37,6 +39,7 @@ pub async fn execute(
         target_args.role.as_deref(),
         target_args.all,
         DefaultScope::Local,
+        TargetRequirement::Closure,
     );
 
     if targets.is_empty() {
@@ -144,7 +147,7 @@ mod tests {
         #[async_trait]
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
-            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
+            async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a crate::domain::host::BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
         }
     }
 
@@ -154,7 +157,7 @@ mod tests {
         eval.expect_discover_hosts()
             .returning(|_, _| Ok(vec![HostEntity::new("rollins", "100.126.5.72", false)]));
         eval.expect_build_toplevel()
-            .returning(|_, host_name, _, _| {
+            .returning(|_, host_name, _, _, _| {
                 Ok(PathBuf::from(format!("/nix/store/test-{}", host_name)))
             });
 

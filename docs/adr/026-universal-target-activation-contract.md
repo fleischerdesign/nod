@@ -60,3 +60,26 @@ In the domain model (`HostEntity`), introduce `TargetKind`:
 
 ### Negative / Trade-offs
 - Discovery requires querying two flake output attributes (`nixosConfigurations` and `nodTargets`). Efficient batch evaluation mitigates overhead.
+
+## Amendment (2026-09-21): a closure is declared, not assumed
+
+`TargetKind` answers *how* a target is activated. It never answered *whether there is
+anything to activate* - and conflating the two is what made `nod drift` report every
+inventory target as drifted. The router, the access point and the six relays are members
+of the fleet that nod tracks for reachability; their activation belongs to their own
+reconcilers (`fritzbox-sync`, `tplink-ap`, ESPHome). They declare no closure, so a command
+that builds or compares closures has nothing to compare.
+
+- **Domain**: `HostEntity::closure_attr` carries the flake attribute a target's closure
+  comes from, `None` when the target declares none, and `HostEntity::has_closure()` is the
+  one definition of the question. Discovery resolves the attribute once, inside the
+  expression that already knows whether a name is a `nixosConfigurations` host or a
+  `nodTargets` entry; `build_toplevel` consumes it instead of probing the flake per build,
+  and refuses audibly if it is ever handed a target without one.
+- **Application**: `TargetRequirement` (`Closure` | `Reachability`) is *stated by the
+  caller* and applied inside `resolve_targets`, so no lifecycle command can forget it.
+  What a requirement excluded is named via `report_skipped_targets`, because a skip the
+  operator cannot see is indistinguishable from a lost fleet member.
+- **Invariant**: a `Nixos` and an `Agentless` target both declare a closure; an
+  inventory target declares none. `HostEntity::new` defaults to declaring one, matching
+  `TargetKind::default()`.

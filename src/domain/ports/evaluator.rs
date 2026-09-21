@@ -47,12 +47,17 @@ pub trait EvaluatorPort: Send + Sync {
         self.discover_hosts(flake_path, verbose).await
     }
 
-    /// Builds the system toplevel closure for `host_name`, returning the
-    /// store path.
+    /// Builds the closure a target declares, returning its store path.
+    ///
+    /// `closure_attr` is what discovery resolved for the target
+    /// (`HostEntity::closure_attr`). `None` means the target declares no closure at
+    /// all - selection skips those targets before they reach a builder, so seeing
+    /// `None` here is a programming error made audible instead of a failed build.
     async fn build_toplevel<'a>(
         &self,
         flake_path: &Path,
         host_name: &str,
+        closure_attr: Option<String>,
         builder: Option<&'a BuilderHost>,
         verbose: bool,
     ) -> Result<PathBuf, NodError>;

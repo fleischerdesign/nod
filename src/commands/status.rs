@@ -4,7 +4,7 @@ use colored::Colorize;
 use std::path::Path;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope};
+use crate::application::selection::{resolve_targets, DefaultScope, TargetRequirement};
 use crate::domain::errors::NodError;
 
 pub async fn execute(
@@ -35,6 +35,7 @@ pub async fn execute(
         role,
         all,
         DefaultScope::All,
+        TargetRequirement::Reachability,
     );
 
     if selected.is_empty() {

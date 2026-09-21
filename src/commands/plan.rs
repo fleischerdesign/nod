@@ -1,12 +1,15 @@
 //! `nod plan` command: build a deployment preview WITHOUT activating any host
 //! (ADR-003 planning stage). Backed by `GeneratePlanUseCase`.
 
+use crate::commands::report_skipped_targets;
 use colored::Colorize;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::application::use_cases::generate_plan::GeneratePlanUseCase;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
@@ -30,6 +33,7 @@ pub async fn execute(
     let local_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
+    report_skipped_targets(&hosts, TargetRequirement::Closure, "plan");
     let targets = resolve_targets(
         hosts,
         &local_hostname,
@@ -38,6 +42,7 @@ pub async fn execute(
         role,
         all,
         DefaultScope::Local,
+        TargetRequirement::Closure,
     );
 
     if targets.is_empty() {

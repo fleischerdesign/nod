@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
-use crate::application::selection::{resolve_targets, DefaultScope, TargetSelection};
+use crate::application::selection::{
+    resolve_targets, DefaultScope, TargetRequirement, TargetSelection,
+};
 use crate::application::use_cases::exec_fleet::{ExecFleetUseCase, ExecResult};
 use crate::domain::errors::NodError;
 
@@ -67,6 +69,7 @@ pub async fn execute(
         role,
         all,
         DefaultScope::Local,
+        TargetRequirement::Reachability,
     );
 
     if targets.is_empty() {

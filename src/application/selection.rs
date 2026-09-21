@@ -8,6 +8,51 @@
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 
+/// What a caller needs from the targets it asks for (ADR-026).
+///
+/// A target is a member of the fleet, and not every member has something to build:
+/// the router, the access point and the relays are inventory targets whose
+/// reachability nod tracks and whose activation belongs to their own reconcilers.
+/// A command therefore *says* what it needs and selection applies it - once, here,
+/// instead of every command remembering to check. The distinction is orthogonal to
+/// the activation modality: a `Nixos` and an `Agentless` target both declare a
+/// closure, an inventory target declares none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetRequirement {
+    /// The action builds, compares, transfers or activates a closure.
+    Closure,
+    /// The action only talks to the host: reachability, ssh, inventory, garbage.
+    Reachability,
+}
+
+impl TargetRequirement {
+    /// Whether `host` can satisfy this requirement.
+    pub fn admits(self, host: &HostEntity) -> bool {
+        match self {
+            TargetRequirement::Closure => host.has_closure(),
+            TargetRequirement::Reachability => true,
+        }
+    }
+
+    /// The reason a target cannot satisfy this requirement, for the operator-facing
+    /// line. A skip is never silent (ADR-026): an inventory target a lifecycle command
+    /// ignored has to be distinguishable from a fleet member it lost.
+    pub fn skip_reason(self) -> &'static str {
+        match self {
+            TargetRequirement::Closure => "declare no closure (inventory targets)",
+            TargetRequirement::Reachability => "are unreachable",
+        }
+    }
+}
+
+/// The discovered targets a requirement excludes, for a caller that has to name them.
+pub fn skipped_by(hosts: &[HostEntity], requirement: TargetRequirement) -> Vec<&HostEntity> {
+    hosts
+        .iter()
+        .filter(|host| !requirement.admits(host))
+        .collect()
+}
+
 /// Which host set to target when no `target`/`tag`/`role` and `!all` is
 /// given (ADR-008). The deploy lifecycle and `exec` default to local; `status`
 /// observers the whole fleet by default.
@@ -27,6 +72,9 @@ pub enum DefaultScope {
 ///
 /// Delegates to [`TargetSelection::select`]; it is a pure selection function
 /// and never touches Nix or SSH.
+/// The eight criteria are the ADR-006 selection axes plus the ADR-026 requirement;
+/// a struct would hide which axis a caller forgot.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_targets(
     hosts: Vec<HostEntity>,
     local_hostname: &str,
@@ -35,6 +83,7 @@ pub fn resolve_targets(
     role: Option<&str>,
     all: bool,
     default_scope: DefaultScope,
+    requirement: TargetRequirement,
 ) -> Vec<HostEntity> {
     let (effective_target, effective_all) =
         if !all && target.is_none() && tag.is_none() && role.is_none() {
@@ -53,6 +102,9 @@ pub fn resolve_targets(
         effective_all,
         local_hostname,
     )
+    .into_iter()
+    .filter(|host| requirement.admits(host))
+    .collect()
 }
 
 /// Pure host selection/filtering logic (target `all`, `local`, a named host
@@ -258,11 +310,21 @@ mod tests {
             None,
             false,
             DefaultScope::Local,
+            TargetRequirement::Reachability,
         );
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].name, "jello");
 
-        let all = resolve_targets(fleet(), "jello", None, None, None, false, DefaultScope::All);
+        let all = resolve_targets(
+            fleet(),
+            "jello",
+            None,
+            None,
+            None,
+            false,
+            DefaultScope::All,
+            TargetRequirement::Reachability,
+        );
         assert_eq!(all.len(), 3);
     }
 
@@ -277,6 +339,7 @@ mod tests {
             None,
             false,
             DefaultScope::All,
+            TargetRequirement::Reachability,
         );
         assert_eq!(via_target.len(), 1);
         assert_eq!(via_target[0].name, "atlas");
@@ -289,6 +352,7 @@ mod tests {
             None,
             true,
             DefaultScope::Local,
+            TargetRequirement::Reachability,
         );
         assert_eq!(via_all.len(), 3);
 
@@ -300,6 +364,7 @@ mod tests {
             None,
             false,
             DefaultScope::Local,
+            TargetRequirement::Reachability,
         );
         assert_eq!(via_tag.len(), 2);
     }
@@ -315,7 +380,59 @@ mod tests {
         let mut orbit = HostEntity::new("orbit", "10.0.0.9", false);
         orbit.tags = vec!["server".to_string()];
 
+        // Every fixture member declares a closure, so selection tests are about
+        // selection and never accidentally about eligibility.
+        for host in [&mut jello, &mut atlas, &mut orbit] {
+            host.closure_attr = Some(format!(
+                "#nixosConfigurations.{}.config.system.build.toplevel",
+                host.name
+            ));
+        }
+
         vec![jello, atlas, orbit]
+    }
+
+    // ADR-026: a member of the fleet is not necessarily something to build. The
+    // requirement is stated by the caller and applied once, here - so no lifecycle
+    // command can forget it - and what it excludes is nameable, because a skip the
+    // operator cannot see is indistinguishable from a lost host.
+    #[test]
+    fn closure_and_reachability_requirements_differ_over_inventory_targets() {
+        let mut hosts = fleet();
+        let mut relay = HostEntity::new("relay", "10.10.30.11", false);
+        relay.role = HostRole::Embedded;
+        relay.closure_attr = None; // declares nothing to build
+        hosts.push(relay);
+
+        let reachable = resolve_targets(
+            hosts.clone(),
+            "jello",
+            Some("all"),
+            None,
+            None,
+            true,
+            DefaultScope::All,
+            TargetRequirement::Reachability,
+        );
+        assert_eq!(reachable.len(), 4, "reachability keeps every member");
+
+        let buildable = resolve_targets(
+            hosts.clone(),
+            "jello",
+            Some("all"),
+            None,
+            None,
+            true,
+            DefaultScope::All,
+            TargetRequirement::Closure,
+        );
+        assert_eq!(buildable.len(), 3, "a lifecycle action acts on closures");
+        assert!(!buildable.iter().any(|host| host.name == "relay"));
+
+        let skipped = skipped_by(&hosts, TargetRequirement::Closure);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "relay");
+        assert!(skipped_by(&hosts, TargetRequirement::Reachability).is_empty());
     }
 
     /// The ADR-006 spec fixture fleet (`unified-target-selection.spec.md`).
