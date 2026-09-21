@@ -160,6 +160,47 @@ Feature: lifecycle commands fail loudly without partial activation surprises
 
 ---
 
+## Feature: Exit Status
+
+```gherkin
+@lifecycle @exit-status
+Feature: a lifecycle command exits non-zero when a target does not complete
+
+  Scenario: every host completes
+    Given a lifecycle run in which every host reaches `Completed`
+    When the command returns
+    Then the process exit status is 0
+
+  Scenario: a failed host makes the command fail
+    Given a lifecycle run in which one host reaches `Failed`
+    When the command returns
+    Then the command returns a deployment error naming the unsuccessful hosts
+    And the process exit status is non-zero
+
+  Scenario: a rolled-back host counts as unsuccessful
+    Given a lifecycle run in which one host reaches `RolledBack`
+    When the command returns
+    Then the process exit status is non-zero
+
+  Scenario: a dry-run preview succeeds
+    Given a lifecycle `--dry-run` over a fleet
+    When every host is staged as `Prepared`
+    Then the process exit status is 0
+
+  Scenario: --on-error continue still fails the run
+    Given a `--on-error continue` lifecycle run with a failed host
+    When the command returns
+    Then every wave still ran
+    And the process exit status is non-zero
+
+  Scenario: --quiet suppresses output, not the status
+    Given a failed lifecycle run with `--quiet`
+    Then no summary is rendered
+    And the process exit status is non-zero
+```
+
+---
+
 > **Conventions:** the lifecycle actions map to `DeploymentAction::{Test, Boot,
 > Build}` in `domain/plan.rs`; the deployer action string is derived from
 > `DeploymentAction::to_str`. Fleet policy (waves, semaphore, fail-fast) lives

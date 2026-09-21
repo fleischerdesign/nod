@@ -112,11 +112,7 @@ pub async fn execute_lifecycle(
         }
     }
 
-    if !params.quiet {
-        crate::commands::render_summary(&summary);
-    }
-
-    Ok(())
+    crate::commands::report_summary(&summary, params.quiet)
 }
 
 #[cfg(test)]

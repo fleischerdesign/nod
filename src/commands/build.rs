@@ -112,11 +112,7 @@ pub async fn execute(
     let use_case = DeployFleetUseCase::new(Arc::new(ctx));
     let summary = use_case.execute(staged, options, flake_path).await?;
 
-    if !quiet {
-        crate::commands::render_summary(&summary);
-    }
-
-    Ok(())
+    crate::commands::report_summary(&summary, quiet)
 }
 
 /// External builder precedence: a CLI `--builder` wins outright; otherwise
