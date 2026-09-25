@@ -95,7 +95,7 @@ impl DeployerPort for SshCliDeployer {
         // the path before any SSH run — an unknown action is a config error at
         // the command boundary (defense-in-depth; the CLI already constrains it).
         let switch_bin = closure.join("bin/switch-to-configuration");
-        let remote_cmd = build_remote_command(&switch_bin, action)?;
+        let remote_cmd = build_remote_command(&switch_bin, action, closure)?;
 
         tracing::info!(
             target_host = %host.target_host,
@@ -431,21 +431,36 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// Validates the activation action against the known deployment allow-list
-/// and builds the remote shell command (AC3). The `switch_bin` path is
-/// single-quoted so it survives the remote shell; the allow-listed action is
-/// a single word carrying no shell metacharacters. An unknown action is a
+/// and builds the remote shell command (AC3). For `switch` and `boot`, it
+/// updates the `/nix/var/nix/profiles/system` generation via `nix-env` so
+/// bootloaders (e.g. systemd-boot) register the new generation.
+/// The paths are single-quoted so they survive the remote shell; the allow-listed
+/// action is a single word carrying no shell metacharacters. An unknown action is a
 /// `NodError::config` at the command boundary.
-fn build_remote_command(switch_bin: &Path, action: &str) -> Result<String, NodError> {
+fn build_remote_command(
+    switch_bin: &Path,
+    action: &str,
+    closure: &Path,
+) -> Result<String, NodError> {
     if DeploymentAction::parse(action).is_none() {
         return Err(NodError::config(format!(
             "unknown deployment action '{action}'; expected one of: switch, boot, test, dry-run, build"
         )));
     }
-    Ok(format!(
+    let switch_invocation = format!(
         "{} {}",
         shell_quote(&switch_bin.display().to_string()),
         action
-    ))
+    );
+    if matches!(action, "switch" | "boot") {
+        let set_profile_cmd = format!(
+            "sudo nix-env -p /nix/var/nix/profiles/system --set {}",
+            shell_quote(&closure.display().to_string())
+        );
+        Ok(format!("{set_profile_cmd} && {switch_invocation}"))
+    } else {
+        Ok(switch_invocation)
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +478,7 @@ mod tests {
         let err = build_remote_command(
             Path::new("/nix/store/abc-system/bin/switch-to-configuration"),
             "evil; rm -rf /",
+            Path::new("/nix/store/abc-system"),
         )
         .unwrap_err();
         assert!(matches!(err, NodError::Config { .. }));
@@ -473,18 +489,38 @@ mod tests {
         let cmd = build_remote_command(
             Path::new("/nix/store/my system/bin/switch-to-configuration"),
             "switch",
+            Path::new("/nix/store/my system"),
         )
         .unwrap();
         assert_eq!(
             cmd,
-            "'/nix/store/my system/bin/switch-to-configuration' switch"
+            "sudo nix-env -p /nix/var/nix/profiles/system --set '/nix/store/my system' && '/nix/store/my system/bin/switch-to-configuration' switch"
+        );
+    }
+
+    #[test]
+    fn test_action_does_not_set_system_profile() {
+        let cmd = build_remote_command(
+            Path::new("/nix/store/my system/bin/switch-to-configuration"),
+            "test",
+            Path::new("/nix/store/my system"),
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            "'/nix/store/my system/bin/switch-to-configuration' test"
         );
     }
 
     #[test]
     fn path_with_single_quote_is_escaped() {
-        let cmd = build_remote_command(Path::new("/nix/store/it's here/system"), "switch").unwrap();
-        assert!(cmd.starts_with("'"));
+        let cmd = build_remote_command(
+            Path::new("/nix/store/it's here/system/bin/switch-to-configuration"),
+            "switch",
+            Path::new("/nix/store/it's here/system"),
+        )
+        .unwrap();
+        assert!(cmd.starts_with("sudo nix-env -p /nix/var/nix/profiles/system --set '"));
         assert!(cmd.contains("'\\''"));
     }
 
@@ -492,7 +528,12 @@ mod tests {
     fn all_known_deployment_actions_are_accepted() {
         for action in ["switch", "boot", "test", "dry-run", "build"] {
             assert!(
-                build_remote_command(Path::new("/nix/store/abc-system"), action).is_ok(),
+                build_remote_command(
+                    Path::new("/nix/store/abc-system/bin/switch-to-configuration"),
+                    action,
+                    Path::new("/nix/store/abc-system"),
+                )
+                .is_ok(),
                 "action={}",
                 action
             );

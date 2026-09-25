@@ -69,6 +69,35 @@ impl DeployerPort for LocalDeployer {
             let activate_bin = resolve_activation_binary(closure, &host.name)?;
             Command::new(&activate_bin).args([action]).status().await
         } else {
+            // Register as new system generation for switch and boot (ADR-003, ADR-015).
+            // Without updating the profile link, bootloaders (like systemd-boot) cannot see
+            // the new generation and rebooting reverts to the old configuration.
+            if matches!(action, "switch" | "boot") {
+                let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
+                let mut profile_cmd = if is_root {
+                    Command::new("nix-env")
+                } else {
+                    let mut c = Command::new("sudo");
+                    c.arg("nix-env");
+                    c
+                };
+                let profile_status = profile_cmd
+                    .args([
+                        "-p",
+                        "/nix/var/nix/profiles/system",
+                        "--set",
+                        closure.to_str().unwrap(),
+                    ])
+                    .status()
+                    .await;
+
+                if profile_status.is_err() || !profile_status.unwrap().success() {
+                    return Err(NodError::local_activate(
+                        "failed to update /nix/var/nix/profiles/system generation",
+                    ));
+                }
+            }
+
             let switch_bin = closure.join("bin/switch-to-configuration");
             Command::new("sudo")
                 .args([switch_bin.to_str().unwrap(), action])
