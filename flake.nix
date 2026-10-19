@@ -26,6 +26,8 @@
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [
             pkgs.pkg-config
+            # The adapter tests spawn git; the build sandbox has no host git.
+            pkgs.git
           ];
           buildInputs = [
             pkgs.openssl
