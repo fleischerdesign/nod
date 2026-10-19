@@ -683,26 +683,17 @@ async fn run(cli: Cli) -> Result<()> {
             nod::commands::watch::execute(ctx, &flake_path, &target_args, options, cli.verbose)
                 .await?;
         }
-        Commands::Sync {
-            target_args,
-            flake,
-            sync,
-            once,
-        } => {
+        Commands::Sync { flake, sync, once } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
-            let mut options = sync_options(sync, target_args, once);
+            let mut options = sync_options(sync, once);
             options.verbose = cli.verbose;
             nod::commands::sync::execute(ctx, &flake_path, options).await?;
         }
-        Commands::Daemon {
-            target_args,
-            flake,
-            sync,
-        } => {
+        Commands::Daemon { flake, sync } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
-            let mut options = sync_options(sync, target_args, false);
+            let mut options = sync_options(sync, false);
             options.verbose = cli.verbose;
             nod::commands::daemon::execute(ctx, &flake_path, options).await?;
         }
@@ -725,16 +716,16 @@ fn exit_status(error: &anyhow::Error) -> u8 {
 }
 
 /// Builds the reconciler options from the CLI surface.
-fn sync_options(args: SyncArgs, targets: TargetArgs, once: bool) -> SyncOptions {
+fn sync_options(args: SyncArgs, once: bool) -> SyncOptions {
     SyncOptions {
         remote: args.remote,
         branch: args.branch,
         interval_secs: args.interval,
         jitter_percent: args.jitter,
-        targets: targets.target.into_iter().collect(),
-        all: targets.all,
-        tag: targets.tag,
-        role: targets.role,
+        targets: args.targets,
+        all: args.all,
+        tag: args.tag,
+        role: args.role,
         state_dir: args.state_dir,
         strategy: args.strategy,
         batch_size: args.batch_size,

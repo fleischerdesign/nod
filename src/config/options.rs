@@ -35,6 +35,22 @@ pub struct SyncArgs {
     #[arg(long, default_value = "main")]
     pub branch: String,
 
+    /// Target host (repeatable); the selection is the union of every scope
+    #[arg(long = "target", value_name = "HOST")]
+    pub targets: Vec<String>,
+
+    /// Target every discovered host
+    #[arg(long)]
+    pub all: bool,
+
+    /// Filter the fleet to hosts carrying this tag
+    #[arg(long, value_name = "TAG")]
+    pub tag: Option<String>,
+
+    /// Filter the fleet to hosts with this role
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+
     /// Reconciliation interval in seconds (minimum 15)
     #[arg(long, default_value_t = 60)]
     pub interval: u64,
@@ -751,9 +767,6 @@ pub enum Commands {
 
     /// Pull-based GitOps synchronization from upstream Git repository
     Sync {
-        #[command(flatten)]
-        target_args: TargetArgs,
-
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
@@ -768,9 +781,6 @@ pub enum Commands {
 
     /// Run as a background systemd GitOps reconciler daemon
     Daemon {
-        #[command(flatten)]
-        target_args: TargetArgs,
-
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
