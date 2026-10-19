@@ -80,12 +80,15 @@ Per-host outcome states extend ADR-003 with `Skipped` (closure already current),
 
 ### 6. Health and rollback
 
-- Default health check: the activation returned successfully and
-  `systemctl --failed` is empty on the host, using the per-host
-  `options.nod.healthChecks` configuration (timeout, systemd units, HTTP/TCP/
-  custom probes). The reconciler adds no second health vocabulary.
-- Optional per-host probes (HTTP, TCP, custom command) live in `.nod.toml` under
-  `[hosts.<name>.health]`; a probe failure counts as an unhealthy host.
+- Activation success is the baseline: a host whose switch returned non-zero is
+  a failed host, and the rollback policy applies.
+- Where the pipeline has a health checker bound, the host must also pass it. The
+  local systemd checker verifies `systemctl --failed`. Remote verification is
+  the SSH deployer's responsibility and is **not implemented yet** - a remote
+  host counts as healthy once its activation succeeded. The gap is recorded here
+  so "health checks" is never read as more than it is.
+- Probe definitions stay in the fleet's `options.nod.healthChecks`; the
+  reconciler adds no second vocabulary.
 - Auto-rollback is **on** by default: an unhealthy host returns to its previous
   generation. `--no-auto-rollback` keeps the failed generation for inspection.
 - A wave failure does not abort later waves unless `--fail-fast` is set; the exit
