@@ -299,9 +299,28 @@ impl SyncReconcilerUseCase {
     ) -> Result<(Vec<HostEntity>, Vec<SyncHostReport>), NodError> {
         let evaluator = self.ctx.evaluator();
         let mut changed = Vec::new();
-        let mut unchanged = Vec::new();
+        let mut reports = Vec::new();
 
         for host in hosts {
+            // An unreachable host is not a failed host: it is skipped and
+            // retried next cycle. Probing before building keeps an offline
+            // laptop from turning every cycle into a failed deployment.
+            let deployer = self.ctx.deployer_for(&host);
+            match deployer.check_reachability(&host).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    reports.push(SyncHostReport::new(host.name, SyncHostResult::Unreachable));
+                    continue;
+                }
+                Err(error) => {
+                    reports.push(
+                        SyncHostReport::new(host.name, SyncHostResult::Unreachable)
+                            .with_detail(error.to_string()),
+                    );
+                    continue;
+                }
+            }
+
             let built = evaluator
                 .build_toplevel(
                     flake_path,
@@ -312,20 +331,16 @@ impl SyncReconcilerUseCase {
                 )
                 .await?;
             let profile = self.ctx.resolved_profile(&host).await?;
-            let current = self
-                .ctx
-                .deployer_for(&host)
-                .current_closure(&host, &profile)
-                .await?;
+            let current = deployer.current_closure(&host, &profile).await?;
 
             if current.as_deref() == Some(built.as_path()) {
-                unchanged.push(SyncHostReport::new(host.name, SyncHostResult::Unchanged));
+                reports.push(SyncHostReport::new(host.name, SyncHostResult::Unchanged));
             } else {
                 changed.push(host);
             }
         }
 
-        Ok((changed, unchanged))
+        Ok((changed, reports))
     }
 
     /// Orders hosts so infrastructure the reconciler needs is deployed last.
@@ -600,6 +615,7 @@ mod tests {
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/new")));
 
         let mut deployer = MockDeployer::new();
+        deployer.expect_check_reachability().returning(|_| Ok(true));
         deployer
             .expect_current_closure()
             .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/old"))));
@@ -704,6 +720,7 @@ mod tests {
             .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/new")));
 
         let mut deployer = MockDeployer::new();
+        deployer.expect_check_reachability().returning(|_| Ok(true));
         deployer
             .expect_current_closure()
             .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/old"))));
@@ -720,5 +737,49 @@ mod tests {
         assert!(!report.applied);
         assert_eq!(report.hosts.len(), 1);
         assert_eq!(report.hosts[0].result, SyncHostResult::Skipped);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_is_skipped_not_failed() {
+        let mut git = MockGit::new();
+        git.expect_is_dirty().returning(|_| Ok(false));
+        git.expect_local_head().returning(|_| Ok("aaa".into()));
+        git.expect_remote_head()
+            .returning(|_, _, _| Ok("bbb".into()));
+        git.expect_fetch().returning(|_, _, _| Ok(()));
+        git.expect_is_ancestor().returning(|_, _, _| Ok(true));
+        git.expect_fast_forward()
+            .returning(|_, _, _| Ok("bbb".into()));
+
+        let mut state = SyncState::new("origin/main", "main");
+        state.record_success("aaa");
+        let mut store = MockState::new();
+        store
+            .expect_load()
+            .returning(move || Ok(Some(state.clone())));
+        store.expect_save().returning(|_| Ok(()));
+
+        let mut evaluator = MockEvaluator::new();
+        evaluator.expect_build_toplevel().times(0);
+
+        let mut deployer = MockDeployer::new();
+        deployer
+            .expect_check_reachability()
+            .returning(|_| Ok(false));
+
+        let ctx = context(git, store, evaluator, deployer);
+        let report = SyncReconcilerUseCase::new(ctx)
+            .reconcile_once(Path::new("/repo"), &options(), || async {
+                Ok(vec![host()])
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            report.applied,
+            "an unreachable host must not fail the whole cycle"
+        );
+        assert_eq!(report.hosts.len(), 1);
+        assert_eq!(report.hosts[0].result, SyncHostResult::Unreachable);
     }
 }

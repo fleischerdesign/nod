@@ -75,8 +75,14 @@ deploy      waves (all | canary | batch) → activate → health → rollback on
 report      per-host outcomes, exit status (ADR-027), audit entry, notify hooks
 ```
 
-Per-host outcome states extend ADR-003 with `Skipped` (closure already current),
-`Unreachable` (host did not answer) and `Refused` (preflight rejected the host).
+Per-host results are reported in the sync vocabulary - `Deployed`, `Unchanged`,
+`RolledBack`, `Failed`, `Unreachable`, `Skipped` - mapped from the pipeline's
+terminal states. They deliberately do not extend the ADR-003 state machine: a
+skipped or unreachable host never enters a deployment lifecycle at all.
+
+Reachability is checked before evaluation. An unreachable host is reported and
+skipped so an offline laptop cannot turn every cycle into a failed deployment;
+the next cycle retries it.
 
 ### 6. Health and rollback
 
