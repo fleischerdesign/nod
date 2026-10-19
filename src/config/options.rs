@@ -24,6 +24,74 @@ pub struct TargetArgs {
     pub all: bool,
 }
 
+/// Reconciliation knobs shared by `nod sync` and `nod daemon` (ADR-028).
+#[derive(clap::Args, Debug, Default)]
+pub struct SyncArgs {
+    /// Upstream Git remote name
+    #[arg(long, default_value = "origin")]
+    pub remote: String,
+
+    /// Target Git branch
+    #[arg(long, default_value = "main")]
+    pub branch: String,
+
+    /// Reconciliation interval in seconds (minimum 15)
+    #[arg(long, default_value_t = 60)]
+    pub interval: u64,
+
+    /// Random spread applied to the interval, in percent (0-50)
+    #[arg(long, default_value_t = 10)]
+    pub jitter: u8,
+
+    /// Directory holding the reconciler state document and lock
+    #[arg(long, default_value = "/var/lib/nod")]
+    pub state_dir: PathBuf,
+
+    /// Rollout strategy: all, canary or batch
+    #[arg(long, default_value = "batch")]
+    pub strategy: String,
+
+    /// Wave size for the batch strategy
+    #[arg(long, default_value_t = 1)]
+    pub batch_size: usize,
+
+    /// Maximum in-flight hosts
+    #[arg(long, default_value_t = 4)]
+    pub concurrency: usize,
+
+    /// Abort the rollout on the first failed host
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Leave an unhealthy host on its failed generation instead of rolling back
+    #[arg(long)]
+    pub no_auto_rollback: bool,
+
+    /// Allow integrating a revision that is not a descendant of the applied one
+    #[arg(long)]
+    pub allow_downgrade: bool,
+
+    /// Require a verified signature on the integrated revision
+    #[arg(long)]
+    pub require_signature: bool,
+
+    /// Build and compare without activating
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Print the report as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Deploy this host after every other target (repeatable)
+    #[arg(long = "last-host", value_name = "HOST")]
+    pub last_hosts: Vec<String>,
+
+    /// Command run after each cycle with the report as JSON on stdin (repeatable)
+    #[arg(long, value_name = "COMMAND")]
+    pub notify: Vec<String>,
+}
+
 /// Common SSH connection overrides shared by the deploy/preview/diff
 /// commands (DRY — previously re-declared per command). Rollback deliberately
 /// keeps its own `--user`/`--port` (it has no `--identity-file`), so only
@@ -683,36 +751,32 @@ pub enum Commands {
 
     /// Pull-based GitOps synchronization from upstream Git repository
     Sync {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
 
-        /// Upstream Git remote name
-        #[arg(long, default_value = "origin")]
-        remote: String,
-
-        /// Target Git branch
-        #[arg(long, default_value = "main")]
-        branch: String,
+        #[command(flatten)]
+        sync: SyncArgs,
 
         /// Run a single reconciliation cycle and exit
         #[arg(long)]
         once: bool,
-
-        /// Polling interval in seconds when running continuously
-        #[arg(long, default_value = "300")]
-        interval: u64,
     },
 
     /// Run as a background systemd GitOps reconciler daemon
     Daemon {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
 
-        /// Reconciliation interval in seconds
-        #[arg(long, default_value = "300")]
-        interval: u64,
+        #[command(flatten)]
+        sync: SyncArgs,
     },
 }
 

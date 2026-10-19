@@ -17,5 +17,6 @@ pub mod ports;
 pub mod provision;
 pub mod secret;
 pub mod ssh_args;
+pub mod sync;
 pub mod topology;
 pub mod watch;

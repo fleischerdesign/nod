@@ -1,16 +1,27 @@
 use anyhow::Result;
 use clap::Parser;
-use nod::config::options::{Cli, Commands, TargetArgs};
+use nod::config::options::{Cli, Commands, SyncArgs, TargetArgs};
 use nod::domain::config::CliOverrides;
+use nod::domain::watch::SyncOptions;
 use nod::infrastructure::config::toml_config::effective_flake;
 use std::path::Path;
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     nod::telemetry::init_tracing();
     let cli = Cli::parse();
 
+    match run(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::ExitCode::from(exit_status(&error))
+        }
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Switch {
             target_args:
@@ -673,29 +684,70 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Commands::Sync {
+            target_args,
             flake,
-            remote,
-            branch,
+            sync,
             once,
-            interval,
         } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
-            let options = nod::domain::watch::SyncOptions {
-                remote,
-                branch,
-                interval_secs: interval,
-                dry_run: false,
-                once,
-            };
-            nod::commands::sync::execute(ctx, &flake_path, options, cli.verbose).await?;
+            let mut options = sync_options(sync, target_args, once);
+            options.verbose = cli.verbose;
+            nod::commands::sync::execute(ctx, &flake_path, options).await?;
         }
-        Commands::Daemon { flake, interval } => {
+        Commands::Daemon {
+            target_args,
+            flake,
+            sync,
+        } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
-            nod::commands::daemon::execute(ctx, &flake_path, interval, cli.verbose).await?;
+            let mut options = sync_options(sync, target_args, false);
+            options.verbose = cli.verbose;
+            nod::commands::daemon::execute(ctx, &flake_path, options).await?;
         }
     }
 
     Ok(())
+}
+
+/// Maps a top-level error to the documented exit status (ADR-028).
+///
+/// 0 is success, 2 a configuration error, 3 a refusal before any host was
+/// touched, and 1 everything that failed while acting.
+fn exit_status(error: &anyhow::Error) -> u8 {
+    use nod::domain::errors::NodError;
+    match error.downcast_ref::<NodError>() {
+        Some(NodError::Refused { .. }) => 3,
+        Some(NodError::Config { .. }) => 2,
+        _ => 1,
+    }
+}
+
+/// Builds the reconciler options from the CLI surface.
+fn sync_options(args: SyncArgs, targets: TargetArgs, once: bool) -> SyncOptions {
+    SyncOptions {
+        remote: args.remote,
+        branch: args.branch,
+        interval_secs: args.interval,
+        jitter_percent: args.jitter,
+        targets: targets.target.into_iter().collect(),
+        all: targets.all,
+        tag: targets.tag,
+        role: targets.role,
+        state_dir: args.state_dir,
+        strategy: args.strategy,
+        batch_size: args.batch_size,
+        concurrency: args.concurrency,
+        fail_fast: args.fail_fast,
+        auto_rollback: !args.no_auto_rollback,
+        allow_downgrade: args.allow_downgrade,
+        require_signature: args.require_signature,
+        last_hosts: args.last_hosts,
+        notify: args.notify,
+        json: args.json,
+        verbose: false,
+        dry_run: args.dry_run,
+        once,
+    }
 }

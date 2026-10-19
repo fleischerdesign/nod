@@ -37,8 +37,8 @@ A daemon that silently deploys the whole fleet is the most damaging failure mode
 so there is no implicit fleet default:
 
 - `--target <name|glob>`, `--tag`, `--role`, `--all`, or `local` choose the scope.
-- Without an explicit scope and without `[sync].targets` in `.nod.toml`, the run
-  fails with a configuration error. It never guesses.
+- Without an explicit scope, the run fails with a configuration error. It
+  never guesses. A scope is `--target`/`--tag`/`--role`/`--all`.
 
 ### 3. Trigger model
 
@@ -81,7 +81,9 @@ Per-host outcome states extend ADR-003 with `Skipped` (closure already current),
 ### 6. Health and rollback
 
 - Default health check: the activation returned successfully and
-  `systemctl --failed` is empty on the host within `health_timeout_secs` (60 s).
+  `systemctl --failed` is empty on the host, using the per-host
+  `options.nod.healthChecks` configuration (timeout, systemd units, HTTP/TCP/
+  custom probes). The reconciler adds no second health vocabulary.
 - Optional per-host probes (HTTP, TCP, custom command) live in `.nod.toml` under
   `[hosts.<name>.health]`; a probe failure counts as an unhealthy host.
 - Auto-rollback is **on** by default: an unhealthy host returns to its previous
@@ -96,7 +98,7 @@ depend on. Such hosts are deployed last:
 
 - Default: the host executing `sync` is moved to the final wave when it is among
   the targets.
-- `[sync].last_hosts = ["host", …]` extends that ordering for infrastructure the
+- `--last-host <name>` extends that ordering for infrastructure the
   reconciler needs (gateway, ingress, DNS).
 
 The daemon runs as its own systemd unit, outside any unit it deploys, so a
@@ -124,44 +126,39 @@ applied state is *derived* from closures and must never be trusted over them:
 complete report. A run that starts with a non-empty `in_progress` performs a
 drift check instead of assuming the previous attempt succeeded.
 
-A `flock` on the state directory admits exactly one reconciler per repository.
+A PID lock file in the state directory admits exactly one reconciler per
+repository. A lock whose owner is gone is reclaimed; without a process probe
+(e.g. a non-Linux host) it is reclaimed by age instead.
 
 ### 9. Configuration
 
-All knobs live in `.nod.toml` under `[sync]`, following ADR-004 precedence:
+Every knob is a CLI flag. The daemon's persistent configuration is its systemd
+unit — in a NixOS fleet the module options that render that unit — and not a
+second `.nod.toml [sync]` tier:
 
-```toml
-[sync]
-targets = ["local"]          # required unless --target/--all is given
-remote = "origin"
-branch = "main"
-interval_secs = 60
-jitter_percent = 10
-state_dir = "/var/lib/nod"
-auto_rollback = true
-allow_downgrade = false
-require_signature = false
-health_timeout_secs = 60
-strategy = "batch"           # all | canary | batch
-batch_size = 1
-fail_fast = false
-concurrency = 4
-last_hosts = []
-notify = []                  # commands run after a report; receive JSON on stdin
-
-[hosts.hom-srv-01.health]
-http = ["http://10.10.100.10:8123/manifest.json"]
-timeout_secs = 30
 ```
+remote, branch, interval, jitter, state-dir,
+strategy, batch-size, concurrency, fail-fast, no-auto-rollback,
+allow-downgrade, require-signature, last-host, notify, json, dry-run
+```
+
+Rationale: a daemon started by systemd already has one declarative source for
+its arguments. Duplicating them in `.nod.toml` would create two places to
+change one interval and force a precedence rule nobody can remember on a host
+nobody edited. Interactive `nod sync` takes the same flags from the shell.
+
+A unit that wraps these flags is a template, not part of the binary: the
+NixOS module in the consuming fleet owns it.
 
 ### 10. CLI
 
 ```
-nod sync   [--once] [--dry-run] [--interval S] [--target T | --all]
-           [--strategy S] [--batch-size N] [--concurrency N]
-           [--auto-rollback | --no-auto-rollback] [--allow-downgrade]
-           [--state-dir PATH] [--health-timeout S] [--json]
-nod daemon [--interval S] [--state-dir PATH] [--json]
+nod sync   [--once] [--dry-run] [--target T | --all] [--tag TAG] [--role ROLE]
+           [--interval S] [--jitter P] [--state-dir PATH]
+           [--strategy S] [--batch-size N] [--concurrency N] [--fail-fast]
+           [--no-auto-rollback] [--allow-downgrade] [--require-signature]
+           [--last-host HOST] [--notify COMMAND] [--json]
+nod daemon [same flags, without --once]
 ```
 
 `--dry-run` reports drift per host — which hosts would change and to which
@@ -221,14 +218,23 @@ Extends ADR-027:
 
 ## Implementation
 
-Four PRs, each independently reviewable and green:
+Delivered in one change, because the pieces only mean something together:
 
-1. **Core:** `SyncState`, reconcile use case, git adapter (ls-remote, fetch,
-   ff-only, ancestry), tests for no-change/change/refusal/backoff.
-2. **CLI and config:** `[sync]` section, new flags, `--dry-run` drift report,
-   `--json`, exit codes, removal of the fetch-only path.
-3. **Deployment:** integrate `DeployFleetUseCase`, `Skipped`/`Unreachable`/`Refused`
-   states, self-deploy ordering, health probes, auto-rollback wiring.
-4. **Daemon and docs:** systemd unit template, crash recovery from `in_progress`,
-   audit and notify hooks, operator documentation including the branch-protection
-   requirement.
+1. **Domain:** `GitPort`, `SyncStatePort`, `SyncState`/`SyncReport`, extended
+   `SyncOptions`, `NodError::Refused`.
+2. **Adapters:** `CliGit` (ls-remote, fetch, fast-forward only, ancestry,
+   signature) and `JsonSyncStateStore` with an atomic write and a PID lock.
+3. **Application:** `SyncReconcilerUseCase` — preflight, revision gate,
+   signature and downgrade checks, drift filtering, deployment through the
+   existing `DeployFleetUseCase`, self-deploy ordering, report and backoff.
+4. **Presentation:** `nod sync`, `nod daemon`, exit statuses (0/1/2/3), audit
+   entries, notification hooks.
+
+Deliberately left out, and named here so the omission is a decision:
+
+- A `.nod.toml [sync]` section (see §9).
+- A push/webhook trigger; the polling gate is the base mechanism.
+- Health-probe definitions of its own; the fleet's `options.nod.healthChecks`
+  stays the single vocabulary.
+- A systemd unit template in this repository; the consuming fleet's NixOS
+  module renders it from the flags.

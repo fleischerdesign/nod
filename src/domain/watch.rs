@@ -1,6 +1,7 @@
 //! Domain entities for file watching and GitOps reconciliation (ADR-022).
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Options controlling interactive watch mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,40 @@ pub struct SyncOptions {
     pub branch: String,
     /// Reconciliation interval in seconds.
     pub interval_secs: u64,
+    /// Random spread applied to the interval, in percent (0-50).
+    pub jitter_percent: u8,
+    /// Target specifiers; empty means the caller must not guess (ADR-028).
+    pub targets: Vec<String>,
+    /// Select every discovered host.
+    pub all: bool,
+    /// Narrow the selection to hosts carrying this tag.
+    pub tag: Option<String>,
+    /// Narrow the selection to hosts with this role.
+    pub role: Option<String>,
+    /// Directory holding the reconciler state document.
+    pub state_dir: PathBuf,
+    /// Rollout strategy (`all` / `canary` / `batch`).
+    pub strategy: String,
+    /// Wave size for `batch`.
+    pub batch_size: usize,
+    /// Maximum in-flight hosts.
+    pub concurrency: usize,
+    /// Abort the run on the first failure.
+    pub fail_fast: bool,
+    /// Roll an unhealthy host back to its previous generation.
+    pub auto_rollback: bool,
+    /// Allow integrating a revision that is not a descendant of the applied one.
+    pub allow_downgrade: bool,
+    /// Require a verified signature on the integrated revision.
+    pub require_signature: bool,
+    /// Hosts that must be deployed after every other target.
+    pub last_hosts: Vec<String>,
+    /// Commands run after each cycle; they receive the report as JSON on stdin.
+    pub notify: Vec<String>,
+    /// Emit the report as JSON.
+    pub json: bool,
+    /// Emit per-step detail while building and deploying.
+    pub verbose: bool,
     /// Preview git changes and build without activating.
     pub dry_run: bool,
     /// Run once and exit rather than looping.
@@ -40,7 +75,24 @@ impl Default for SyncOptions {
         Self {
             remote: "origin".to_string(),
             branch: "main".to_string(),
-            interval_secs: 300,
+            interval_secs: 60,
+            jitter_percent: 10,
+            targets: Vec::new(),
+            all: false,
+            tag: None,
+            role: None,
+            state_dir: PathBuf::from("/var/lib/nod"),
+            strategy: "batch".to_string(),
+            batch_size: 1,
+            concurrency: 4,
+            fail_fast: false,
+            auto_rollback: true,
+            allow_downgrade: false,
+            require_signature: false,
+            last_hosts: Vec::new(),
+            notify: Vec::new(),
+            json: false,
+            verbose: false,
             dry_run: false,
             once: false,
         }

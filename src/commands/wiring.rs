@@ -15,13 +15,14 @@ use crate::domain::errors::NodError;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::deployment::local_deployer::LocalDeployer;
 use crate::infrastructure::deployment::ssh_cli_deployer::SshCliDeployer;
+use crate::infrastructure::git::CliGit;
 use crate::infrastructure::nix::cli_evaluator::NixCliEvaluator;
 use crate::infrastructure::nix::cli_flake::NixCliFlakeStore;
 use crate::infrastructure::provision::NixosAnywhereProvisioner;
 use crate::infrastructure::secret::PluggableSecretStore;
+use crate::infrastructure::state::{JsonSyncStateStore, SyncLock};
 use crate::infrastructure::storage::json_audit_store::JsonAuditStore;
 
-/// Builds the complete production graph (ADR-008, ADR-013, ADR-014, ADR-018, ADR-021). This is the single
 /// composition root: `main` calls it for every command arm and passes the
 /// resulting context into `execute`.
 ///
@@ -43,6 +44,22 @@ pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppC
             .with_provisioner_port(Arc::new(NixosAnywhereProvisioner::new()))
             .with_stores(local, ssh),
     )
+}
+
+/// Binds the reconciler ports on top of the production graph (ADR-028).
+///
+/// The state directory is per invocation because it comes from the resolved
+/// sync options rather than from the flake; the composition root still owns
+/// the concrete adapters.
+pub fn with_sync(ctx: AppContext, state_dir: &Path) -> Result<AppContext, NodError> {
+    Ok(ctx
+        .with_git_port(Arc::new(CliGit::new()))
+        .with_sync_state(Arc::new(JsonSyncStateStore::new(state_dir))))
+}
+
+/// Acquires the single-reconciler lock for `state_dir`.
+pub fn sync_lock(state_dir: &Path) -> Result<SyncLock, NodError> {
+    SyncLock::acquire(state_dir)
 }
 
 #[cfg(test)]

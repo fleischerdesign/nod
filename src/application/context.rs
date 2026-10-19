@@ -13,10 +13,12 @@ use crate::domain::ports::config_store::ConfigStorePort;
 use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ports::evaluator::EvaluatorPort;
 use crate::domain::ports::flake::FlakePort;
+use crate::domain::ports::git::GitPort;
 use crate::domain::ports::health_checker::HealthCheckerPort;
 use crate::domain::ports::provisioner::ProvisionerPort;
 use crate::domain::ports::secret::SecretPort;
 use crate::domain::ports::store::StorePort;
+use crate::domain::ports::sync_state::SyncStatePort;
 
 /// Resolves every port a use case may need from one seeded container.
 pub struct AppContext {
@@ -31,6 +33,8 @@ pub struct AppContext {
     ssh_store: Option<Arc<dyn StorePort>>,
     secret_port: Option<Arc<dyn SecretPort>>,
     provisioner_port: Option<Arc<dyn ProvisionerPort>>,
+    git_port: Option<Arc<dyn GitPort>>,
+    sync_state: Option<Arc<dyn SyncStatePort>>,
 }
 
 impl AppContext {
@@ -53,6 +57,8 @@ impl AppContext {
             ssh_store: None,
             secret_port: None,
             provisioner_port: None,
+            git_port: None,
+            sync_state: None,
         }
     }
 
@@ -133,6 +139,32 @@ impl AppContext {
         self.audit_store
             .clone()
             .ok_or_else(|| NodError::missing_binding("AuditStorePort"))
+    }
+
+    /// Registers the Git port used by the reconciler.
+    pub fn with_git_port(mut self, value: Arc<dyn GitPort>) -> Self {
+        self.git_port = Some(value);
+        self
+    }
+
+    /// Resolves the Git port, or raises a config error when missing.
+    pub fn git_port(&self) -> Result<Arc<dyn GitPort>, NodError> {
+        self.git_port
+            .clone()
+            .ok_or_else(|| NodError::missing_binding("GitPort"))
+    }
+
+    /// Registers the reconciler state store.
+    pub fn with_sync_state(mut self, value: Arc<dyn SyncStatePort>) -> Self {
+        self.sync_state = Some(value);
+        self
+    }
+
+    /// Resolves the reconciler state store, or raises a config error when missing.
+    pub fn sync_state(&self) -> Result<Arc<dyn SyncStatePort>, NodError> {
+        self.sync_state
+            .clone()
+            .ok_or_else(|| NodError::missing_binding("SyncStatePort"))
     }
 
     /// Registers a flake port.

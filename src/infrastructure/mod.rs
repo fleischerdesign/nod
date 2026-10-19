@@ -2,9 +2,11 @@
 
 pub mod config;
 pub mod deployment;
+pub mod git;
 pub mod health;
 pub mod nix;
 pub mod provision;
 pub mod quality_gate;
 pub mod secret;
+pub mod state;
 pub mod storage;

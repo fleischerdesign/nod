@@ -26,12 +26,21 @@ pub enum NodError {
     /// Secrets verification or rekeying failures.
     #[error("secret error: {detail}")]
     Secret { detail: String },
+    /// The reconciler refused to act before touching the fleet (ADR-028).
+    #[error("sync refused: {detail}")]
+    Refused { detail: String },
     /// Invariant / programming errors that should never surface in practice.
     #[error("internal error: {detail}")]
     Internal { detail: String },
 }
 
 impl NodError {
+    /// Raised when the reconciler refuses to act before deploying anything.
+    pub fn refused(detail: impl Into<String>) -> Self {
+        NodError::Refused {
+            detail: detail.into(),
+        }
+    }
     /// Raised when Nix host discovery evaluation fails.
     pub fn discovery_failure(detail: impl Into<String>) -> Self {
         NodError::evaluation(format!(
