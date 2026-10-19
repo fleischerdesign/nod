@@ -124,7 +124,7 @@ impl From<SshArgs> for crate::domain::config::CliOverrides {
 #[derive(Parser, Debug)]
 #[command(
     name = "nod",
-    version = "2.0.0",
+    version,
     about = "Universal Nix Orchestration & Deployment Engine",
     long_about = "Universal, zero-config, high-performance Nix Flake deployment, orchestration, and monitoring engine."
 )]
