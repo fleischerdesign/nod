@@ -70,7 +70,16 @@ impl DeployerPort for SshCliDeployer {
         })
         .await?;
         if !output.status.success() {
-            return Ok(None);
+            // A failed query is not "no live closure": conflating the two made
+            // a status reader without the deploy key report every remote host
+            // as drifted. The caller must be able to tell "unknown" from
+            // "absent".
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(NodError::deployment(format!(
+                "cannot read the live closure of {}: {}",
+                host.name,
+                stderr.trim()
+            )));
         }
         let path = String::from_utf8_lossy(&output.stdout);
         let path = path.trim();

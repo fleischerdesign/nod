@@ -100,7 +100,23 @@ pub async fn inspect_hosts(
                 .build_toplevel(&flake, &host.name, host.closure_attr.clone(), None, verbose)
                 .await?;
             let profile = ctx.resolved_profile(&host).await?;
-            let current = deployer.current_closure(&host, &profile).await?;
+            let current = match deployer.current_closure(&host, &profile).await {
+                Ok(current) => current,
+                Err(error) => {
+                    // The host answered the probe but its live closure could not
+                    // be read. That is "unknown", not "drifted": reporting a
+                    // permission or transport failure as drift would make the
+                    // status lie about the fleet.
+                    return Ok(HostInspection {
+                        host,
+                        reachability: Reachability::Unreachable {
+                            detail: Some(error.to_string()),
+                        },
+                        target: None,
+                        current: None,
+                    });
+                }
+            };
 
             Ok(HostInspection {
                 host,
