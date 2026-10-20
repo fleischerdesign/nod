@@ -144,6 +144,15 @@ impl SyncHostResult {
             | SyncHostResult::Skipped => false,
         }
     }
+
+    /// `true` when the host failed in a way that needs operator attention.
+    ///
+    /// An unreachable host is not a failure: it is skipped and retried, and a
+    /// cycle that only saw unreachable hosts must not back off or claim the
+    /// fleet is current.
+    pub fn is_failure(self) -> bool {
+        matches!(self, SyncHostResult::Failed | SyncHostResult::RolledBack)
+    }
 }
 
 /// One host's result within a cycle.

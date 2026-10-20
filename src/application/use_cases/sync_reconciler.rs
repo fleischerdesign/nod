@@ -200,16 +200,26 @@ impl SyncReconcilerUseCase {
         }
 
         if changed.is_empty() {
+            let settled = reports.iter().all(|host| host.result.is_settled());
             let report = SyncReport {
                 revision: head.clone(),
                 previous_revision: Some(local_before),
-                applied: true,
+                applied: settled,
                 hosts: reports,
                 refused: None,
                 error: None,
                 backoff_secs: 0,
             };
-            state.record_success(head);
+            if settled {
+                state.record_success(head);
+            } else {
+                // Nothing to deploy, but the fleet was not fully observed: keep
+                // the applied revision unset so the next cycle checks again.
+                // Marking this as applied is what would silence an offline host
+                // forever.
+                state.last_attempt_rev = Some(head);
+                state.in_progress = None;
+            }
             state_store.save(&state).await?;
             self.notify(&report, options).await;
             return Ok(report);
@@ -230,13 +240,14 @@ impl SyncReconcilerUseCase {
         let mut failed = false;
         for outcome in &summary.outcomes {
             let mapped = Self::map_outcome(outcome);
-            if !mapped.result.is_settled() {
+            if mapped.result.is_failure() {
                 failed = true;
             }
             reports.push(mapped);
         }
 
-        let applied = !failed;
+        let settled = reports.iter().all(|host| host.result.is_settled());
+        let applied = settled && !failed;
         let mut report = SyncReport {
             revision: head.clone(),
             previous_revision: Some(local_before),
@@ -247,18 +258,23 @@ impl SyncReconcilerUseCase {
             backoff_secs: 0,
         };
 
-        if applied {
-            state.record_success(head);
-        } else {
+        if failed {
             report.backoff_secs = state.record_failure(now_secs());
             report.error = Some(format!(
-                "{} host(s) did not reach a settled state",
+                "{} host(s) failed",
                 report
                     .hosts
                     .iter()
-                    .filter(|h| !h.result.is_settled())
+                    .filter(|h| h.result.is_failure())
                     .count()
             ));
+        } else if settled {
+            state.record_success(head);
+        } else {
+            // Some hosts were unreachable: retry next cycle without backoff,
+            // and without claiming the fleet reached this revision.
+            state.last_attempt_rev = Some(head);
+            state.in_progress = None;
         }
         state_store.save(&state).await?;
         self.notify(&report, options).await;
@@ -776,10 +792,74 @@ mod tests {
             .unwrap();
 
         assert!(
-            report.applied,
-            "an unreachable host must not fail the whole cycle"
+            !report.applied,
+            "an unobserved fleet is not a reconciled fleet"
+        );
+        assert!(
+            report.error.is_none(),
+            "an unreachable host is not a failure"
         );
         assert_eq!(report.hosts.len(), 1);
         assert_eq!(report.hosts[0].result, SyncHostResult::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_cycle_does_not_mark_the_fleet_applied() {
+        let mut git = MockGit::new();
+        git.expect_is_dirty().returning(|_| Ok(false));
+        git.expect_local_head().returning(|_| Ok("aaa".into()));
+        git.expect_remote_head()
+            .returning(|_, _, _| Ok("bbb".into()));
+        git.expect_fetch().returning(|_, _, _| Ok(()));
+        git.expect_is_ancestor().returning(|_, _, _| Ok(true));
+        git.expect_fast_forward()
+            .returning(|_, _, _| Ok("bbb".into()));
+
+        let mut state = SyncState::new("origin/main", "main");
+        state.record_success("aaa");
+        let saved = std::sync::Arc::new(std::sync::Mutex::new(Vec::<SyncState>::new()));
+        let saved_for_load = saved.clone();
+        let mut store = MockState::new();
+        store.expect_load().returning(move || {
+            let current = saved_for_load.lock().unwrap().last().cloned();
+            Ok(Some(current.unwrap_or_else(|| {
+                let mut seed = SyncState::new("origin/main", "main");
+                seed.record_success("aaa");
+                seed
+            })))
+        });
+        let saved_for_save = saved.clone();
+        store.expect_save().returning(move |next| {
+            saved_for_save.lock().unwrap().push(next.clone());
+            Ok(())
+        });
+
+        let mut evaluator = MockEvaluator::new();
+        evaluator.expect_build_toplevel().times(0);
+
+        let mut deployer = MockDeployer::new();
+        deployer
+            .expect_check_reachability()
+            .returning(|_| Ok(false));
+
+        let ctx = context(git, store, evaluator, deployer);
+        SyncReconcilerUseCase::new(ctx)
+            .reconcile_once(Path::new("/repo"), &options(), || async {
+                Ok(vec![host()])
+            })
+            .await
+            .unwrap();
+
+        let last = saved.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            last.last_applied_rev.as_deref(),
+            Some("aaa"),
+            "an unreachable host must not advance the applied revision"
+        );
+        assert_eq!(
+            last.last_attempt_rev.as_deref(),
+            Some("bbb"),
+            "the attempt is still recorded for the operator"
+        );
     }
 }

@@ -36,14 +36,21 @@ pub async fn execute(
     if let Some(reason) = &report.refused {
         return Err(NodError::refused(reason.clone()));
     }
-    if !report.applied {
+    // Unreachable or skipped hosts are reported, not fatal: a laptop that is
+    // off must not make `nod sync --once` fail. Only a host that actually
+    // failed - or a cycle-level error - is an unsuccessful run.
+    let failed = report
+        .hosts
+        .iter()
+        .filter(|host| host.result.is_failure())
+        .count();
+    if failed > 0 || report.error.is_some() {
+        let detail = report
+            .error
+            .clone()
+            .unwrap_or_else(|| format!("{failed} host(s) failed"));
         return Err(NodError::deployment(format!(
-            "{} host(s) did not settle at revision {}",
-            report
-                .hosts
-                .iter()
-                .filter(|h| !h.result.is_settled())
-                .count(),
+            "{detail} at revision {}",
             report.revision
         )));
     }
