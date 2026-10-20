@@ -118,6 +118,15 @@ pub struct SyncLock {
 }
 
 impl SyncLock {
+    /// `true` when a live reconciler currently holds the lock for `dir`.
+    ///
+    /// Read-only commands use this to say that the checkout may move
+    /// underneath them instead of waiting for the writer.
+    pub fn held(dir: &Path) -> bool {
+        let path = dir.join(LOCK_FILE);
+        path.exists() && !lock_is_stale(&path)
+    }
+
     /// Acquires the lock, reclaiming it when the recorded owner is dead.
     pub fn acquire(dir: &Path) -> Result<Self, NodError> {
         fs::create_dir_all(dir).map_err(|e| {

@@ -62,6 +62,11 @@ pub fn sync_lock(state_dir: &Path) -> Result<SyncLock, NodError> {
     SyncLock::acquire(state_dir)
 }
 
+/// Whether a live reconciler currently holds the lock for `state_dir`.
+pub fn sync_lock_held(state_dir: &Path) -> bool {
+    SyncLock::held(state_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

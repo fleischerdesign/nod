@@ -26,7 +26,17 @@ pub async fn execute(
 ) -> Result<(), NodError> {
     validate(&options)?;
     let ctx = wiring::with_sync(ctx, &options.state_dir)?;
-    let _lock = wiring::sync_lock(&options.state_dir)?;
+    // A preview never mutates the fleet or the state, so it must not wait for
+    // the running reconciler's exclusive lock - that lock never becomes free
+    // while the daemon runs. It says what it cannot promise instead.
+    let _lock = if options.dry_run {
+        if wiring::sync_lock_held(&options.state_dir) {
+            eprintln!("note: a reconciler is running; the preview reflects the current checkout");
+        }
+        None
+    } else {
+        Some(wiring::sync_lock(&options.state_dir)?)
+    };
     let ctx = Arc::new(ctx);
 
     let report = cycle(&ctx, flake_path, &options).await?;
