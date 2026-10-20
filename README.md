@@ -188,3 +188,16 @@ nix build
 * **Specifications**: [`docs/spec/`](docs/spec/)
 * **Architecture Roadmap**: [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md)
 * **Architecture Overview**: [`docs/architecture/overview.md`](docs/architecture/overview.md)
+
+---
+
+## License
+
+Dual-licensed under either of
+
+* [MIT](LICENSE-MIT)
+* [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option. Unless you explicitly state otherwise, any contribution you
+intentionally submit for inclusion in this project shall be dual-licensed as
+above, without any additional terms or conditions.
