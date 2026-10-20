@@ -95,6 +95,10 @@ pub struct SyncArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Show what the activation would do per host (implies --dry-run)
+    #[arg(long)]
+    pub plan: bool,
+
     /// Print the report as JSON
     #[arg(long)]
     pub json: bool,
@@ -787,6 +791,36 @@ pub enum Commands {
 
         #[command(flatten)]
         sync: SyncArgs,
+    },
+
+    /// Show the reconciler's view: revisions, stored state and optional drift
+    SyncStatus {
+        #[command(flatten)]
+        target_args: TargetArgs,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+
+        /// Upstream Git remote name
+        #[arg(long, default_value = "origin")]
+        remote: String,
+
+        /// Target Git branch
+        #[arg(long, default_value = "main")]
+        branch: String,
+
+        /// Directory holding the reconciler state document
+        #[arg(long, default_value = "/var/lib/nod")]
+        state_dir: PathBuf,
+
+        /// Compare every selected host's closure (builds them)
+        #[arg(long)]
+        drift: bool,
+
+        /// Print the status as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 

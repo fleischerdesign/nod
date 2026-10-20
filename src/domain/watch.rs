@@ -66,6 +66,8 @@ pub struct SyncOptions {
     pub verbose: bool,
     /// Preview git changes and build without activating.
     pub dry_run: bool,
+    /// Preview the activation per host (implies `dry_run`).
+    pub plan: bool,
     /// Run once and exit rather than looping.
     pub once: bool,
 }
@@ -94,6 +96,7 @@ impl Default for SyncOptions {
             json: false,
             verbose: false,
             dry_run: false,
+            plan: false,
             once: false,
         }
     }

@@ -31,6 +31,7 @@ pub mod status;
 pub mod store;
 pub mod switch;
 pub mod sync;
+pub mod sync_status;
 pub mod targets;
 pub mod test;
 pub mod update;

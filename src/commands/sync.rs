@@ -108,7 +108,7 @@ pub(crate) async fn cycle(
 ///
 /// There is no implicit scope: `--all`, at least one target, or tag/role
 /// filters must name the fleet explicitly (ADR-028).
-pub(crate) fn select_hosts(
+pub fn select_hosts(
     hosts: Vec<HostEntity>,
     options: &SyncOptions,
     local_hostname: &str,

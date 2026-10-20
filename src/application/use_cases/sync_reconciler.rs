@@ -23,26 +23,14 @@ use tokio::process::Command;
 use crate::application::context::AppContext;
 use crate::application::pipeline::state_machine::DeploymentState;
 use crate::application::use_cases::deploy_fleet::{DeployFleetUseCase, HostOutcome};
+use crate::application::use_cases::sync_inspect::{inspect_hosts, Reachability};
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 use crate::domain::plan::{DeploymentAction, DeploymentOptions, RolloutStrategy};
-use crate::domain::sync::{now_secs, SyncHostReport, SyncHostResult, SyncReport, SyncState};
+use crate::domain::sync::{
+    now_secs, SyncHostReport, SyncHostResult, SyncPlanEntry, SyncReport, SyncState,
+};
 use crate::domain::watch::SyncOptions;
-
-/// Per-host result of the drift sweep, before any deployment happens.
-enum DriftOutcome {
-    /// The built closure differs from the live one.
-    Changed(Box<HostEntity>),
-    /// The host already runs the built closure.
-    Unchanged(String),
-    /// The host did not answer.
-    Unreachable {
-        /// Host name.
-        host: String,
-        /// Probe detail, when the probe failed rather than answering "no".
-        detail: Option<String>,
-    },
-}
 
 /// Reconciles a repository into the running fleet.
 pub struct SyncReconcilerUseCase {
@@ -137,6 +125,7 @@ impl SyncReconcilerUseCase {
                     refused: None,
                     error: None,
                     backoff_secs: 0,
+                    plan: Vec::new(),
                 };
                 state.record_success(report.revision.clone());
                 state_store.save(&state).await?;
@@ -175,6 +164,7 @@ impl SyncReconcilerUseCase {
                     refused: None,
                     error: None,
                     backoff_secs: 0,
+                    plan: Vec::new(),
                 };
                 self.notify(&report, options).await;
                 return Ok(report);
@@ -238,9 +228,54 @@ impl SyncReconcilerUseCase {
             ));
         }
 
-        let (mut changed, mut reports) = self
-            .drift(flake_path, hosts, options.concurrency, options.verbose)
-            .await?;
+        let self_host = hosts
+            .iter()
+            .find(|host| host.is_self)
+            .map(|host| host.name.clone());
+        let inspections = inspect_hosts(
+            &self.ctx,
+            flake_path,
+            hosts,
+            options.concurrency,
+            options.verbose,
+        )
+        .await?;
+
+        let mut changed = Vec::new();
+        let mut reports = Vec::new();
+        let mut plan = Vec::new();
+        for inspection in inspections {
+            match &inspection.reachability {
+                Reachability::Unreachable { detail } => {
+                    let mut report = SyncHostReport::new(
+                        inspection.host.name.clone(),
+                        SyncHostResult::Unreachable,
+                    );
+                    if let Some(detail) = detail {
+                        report = report.with_detail(detail.clone());
+                    }
+                    reports.push(report);
+                }
+                Reachability::Reachable => {
+                    if inspection.drifted() {
+                        if options.plan || options.dry_run {
+                            plan.push(SyncPlanEntry {
+                                host: inspection.host.name.clone(),
+                                current: inspection.current.clone(),
+                                target: inspection.target.clone().unwrap_or_default(),
+                                units: None,
+                            });
+                        }
+                        changed.push(inspection.host);
+                    } else {
+                        reports.push(SyncHostReport::new(
+                            inspection.host.name.clone(),
+                            SyncHostResult::Unchanged,
+                        ));
+                    }
+                }
+            }
+        }
         changed = Self::order_last(changed, &options.last_hosts);
 
         if options.dry_run {
@@ -250,6 +285,16 @@ impl SyncReconcilerUseCase {
                     SyncHostResult::Skipped,
                 ));
             }
+            if options.plan {
+                // Unit detail is only honest for a closure that exists on this
+                // host: `dry-activate` is a local operation, and copying a
+                // closure to a remote host to ask it would be a deployment.
+                if let Some(self_host) = self_host.as_deref() {
+                    for entry in plan.iter_mut().filter(|entry| entry.host == self_host) {
+                        entry.units = Self::activation_units(&entry.target).await;
+                    }
+                }
+            }
             let report = SyncReport {
                 revision: head.clone(),
                 previous_revision: Some(local_before.clone()),
@@ -258,6 +303,7 @@ impl SyncReconcilerUseCase {
                 refused: None,
                 error: None,
                 backoff_secs: 0,
+                plan,
             };
             self.notify(&report, options).await;
             return Ok(report);
@@ -278,6 +324,7 @@ impl SyncReconcilerUseCase {
                 refused: None,
                 error: None,
                 backoff_secs: 0,
+                plan: Vec::new(),
             };
             if settled {
                 state.record_success(head);
@@ -329,6 +376,7 @@ impl SyncReconcilerUseCase {
             refused: None,
             error: None,
             backoff_secs: 0,
+            plan: Vec::new(),
         };
 
         if failed {
@@ -392,82 +440,47 @@ impl SyncReconcilerUseCase {
     /// reports are sorted by host name so the output order does not depend on
     /// completion order. A build failure aborts the cycle: partial drift
     /// information would make the report lie about what the fleet runs.
-    async fn drift(
-        &self,
-        flake_path: &Path,
-        hosts: Vec<HostEntity>,
-        concurrency: usize,
-        verbose: bool,
-    ) -> Result<(Vec<HostEntity>, Vec<SyncHostReport>), NodError> {
-        let evaluator = self.ctx.evaluator();
-        let permits = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
-        let mut tasks = tokio::task::JoinSet::new();
-
-        for host in hosts {
-            let evaluator = evaluator.clone();
-            let ctx = self.ctx.clone();
-            let permits = permits.clone();
-            let flake = flake_path.to_path_buf();
-            tasks.spawn(async move {
-                let _permit = permits.acquire().await.ok();
-                let deployer = ctx.deployer_for(&host);
-
-                // An unreachable host is not a failed host: it is skipped and
-                // retried next cycle. Probing before building keeps an offline
-                // laptop from turning every cycle into a failed deployment.
-                match deployer.check_reachability(&host).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Ok(DriftOutcome::Unreachable {
-                            host: host.name,
-                            detail: None,
-                        })
-                    }
-                    Err(error) => {
-                        return Ok(DriftOutcome::Unreachable {
-                            host: host.name,
-                            detail: Some(error.to_string()),
-                        })
-                    }
-                }
-
-                let built = evaluator
-                    .build_toplevel(&flake, &host.name, host.closure_attr.clone(), None, verbose)
-                    .await?;
-                let profile = ctx.resolved_profile(&host).await?;
-                let current = deployer.current_closure(&host, &profile).await?;
-
-                Ok::<_, NodError>(if current.as_deref() == Some(built.as_path()) {
-                    DriftOutcome::Unchanged(host.name)
-                } else {
-                    DriftOutcome::Changed(Box::new(host))
-                })
-            });
+    /// Runs the target closure's `dry-activate` and keeps the unit lines.
+    ///
+    /// Only meaningful for a closure present on this host; a remote host would
+    /// have to receive the closure first, which is a deployment rather than a
+    /// plan. A failure to run it is not a plan failure: the entry simply has no
+    /// unit detail.
+    async fn activation_units(closure: &Path) -> Option<String> {
+        let binary = closure.join("bin/switch-to-configuration");
+        if !binary.exists() {
+            return None;
         }
+        let output = Command::new(binary)
+            .arg("dry-activate")
+            .output()
+            .await
+            .ok()?;
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push('\n');
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        Self::unit_summary(&text)
+    }
 
-        let mut changed = Vec::new();
-        let mut reports = Vec::new();
-        while let Some(joined) = tasks.join_next().await {
-            let outcome = joined
-                .map_err(|error| NodError::internal(format!("drift task failed: {error}")))??;
-            match outcome {
-                DriftOutcome::Changed(host) => changed.push(*host),
-                DriftOutcome::Unchanged(host) => {
-                    reports.push(SyncHostReport::new(host, SyncHostResult::Unchanged));
-                }
-                DriftOutcome::Unreachable { host, detail } => {
-                    let mut report = SyncHostReport::new(host, SyncHostResult::Unreachable);
-                    if let Some(detail) = detail {
-                        report = report.with_detail(detail);
-                    }
-                    reports.push(report);
-                }
-            }
+    /// Keeps the lines that name a unit or a lifecycle action.
+    fn unit_summary(output: &str) -> Option<String> {
+        let mut lines: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                !line.is_empty()
+                    && (line.contains("unit")
+                        || line.contains("restart")
+                        || line.contains("start")
+                        || line.contains("stop"))
+            })
+            .collect();
+        lines.dedup();
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
         }
-
-        changed.sort_by(|left, right| left.name.cmp(&right.name));
-        reports.sort_by(|left, right| left.host.cmp(&right.host));
-        Ok((changed, reports))
     }
 
     /// Orders hosts so infrastructure the reconciler needs is deployed last.
@@ -1055,5 +1068,19 @@ mod tests {
             "a reachable, current host settles the fleet"
         );
         assert_eq!(report.hosts[0].result, SyncHostResult::Unchanged);
+    }
+
+    #[test]
+    fn unit_summary_keeps_lifecycle_lines_and_drops_noise() {
+        let output = "Checking switch inhibitors... done\nstopping the following units: a.service\nstarting the following units: b.service\nunrelated chatter\n";
+        let summary = SyncReconcilerUseCase::unit_summary(output).unwrap();
+        assert!(summary.contains("a.service"), "got: {summary}");
+        assert!(summary.contains("b.service"), "got: {summary}");
+        assert!(!summary.contains("unrelated"), "got: {summary}");
+    }
+
+    #[test]
+    fn unit_summary_is_none_without_lifecycle_lines() {
+        assert!(SyncReconcilerUseCase::unit_summary("nothing to do here\n").is_none());
     }
 }

@@ -9,6 +9,7 @@
 //!   presentation never has to know how the deployment pipeline reports.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Version of the on-disk state document.
@@ -206,6 +207,60 @@ pub struct SyncReport {
     pub error: Option<String>,
     /// Seconds the reconciler will wait before the next attempt.
     pub backoff_secs: u64,
+    /// What a plan would do per host; only populated for dry-run and plan mode.
+    #[serde(default)]
+    pub plan: Vec<SyncPlanEntry>,
+}
+
+/// One host's entry in a deployment plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncPlanEntry {
+    /// Host name.
+    pub host: String,
+    /// Closure the host runs now, when known.
+    pub current: Option<PathBuf>,
+    /// Closure the host would run.
+    pub target: PathBuf,
+    /// Units the activation would start, restart or stop, when the closure is
+    /// available locally (`switch-to-configuration dry-activate`).
+    #[serde(default)]
+    pub units: Option<String>,
+}
+
+/// One host's line in a status report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncHostStatus {
+    /// Host name.
+    pub host: String,
+    /// Whether the built closure differs from the live one.
+    pub drifted: bool,
+    /// Whether the host did not answer.
+    pub unreachable: bool,
+    /// Live closure, when known.
+    pub current: Option<String>,
+    /// Declared closure, when the host answered.
+    pub target: Option<String>,
+}
+
+/// Snapshot of the reconciler's view: revisions, state and optional drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStatus {
+    /// Commit checked out in the reconciler's repository.
+    pub local_revision: String,
+    /// Commit the remote branch points at, when reachable.
+    pub remote_revision: Option<String>,
+    /// Revision the last settled cycle recorded.
+    pub applied_revision: Option<String>,
+    /// Whether the applied revision differs from the remote one; `None` when
+    /// the remote could not be read.
+    pub behind: Option<bool>,
+    /// Seconds until the next attempt, when backing off.
+    pub backoff_secs: u64,
+    /// Hosts the last cycle could not reach.
+    pub unreachable: Vec<String>,
+    /// Per-host drift, populated on request.
+    #[serde(default)]
+    pub hosts: Vec<SyncHostStatus>,
 }
 
 impl SyncReport {
@@ -219,6 +274,7 @@ impl SyncReport {
             refused: Some(reason.into()),
             error: None,
             backoff_secs: 0,
+            plan: Vec::new(),
         }
     }
 
@@ -232,6 +288,7 @@ impl SyncReport {
             refused: None,
             error: Some(error.into()),
             backoff_secs: 0,
+            plan: Vec::new(),
         }
     }
 

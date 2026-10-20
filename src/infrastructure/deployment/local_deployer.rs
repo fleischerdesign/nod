@@ -35,8 +35,63 @@ fn privileged(program: &str, root: bool) -> Command {
     }
 }
 
-/// Verifies the freshly activated local system.
+/// Runs the activation, detached from this unit's control group when possible.
 ///
+/// Activating the host that runs the daemon stops the daemon's own unit, and a
+/// direct child would be killed with it. A root activation therefore goes
+/// through a transient systemd unit; non-root or non-systemd hosts keep the
+/// direct (sudo) call.
+async fn activate(
+    host: &HostEntity,
+    switch_bin: &Path,
+    action: &str,
+    root: bool,
+) -> std::io::Result<std::process::ExitStatus> {
+    let program = switch_bin.to_str().unwrap_or_default();
+
+    if root && Path::new("/run/systemd/system").is_dir() {
+        let unit = format!(
+            "nod-activate-{}-{}",
+            sanitize_unit_name(&host.name),
+            std::process::id()
+        );
+        let status = Command::new("systemd-run")
+            .args([
+                "--quiet",
+                "--collect",
+                "--wait",
+                "--pipe",
+                "--unit",
+                &unit,
+                "--property=Type=oneshot",
+                program,
+                action,
+            ])
+            .status()
+            .await;
+        if let Ok(status) = status {
+            return Ok(status);
+        }
+        // No systemd-run or it refused: fall back to the direct call.
+    }
+
+    privileged(program, root).arg(action).status().await
+}
+
+/// Maps a host name onto the character set systemd accepts in a unit name.
+fn sanitize_unit_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Verifies the freshly activated local system.
 async fn verify_local_health(host: &HostEntity) -> Result<(), NodError> {
     use crate::infrastructure::health::probe;
 
@@ -152,10 +207,7 @@ impl DeployerPort for LocalDeployer {
             }
 
             let switch_bin = closure.join("bin/switch-to-configuration");
-            privileged(switch_bin.to_str().unwrap_or_default(), root)
-                .args([action])
-                .status()
-                .await
+            activate(host, &switch_bin, action, root).await
         };
 
         if status.is_err() {
@@ -585,5 +637,12 @@ mod tests {
                 .map(|a| a.to_string_lossy().to_string()),
             Some("nix-env".to_string())
         );
+    }
+
+    #[test]
+    fn unit_names_are_sanitized_for_systemd() {
+        assert_eq!(sanitize_unit_name("cld-ops-01"), "cld-ops-01");
+        assert_eq!(sanitize_unit_name("host.example"), "host-example");
+        assert_eq!(sanitize_unit_name("möbius"), "m-bius");
     }
 }

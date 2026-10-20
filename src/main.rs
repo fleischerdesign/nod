@@ -697,6 +697,50 @@ async fn run(cli: Cli) -> Result<()> {
             options.verbose = cli.verbose;
             nod::commands::daemon::execute(ctx, &flake_path, options).await?;
         }
+        Commands::SyncStatus {
+            target_args,
+            flake,
+            remote,
+            branch,
+            state_dir,
+            drift,
+            json,
+        } => {
+            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
+            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
+            let options = SyncOptions {
+                remote,
+                branch,
+                state_dir,
+                json,
+                verbose: cli.verbose,
+                ..Default::default()
+            };
+            let hosts = if drift {
+                let discovered = ctx
+                    .evaluator()
+                    .discover_hosts_degraded(&flake_path, cli.verbose)
+                    .await?;
+                let local_hostname = hostname::get()
+                    .map(|host| host.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let scope = SyncOptions {
+                    targets: target_args.target.into_iter().collect(),
+                    all: target_args.all,
+                    tag: target_args.tag,
+                    role: target_args.role,
+                    ..options.clone()
+                };
+                Some(nod::commands::sync::select_hosts(
+                    discovered,
+                    &scope,
+                    &local_hostname,
+                )?)
+            } else {
+                None
+            };
+            nod::commands::sync_status::execute(ctx, &flake_path, options, hosts).await?;
+        }
     }
 
     Ok(())
@@ -738,7 +782,8 @@ fn sync_options(args: SyncArgs, once: bool) -> SyncOptions {
         notify: args.notify,
         json: args.json,
         verbose: false,
-        dry_run: args.dry_run,
+        dry_run: args.dry_run || args.plan,
+        plan: args.plan,
         once,
     }
 }

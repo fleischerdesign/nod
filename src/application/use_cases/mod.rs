@@ -26,6 +26,8 @@ pub mod render_graph;
 pub mod rollback;
 pub mod scaffold_flake;
 pub mod sync_daemon;
+pub mod sync_inspect;
 pub mod sync_reconciler;
+pub mod sync_status;
 pub mod update_flake;
 pub mod watch_flake;
