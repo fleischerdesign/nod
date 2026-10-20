@@ -12,6 +12,29 @@ use crate::domain::errors::NodError;
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::deployer::DeployerPort;
 
+/// True when this process already holds root privileges.
+///
+/// `$USER` is unset in systemd and cron units and can lie under `su`, so the
+/// effective uid is the only honest source. Reading it here is what keeps
+/// `nod` working when it runs as a service instead of an interactive shell.
+fn running_as_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Builds a command that runs `program` directly as root and through `sudo`
+/// otherwise. The elevation decision is a parameter, so it is testable without
+/// actually holding either privilege.
+fn privileged(program: &str, root: bool) -> Command {
+    if root {
+        Command::new(program)
+    } else {
+        let mut command = Command::new("sudo");
+        command.arg(program);
+        command
+    }
+}
+
 /// Deploys local hosts through `sudo <closure>/bin/switch-to-configuration`.
 pub struct LocalDeployer;
 
@@ -65,6 +88,8 @@ impl DeployerPort for LocalDeployer {
         let is_agentless = host.target_kind == crate::domain::host::TargetKind::Agentless
             || !closure.join("bin/switch-to-configuration").exists();
 
+        let root = running_as_root();
+
         let status = if is_agentless {
             let activate_bin = resolve_activation_binary(closure, &host.name)?;
             Command::new(&activate_bin).args([action]).status().await
@@ -73,14 +98,7 @@ impl DeployerPort for LocalDeployer {
             // Without updating the profile link, bootloaders (like systemd-boot) cannot see
             // the new generation and rebooting reverts to the old configuration.
             if matches!(action, "switch" | "boot") {
-                let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
-                let mut profile_cmd = if is_root {
-                    Command::new("nix-env")
-                } else {
-                    let mut c = Command::new("sudo");
-                    c.arg("nix-env");
-                    c
-                };
+                let mut profile_cmd = privileged("nix-env", root);
                 let profile_status = profile_cmd
                     .args([
                         "-p",
@@ -99,8 +117,8 @@ impl DeployerPort for LocalDeployer {
             }
 
             let switch_bin = closure.join("bin/switch-to-configuration");
-            Command::new("sudo")
-                .args([switch_bin.to_str().unwrap(), action])
+            privileged(switch_bin.to_str().unwrap_or_default(), root)
+                .args([action])
                 .status()
                 .await
         };
@@ -248,24 +266,16 @@ impl StorePort for LocalDeployer {
         _profile: &SshProfile,
         options: &GcOptions,
     ) -> Result<GcReport, NodError> {
-        let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
-        let mut cmd = if options.dry_run || is_root {
+        let is_root = running_as_root();
+        let mut cmd = if options.dry_run {
             Command::new("nix-collect-garbage")
         } else {
-            let mut c = Command::new("sudo");
-            c.arg("nix-collect-garbage");
-            c
+            privileged("nix-collect-garbage", is_root)
         };
 
         if let Some(keep) = options.keep {
             if !options.dry_run {
-                let mut env_cmd = if is_root {
-                    Command::new("nix-env")
-                } else {
-                    let mut c = Command::new("sudo");
-                    c.arg("nix-env");
-                    c
-                };
+                let mut env_cmd = privileged("nix-env", is_root);
                 let _ = env_cmd
                     .args([
                         "-p",
@@ -517,5 +527,26 @@ mod tests {
         let host = HostEntity::new("jello", "jello-machine", true);
         let is_up = deployer.check_reachability(&host).await.unwrap();
         assert!(is_up);
+    }
+
+    #[test]
+    fn root_commands_do_not_go_through_sudo() {
+        let direct = privileged("nix-env", true)
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(direct, "nix-env");
+
+        let elevated = privileged("nix-env", false);
+        let elevated = elevated.as_std();
+        assert_eq!(elevated.get_program().to_string_lossy(), "sudo");
+        assert_eq!(
+            elevated
+                .get_args()
+                .next()
+                .map(|a| a.to_string_lossy().to_string()),
+            Some("nix-env".to_string())
+        );
     }
 }

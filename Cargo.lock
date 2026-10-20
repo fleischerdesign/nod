@@ -535,6 +535,7 @@ dependencies = [
  "crossterm",
  "hostname",
  "indicatif",
+ "libc",
  "mockall",
  "ratatui",
  "serde",
