@@ -282,11 +282,14 @@ impl SyncReconcilerUseCase {
             if settled {
                 state.record_success(head);
             } else {
-                // Nothing to deploy, but the fleet was not fully observed: keep
-                // the applied revision unset so the next cycle checks again.
-                // Marking this as applied is what would silence an offline host
-                // forever.
-                state.last_attempt_rev = Some(head);
+                // Nothing to deploy, but some hosts did not answer. Record the
+                // revision the observed fleet reached and keep the missing ones
+                // in the probe list: the next cycle probes only those, and a
+                // full check runs as soon as one returns. Leaving the revision
+                // unset here is what would force a full sweep every minute.
+                let revision = head;
+                state.last_attempt_rev = Some(revision.clone());
+                state.last_applied_rev = Some(revision);
                 state.in_progress = None;
                 state.unreachable = unreachable;
             }
@@ -341,10 +344,12 @@ impl SyncReconcilerUseCase {
         } else if settled {
             state.record_success(head);
         } else {
-            // Some hosts were unreachable: retry next cycle without backoff,
-            // and without claiming the fleet reached this revision. Only the
-            // hosts that did not answer are probed again until one returns.
-            state.last_attempt_rev = Some(head);
+            // Some hosts were unreachable: record the revision the observed
+            // fleet reached, keep the missing hosts in the probe list, and skip
+            // the backoff. The next cycle probes only those hosts; a full check
+            // runs as soon as one answers.
+            state.last_attempt_rev = Some(head.clone());
+            state.last_applied_rev = Some(head);
             state.in_progress = None;
             state.unreachable = report
                 .hosts
@@ -910,7 +915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unreachable_cycle_does_not_mark_the_fleet_applied() {
+    async fn an_unreachable_cycle_records_the_revision_but_keeps_probing() {
         let mut git = MockGit::new();
         git.expect_is_dirty().returning(|_| Ok(false));
         git.expect_local_head().returning(|_| Ok("aaa".into()));
@@ -959,13 +964,13 @@ mod tests {
         let last = saved.lock().unwrap().last().cloned().unwrap();
         assert_eq!(
             last.last_applied_rev.as_deref(),
-            Some("aaa"),
-            "an unreachable host must not advance the applied revision"
+            Some("bbb"),
+            "the observed fleet reached the revision"
         );
         assert_eq!(
-            last.last_attempt_rev.as_deref(),
-            Some("bbb"),
-            "the attempt is still recorded for the operator"
+            last.unreachable,
+            vec!["atlas".to_string()],
+            "the missing host stays in the probe list instead of forcing a full sweep"
         );
     }
 
