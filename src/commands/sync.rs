@@ -14,7 +14,7 @@ use crate::application::selection::TargetSelection;
 use crate::application::use_cases::sync_reconciler::SyncReconcilerUseCase;
 use crate::commands::wiring;
 use crate::domain::errors::NodError;
-use crate::domain::host::HostEntity;
+use crate::domain::host::{HostEntity, TargetKind};
 use crate::domain::sync::{SyncHostResult, SyncReport};
 use crate::domain::watch::SyncOptions;
 
@@ -119,10 +119,16 @@ pub(crate) async fn cycle(
 /// There is no implicit scope: `--all`, at least one target, or tag/role
 /// filters must name the fleet explicitly (ADR-028).
 pub fn select_hosts(
-    hosts: Vec<HostEntity>,
+    mut hosts: Vec<HostEntity>,
     options: &SyncOptions,
     local_hostname: &str,
 ) -> Result<Vec<HostEntity>, NodError> {
+    // Only NixOS hosts have a system closure this reconciler can build, compare
+    // and activate. Agentless devices carry no such closure even though the
+    // entity has a closure attribute; their own reconcilers own them. Filtering
+    // by `has_closure()` would keep them in and report them as permanently
+    // drifted.
+    hosts.retain(|host| host.target_kind == TargetKind::Nixos);
     let mut selected = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push = |host: HostEntity| {
@@ -291,5 +297,24 @@ mod tests {
         let mut too_jittery = options();
         too_jittery.jitter_percent = 80;
         assert!(validate(&too_jittery).is_err());
+    }
+
+    #[test]
+    fn agentless_targets_are_not_part_of_the_sync_scope() {
+        let mut agentless = HostEntity::new("cloudflare", "api.cloudflare.com", false);
+        agentless.target_kind = TargetKind::Agentless;
+        let nixos = HostEntity::new("atlas", "10.0.0.8", false);
+
+        let mut everything = options();
+        everything.all = true;
+        let selected = select_hosts(vec![agentless.clone(), nixos], &everything, "atlas").unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "atlas");
+
+        // Naming one explicitly is a scope mistake, not a silent skip.
+        let mut explicit = options();
+        explicit.targets = vec!["cloudflare".to_string()];
+        let error = select_hosts(vec![agentless], &explicit, "atlas").unwrap_err();
+        assert!(error.to_string().contains("cloudflare"), "got: {error}");
     }
 }
