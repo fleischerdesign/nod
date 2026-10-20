@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::domain::errors::NodError;
 use crate::domain::ports::sync_state::SyncStatePort;
-use crate::domain::sync::SyncState;
+use crate::domain::sync::{SyncState, STATE_VERSION};
 
 /// Name of the state document inside the state directory.
 const STATE_FILE: &str = "state.json";
@@ -67,6 +67,12 @@ impl SyncStatePort for JsonSyncStateStore {
         let state = serde_json::from_slice::<SyncState>(&bytes).map_err(|e| {
             NodError::internal(format!("invalid sync state {}: {e}", self.path.display()))
         })?;
+        // A document written by a schema this build does not know is not
+        // something to guess at. Older documents are read with defaults; newer
+        // ones are treated as no memory at all, which costs one sweep.
+        if state.version > STATE_VERSION {
+            return Ok(None);
+        }
         Ok(Some(state))
     }
 
@@ -80,7 +86,12 @@ impl SyncStatePort for JsonSyncStateStore {
             })?;
         }
 
-        let serialized = serde_json::to_vec_pretty(state)
+        // The version describes the schema that wrote the document. An older
+        // document is read with defaults, so the first save stamps the current
+        // version rather than preserving a number that no longer describes it.
+        let mut state = state.clone();
+        state.version = STATE_VERSION;
+        let serialized = serde_json::to_vec_pretty(&state)
             .map_err(|e| NodError::internal(format!("cannot serialize sync state: {e}")))?;
         let temporary = self.path.with_extension("json.tmp");
         fs::write(&temporary, &serialized).map_err(|e| {

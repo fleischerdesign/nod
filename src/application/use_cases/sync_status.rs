@@ -112,9 +112,10 @@ impl SyncStatusUseCase {
                 },
                 detail: match &memory.condition {
                     HostCondition::Misconfigured { detail, .. } => Some(detail.clone()),
-                    HostCondition::Offline { attempts, .. } => {
-                        Some(format!("{attempts} probe(s) failed"))
-                    }
+                    HostCondition::Offline { attempts, .. } => Some(match attempts {
+                        1 => "1 failed probe".to_string(),
+                        failed => format!("{failed} failed probes"),
+                    }),
                     HostCondition::Reachable => None,
                 },
             })

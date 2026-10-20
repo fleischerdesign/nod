@@ -91,7 +91,9 @@ fn render(status: &SyncStatus, json: bool) {
         if let Some(detail) = &entry.detail {
             line.push_str(&format!(", {detail}"));
         }
-        if let Some(seconds) = entry.next_probe_in {
+        // A retry that is already due says nothing useful; printing "in 0s"
+        // on every line would train the reader to ignore the field.
+        if let Some(seconds) = entry.next_probe_in.filter(|seconds| *seconds > 0) {
             line.push_str(&format!(", next probe in {seconds}s"));
         }
         println!("{line}");

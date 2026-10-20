@@ -478,16 +478,13 @@ impl SyncReconcilerUseCase {
                     .filter(|h| h.result.is_failure())
                     .count()
             ));
-        } else if settled {
-            state.record_success(head);
         } else {
-            // Some hosts were unreachable: record the revision the observed
-            // fleet reached and skip the backoff. Each host's condition is
-            // already in the memory the sweep wrote; the next cycle probes a
-            // host only when its retry is due.
-            state.last_attempt_rev = Some(head.clone());
-            state.last_applied_rev = Some(head);
-            state.in_progress = None;
+            // A host that did not answer is not a failed cycle: the revision
+            // reached every host that answered. Treating it as one would leave
+            // the counter raised and make the next genuine failure skip the
+            // short backoff steps. Each host's condition already lives in the
+            // memory the sweep wrote; the outcome still reports `applied: false`.
+            state.record_success(head);
         }
         state_store.save(&state).await?;
         self.notify(&report, options).await;
