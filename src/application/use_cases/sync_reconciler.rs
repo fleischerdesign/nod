@@ -29,6 +29,21 @@ use crate::domain::plan::{DeploymentAction, DeploymentOptions, RolloutStrategy};
 use crate::domain::sync::{now_secs, SyncHostReport, SyncHostResult, SyncReport, SyncState};
 use crate::domain::watch::SyncOptions;
 
+/// Per-host result of the drift sweep, before any deployment happens.
+enum DriftOutcome {
+    /// The built closure differs from the live one.
+    Changed(Box<HostEntity>),
+    /// The host already runs the built closure.
+    Unchanged(String),
+    /// The host did not answer.
+    Unreachable {
+        /// Host name.
+        host: String,
+        /// Probe detail, when the probe failed rather than answering "no".
+        detail: Option<String>,
+    },
+}
+
 /// Reconciles a repository into the running fleet.
 pub struct SyncReconcilerUseCase {
     ctx: Arc<AppContext>,
@@ -52,7 +67,7 @@ impl SyncReconcilerUseCase {
         select_hosts: F,
     ) -> Result<SyncReport, NodError>
     where
-        F: FnOnce() -> Fut,
+        F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<Vec<HostEntity>, NodError>>,
     {
         let git = self.ctx.git_port()?;
@@ -110,20 +125,64 @@ impl SyncReconcilerUseCase {
         let recovered = state.in_progress.is_some();
         let revision_unchanged = remote == local_before;
         let proven_applied = state.last_applied_rev.as_deref() == Some(local_before.as_str());
+        let mut selected: Option<Vec<HostEntity>> = None;
+
         if revision_unchanged && proven_applied && !recovered {
-            let report = SyncReport {
-                revision: local_before.clone(),
-                previous_revision: Some(local_before),
-                applied: true,
-                hosts: Vec::new(),
-                refused: None,
-                error: None,
-                backoff_secs: 0,
-            };
-            state.record_success(report.revision.clone());
+            if state.unreachable.is_empty() {
+                let report = SyncReport {
+                    revision: local_before.clone(),
+                    previous_revision: Some(local_before),
+                    applied: true,
+                    hosts: Vec::new(),
+                    refused: None,
+                    error: None,
+                    backoff_secs: 0,
+                };
+                state.record_success(report.revision.clone());
+                state_store.save(&state).await?;
+                self.notify(&report, options).await;
+                return Ok(report);
+            }
+
+            // Probe-only retry: the fleet was reconciled at this revision, but
+            // some hosts never answered. Probing just those costs milliseconds;
+            // a full drift sweep would re-evaluate every host each interval.
+            let hosts = select_hosts().await?;
+            let mut still_unreachable = Vec::new();
+            let mut any_back = false;
+            for host in hosts
+                .iter()
+                .filter(|host| state.unreachable.contains(&host.name))
+            {
+                match self.ctx.deployer_for(host).check_reachability(host).await {
+                    Ok(true) => any_back = true,
+                    _ => still_unreachable.push(host.name.clone()),
+                }
+            }
+            state.unreachable = still_unreachable;
             state_store.save(&state).await?;
-            self.notify(&report, options).await;
-            return Ok(report);
+
+            if !any_back {
+                let report = SyncReport {
+                    revision: local_before.clone(),
+                    previous_revision: Some(local_before),
+                    applied: false,
+                    hosts: state
+                        .unreachable
+                        .iter()
+                        .map(|name| SyncHostReport::new(name.clone(), SyncHostResult::Unreachable))
+                        .collect(),
+                    refused: None,
+                    error: None,
+                    backoff_secs: 0,
+                };
+                self.notify(&report, options).await;
+                return Ok(report);
+            }
+
+            // A host answered again: fall through to a full check with the
+            // host list already in hand.
+            selected = Some(hosts);
         }
 
         if revision_unchanged {
@@ -169,14 +228,19 @@ impl SyncReconcilerUseCase {
                 .await?
         };
 
-        let hosts = select_hosts().await?;
+        let hosts = match selected {
+            Some(hosts) => hosts,
+            None => select_hosts().await?,
+        };
         if hosts.is_empty() {
             return Err(NodError::config(
                 "no hosts selected; pass --target/--all or set [sync].targets",
             ));
         }
 
-        let (mut changed, mut reports) = self.drift(flake_path, hosts, options.verbose).await?;
+        let (mut changed, mut reports) = self
+            .drift(flake_path, hosts, options.concurrency, options.verbose)
+            .await?;
         changed = Self::order_last(changed, &options.last_hosts);
 
         if options.dry_run {
@@ -201,6 +265,11 @@ impl SyncReconcilerUseCase {
 
         if changed.is_empty() {
             let settled = reports.iter().all(|host| host.result.is_settled());
+            let unreachable: Vec<String> = reports
+                .iter()
+                .filter(|host| host.result == SyncHostResult::Unreachable)
+                .map(|host| host.host.clone())
+                .collect();
             let report = SyncReport {
                 revision: head.clone(),
                 previous_revision: Some(local_before),
@@ -219,6 +288,7 @@ impl SyncReconcilerUseCase {
                 // forever.
                 state.last_attempt_rev = Some(head);
                 state.in_progress = None;
+                state.unreachable = unreachable;
             }
             state_store.save(&state).await?;
             self.notify(&report, options).await;
@@ -272,9 +342,16 @@ impl SyncReconcilerUseCase {
             state.record_success(head);
         } else {
             // Some hosts were unreachable: retry next cycle without backoff,
-            // and without claiming the fleet reached this revision.
+            // and without claiming the fleet reached this revision. Only the
+            // hosts that did not answer are probed again until one returns.
             state.last_attempt_rev = Some(head);
             state.in_progress = None;
+            state.unreachable = report
+                .hosts
+                .iter()
+                .filter(|host| host.result == SyncHostResult::Unreachable)
+                .map(|host| host.host.clone())
+                .collect();
         }
         state_store.save(&state).await?;
         self.notify(&report, options).await;
@@ -305,57 +382,86 @@ impl SyncReconcilerUseCase {
 
     /// Builds every host's toplevel and compares it with the live closure.
     ///
-    /// A build failure aborts the cycle: partial drift information would make
-    /// the report lie about what the fleet runs.
+    /// Health probing, evaluation and closure comparison of independent hosts
+    /// run concurrently under the same `--concurrency` budget the rollout uses;
+    /// reports are sorted by host name so the output order does not depend on
+    /// completion order. A build failure aborts the cycle: partial drift
+    /// information would make the report lie about what the fleet runs.
     async fn drift(
         &self,
         flake_path: &Path,
         hosts: Vec<HostEntity>,
+        concurrency: usize,
         verbose: bool,
     ) -> Result<(Vec<HostEntity>, Vec<SyncHostReport>), NodError> {
         let evaluator = self.ctx.evaluator();
-        let mut changed = Vec::new();
-        let mut reports = Vec::new();
+        let permits = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
+        let mut tasks = tokio::task::JoinSet::new();
 
         for host in hosts {
-            // An unreachable host is not a failed host: it is skipped and
-            // retried next cycle. Probing before building keeps an offline
-            // laptop from turning every cycle into a failed deployment.
-            let deployer = self.ctx.deployer_for(&host);
-            match deployer.check_reachability(&host).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    reports.push(SyncHostReport::new(host.name, SyncHostResult::Unreachable));
-                    continue;
-                }
-                Err(error) => {
-                    reports.push(
-                        SyncHostReport::new(host.name, SyncHostResult::Unreachable)
-                            .with_detail(error.to_string()),
-                    );
-                    continue;
-                }
-            }
+            let evaluator = evaluator.clone();
+            let ctx = self.ctx.clone();
+            let permits = permits.clone();
+            let flake = flake_path.to_path_buf();
+            tasks.spawn(async move {
+                let _permit = permits.acquire().await.ok();
+                let deployer = ctx.deployer_for(&host);
 
-            let built = evaluator
-                .build_toplevel(
-                    flake_path,
-                    &host.name,
-                    host.closure_attr.clone(),
-                    None,
-                    verbose,
-                )
-                .await?;
-            let profile = self.ctx.resolved_profile(&host).await?;
-            let current = deployer.current_closure(&host, &profile).await?;
+                // An unreachable host is not a failed host: it is skipped and
+                // retried next cycle. Probing before building keeps an offline
+                // laptop from turning every cycle into a failed deployment.
+                match deployer.check_reachability(&host).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok(DriftOutcome::Unreachable {
+                            host: host.name,
+                            detail: None,
+                        })
+                    }
+                    Err(error) => {
+                        return Ok(DriftOutcome::Unreachable {
+                            host: host.name,
+                            detail: Some(error.to_string()),
+                        })
+                    }
+                }
 
-            if current.as_deref() == Some(built.as_path()) {
-                reports.push(SyncHostReport::new(host.name, SyncHostResult::Unchanged));
-            } else {
-                changed.push(host);
+                let built = evaluator
+                    .build_toplevel(&flake, &host.name, host.closure_attr.clone(), None, verbose)
+                    .await?;
+                let profile = ctx.resolved_profile(&host).await?;
+                let current = deployer.current_closure(&host, &profile).await?;
+
+                Ok::<_, NodError>(if current.as_deref() == Some(built.as_path()) {
+                    DriftOutcome::Unchanged(host.name)
+                } else {
+                    DriftOutcome::Changed(Box::new(host))
+                })
+            });
+        }
+
+        let mut changed = Vec::new();
+        let mut reports = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            let outcome = joined
+                .map_err(|error| NodError::internal(format!("drift task failed: {error}")))??;
+            match outcome {
+                DriftOutcome::Changed(host) => changed.push(*host),
+                DriftOutcome::Unchanged(host) => {
+                    reports.push(SyncHostReport::new(host, SyncHostResult::Unchanged));
+                }
+                DriftOutcome::Unreachable { host, detail } => {
+                    let mut report = SyncHostReport::new(host, SyncHostResult::Unreachable);
+                    if let Some(detail) = detail {
+                        report = report.with_detail(detail);
+                    }
+                    reports.push(report);
+                }
             }
         }
 
+        changed.sort_by(|left, right| left.name.cmp(&right.name));
+        reports.sort_by(|left, right| left.host.cmp(&right.host));
         Ok((changed, reports))
     }
 
@@ -861,5 +967,88 @@ mod tests {
             Some("bbb"),
             "the attempt is still recorded for the operator"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_only_cycle_does_not_rebuild_when_hosts_stay_unreachable() {
+        let mut git = MockGit::new();
+        git.expect_is_dirty().returning(|_| Ok(false));
+        git.expect_local_head().returning(|_| Ok("bbb".into()));
+        git.expect_remote_head()
+            .returning(|_, _, _| Ok("bbb".into()));
+
+        let mut state = SyncState::new("origin/main", "main");
+        state.record_success("bbb");
+        state.unreachable = vec!["atlas".to_string()];
+        let mut store = MockState::new();
+        store
+            .expect_load()
+            .returning(move || Ok(Some(state.clone())));
+        store.expect_save().returning(|_| Ok(()));
+
+        let mut evaluator = MockEvaluator::new();
+        evaluator.expect_build_toplevel().times(0);
+
+        let mut deployer = MockDeployer::new();
+        deployer
+            .expect_check_reachability()
+            .times(1)
+            .returning(|_| Ok(false));
+
+        let ctx = context(git, store, evaluator, deployer);
+        let report = SyncReconcilerUseCase::new(ctx)
+            .reconcile_once(Path::new("/repo"), &options(), || async {
+                Ok(vec![host()])
+            })
+            .await
+            .unwrap();
+
+        assert!(!report.applied, "nothing was observed, so nothing settled");
+        assert_eq!(report.hosts.len(), 1);
+        assert_eq!(report.hosts[0].result, SyncHostResult::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn a_returning_host_triggers_a_full_check() {
+        let mut git = MockGit::new();
+        git.expect_is_dirty().returning(|_| Ok(false));
+        git.expect_local_head().returning(|_| Ok("bbb".into()));
+        git.expect_remote_head()
+            .returning(|_, _, _| Ok("bbb".into()));
+
+        let mut state = SyncState::new("origin/main", "main");
+        state.record_success("bbb");
+        state.unreachable = vec!["atlas".to_string()];
+        let mut store = MockState::new();
+        store
+            .expect_load()
+            .returning(move || Ok(Some(state.clone())));
+        store.expect_save().returning(|_| Ok(()));
+
+        let mut evaluator = MockEvaluator::new();
+        evaluator
+            .expect_build_toplevel()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(PathBuf::from("/nix/store/current")));
+
+        let mut deployer = MockDeployer::new();
+        deployer.expect_check_reachability().returning(|_| Ok(true));
+        deployer
+            .expect_current_closure()
+            .returning(|_, _| Ok(Some(PathBuf::from("/nix/store/current"))));
+
+        let ctx = context(git, store, evaluator, deployer);
+        let report = SyncReconcilerUseCase::new(ctx)
+            .reconcile_once(Path::new("/repo"), &options(), || async {
+                Ok(vec![host()])
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            report.applied,
+            "a reachable, current host settles the fleet"
+        );
+        assert_eq!(report.hosts[0].result, SyncHostResult::Unchanged);
     }
 }

@@ -47,6 +47,10 @@ pub struct SyncState {
     pub backoff_until: Option<u64>,
     /// Marker written before the first activation and cleared after a report.
     pub in_progress: Option<InProgress>,
+    /// Hosts the last cycle could not reach. While this is non-empty, the next
+    /// cycles probe only these hosts instead of re-evaluating the fleet.
+    #[serde(default)]
+    pub unreachable: Vec<String>,
 }
 
 /// A cycle that started activating and has not reported yet.
@@ -72,6 +76,7 @@ impl SyncState {
             consecutive_failures: 0,
             backoff_until: None,
             in_progress: None,
+            unreachable: Vec::new(),
         }
     }
 
@@ -101,6 +106,7 @@ impl SyncState {
         self.consecutive_failures = 0;
         self.backoff_until = None;
         self.in_progress = None;
+        self.unreachable.clear();
     }
 
     /// Marks the start of an activation phase.

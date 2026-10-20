@@ -142,6 +142,8 @@ impl DeployerPort for SshCliDeployer {
             return Err(NodError::remote_activate(host.name.clone()));
         }
 
+        verify_remote_health(host, profile).await?;
+
         if verbose {
             tracing::debug!(
                 host = %host.name,
@@ -402,6 +404,52 @@ async fn run_ssh(
         Ok(output) => Ok(output),
         Err(_) => Err(map_launch()),
     }
+}
+
+/// Verifies the freshly activated remote system over the same transport.
+async fn verify_remote_health(host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
+    use crate::infrastructure::health::probe;
+
+    if !probe::enabled(host) || !probe::checks_failed_units(host) {
+        return Ok(());
+    }
+
+    let args = build_ssh_args(
+        profile,
+        &host.target_host,
+        false,
+        &[probe::FAILED_UNITS_COMMAND.to_string()],
+    );
+    let probe_run = tokio::time::timeout(
+        probe::timeout(host),
+        run_ssh("ssh", &args, || {
+            NodError::health_check(format!(
+                "failed to launch the health probe for {}",
+                host.name
+            ))
+        }),
+    )
+    .await;
+
+    let output = match probe_run {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            return Err(NodError::health_check(format!(
+                "health probe on {} timed out",
+                host.name
+            )))
+        }
+    };
+
+    if !output.status.success() {
+        return Err(NodError::health_check(format!(
+            "health probe on {} failed",
+            host.name
+        )));
+    }
+
+    probe::verdict(host, &String::from_utf8_lossy(&output.stdout))
 }
 
 /// Spawns `program` with `args` with stdio inherited (streamed to the

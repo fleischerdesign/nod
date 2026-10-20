@@ -35,6 +35,41 @@ fn privileged(program: &str, root: bool) -> Command {
     }
 }
 
+/// Verifies the freshly activated local system.
+///
+async fn verify_local_health(host: &HostEntity) -> Result<(), NodError> {
+    use crate::infrastructure::health::probe;
+
+    if !probe::enabled(host) || !probe::checks_failed_units(host) {
+        return Ok(());
+    }
+
+    let probe_run = tokio::time::timeout(
+        probe::timeout(host),
+        Command::new("systemctl")
+            .args(["--failed", "--no-legend", "--plain"])
+            .output(),
+    )
+    .await;
+
+    let output = match probe_run {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return Err(NodError::health_check(format!(
+                "cannot run the local health probe: {error}"
+            )))
+        }
+        Err(_) => {
+            return Err(NodError::health_check(format!(
+                "health probe on {} timed out",
+                host.name
+            )))
+        }
+    };
+
+    probe::verdict(host, &String::from_utf8_lossy(&output.stdout))
+}
+
 /// Deploys local hosts through `sudo <closure>/bin/switch-to-configuration`.
 pub struct LocalDeployer;
 
@@ -133,6 +168,8 @@ impl DeployerPort for LocalDeployer {
                 "activation reported non-zero failure exit code",
             ));
         }
+
+        verify_local_health(host).await?;
 
         if verbose {
             tracing::debug!(

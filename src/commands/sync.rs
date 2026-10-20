@@ -88,12 +88,18 @@ pub(crate) async fn cycle(
     let selection_options = options.clone();
 
     SyncReconcilerUseCase::new(ctx.clone())
-        .reconcile_once(flake_path, options, || async move {
-            let hosts = selection_ctx
-                .evaluator()
-                .discover_hosts_degraded(&flake, selection_options.verbose)
-                .await?;
-            select_hosts(hosts, &selection_options, &local_hostname)
+        .reconcile_once(flake_path, options, || {
+            let sel_ctx = selection_ctx.clone();
+            let sel_options = selection_options.clone();
+            let sel_flake = flake.clone();
+            let hostname = local_hostname.clone();
+            async move {
+                let hosts = sel_ctx
+                    .evaluator()
+                    .discover_hosts_degraded(&sel_flake, sel_options.verbose)
+                    .await?;
+                select_hosts(hosts, &sel_options, &hostname)
+            }
         })
         .await
 }

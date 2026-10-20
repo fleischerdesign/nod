@@ -69,7 +69,7 @@ so there is no implicit fleet default:
 ```
 preflight   lock, clean tree, remote, branch, free disk space
 fetch       ls-remote gate → fetch → ff-only
-evaluate    one batched evaluation (ADR-024)
+evaluate    one batched evaluation per host, concurrent under --concurrency
 build/copy  substituters first; local build only on a miss
 deploy      waves (all | canary | batch) → activate → health → rollback on failure
 report      per-host outcomes, exit status (ADR-027), audit entry, notify hooks
@@ -80,21 +80,24 @@ Per-host results are reported in the sync vocabulary - `Deployed`, `Unchanged`,
 terminal states. They deliberately do not extend the ADR-003 state machine: a
 skipped or unreachable host never enters a deployment lifecycle at all.
 
-Reachability is checked before evaluation. An unreachable host is reported and
-skipped so an offline laptop cannot turn every cycle into a failed deployment;
-the next cycle retries it.
+Reachability is checked before evaluation, in parallel with the rest of the
+sweep. An unreachable host is reported and skipped so an offline laptop cannot
+turn every cycle into a failed deployment. While the applied revision is current
+and hosts remain unreachable, the next cycles probe only those hosts: an offline
+laptop costs one TCP probe per interval instead of a fleet-wide evaluation, and
+a full check runs as soon as one answers.
 
 ### 6. Health and rollback
 
 - Activation success is the baseline: a host whose switch returned non-zero is
   a failed host, and the rollback policy applies.
-- Where the pipeline has a health checker bound, the host must also pass it. The
-  local systemd checker verifies `systemctl --failed`. Remote verification is
-  the SSH deployer's responsibility and is **not implemented yet** - a remote
-  host counts as healthy once its activation succeeded. The gap is recorded here
-  so "health checks" is never read as more than it is.
-- Probe definitions stay in the fleet's `options.nod.healthChecks`; the
-  reconciler adds no second vocabulary.
+- After activation every host is probed with `systemctl --failed --no-legend
+  --plain` - locally for the local host, over the same SSH transport for remote
+  hosts - bounded by the host's `options.nod.healthChecks.timeoutSecs` (default
+  60 s). Any failed unit fails the host and triggers the rollback policy.
+- The probe honours the host's configuration: `healthChecks.enable = false`
+  skips verification, `healthChecks.systemd.checkFailedUnits = false` skips the
+  unit check.
 - Auto-rollback is **on** by default: an unhealthy host returns to its previous
   generation. `--no-auto-rollback` keeps the failed generation for inspection.
 - A wave failure does not abort later waves unless `--fail-fast` is set; the exit
