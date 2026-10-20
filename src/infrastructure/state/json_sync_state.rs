@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -85,6 +86,16 @@ impl SyncStatePort for JsonSyncStateStore {
         fs::write(&temporary, &serialized).map_err(|e| {
             NodError::internal(format!(
                 "cannot write sync state {}: {e}",
+                temporary.display()
+            ))
+        })?;
+        // The document holds revisions, host names and counters - no secrets -
+        // and `nod sync-status` must be able to read it as a normal user. The
+        // daemon's own umask is deliberately strict, so the mode is set here
+        // instead of widening it for every file the unit touches.
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).map_err(|e| {
+            NodError::internal(format!(
+                "cannot make sync state readable {}: {e}",
                 temporary.display()
             ))
         })?;
@@ -228,5 +239,24 @@ mod tests {
         let path = dir.path().join(LOCK_FILE);
         std::fs::write(&path, b"999999999\n").unwrap();
         assert!(SyncLock::acquire(dir.path()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn state_is_readable_by_other_accounts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonSyncStateStore::new(dir.path());
+        store.save(&SyncState::new("repo", "main")).await.unwrap();
+
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "`nod sync-status` must be able to read the state as a normal user"
+        );
     }
 }

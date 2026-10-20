@@ -57,6 +57,9 @@ fn render(status: &SyncStatus, json: bool) {
             status.backoff_secs
         );
     }
+    if let Some(error) = &status.state_error {
+        println!("  {} state unreadable: {error}", "!".yellow());
+    }
     if !status.unreachable.is_empty() {
         println!(
             "  {} unreachable: {}",

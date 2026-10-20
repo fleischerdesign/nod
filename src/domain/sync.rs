@@ -261,6 +261,9 @@ pub struct SyncStatus {
     /// Per-host drift, populated on request.
     #[serde(default)]
     pub hosts: Vec<SyncHostStatus>,
+    /// Why the state document could not be read, when it could not.
+    #[serde(default)]
+    pub state_error: Option<String>,
 }
 
 impl SyncReport {

@@ -35,12 +35,18 @@ impl SyncStatusUseCase {
     ) -> Result<SyncStatus, NodError> {
         let git = self.ctx.git_port()?;
         let state_store = self.ctx.sync_state()?;
-        let state = match state_store.load().await? {
-            Some(state) => state,
-            None => SyncState::new(
+        let fresh = || {
+            SyncState::new(
                 format!("{}/{}", options.remote, options.branch),
                 options.branch.clone(),
-            ),
+            )
+        };
+        // An unreadable state is reported, not fatal: the revisions are still
+        // useful, and a status command that dies on a file mode helps nobody.
+        let (state, state_error) = match state_store.load().await {
+            Ok(Some(state)) => (state, None),
+            Ok(None) => (fresh(), None),
+            Err(error) => (fresh(), Some(error.to_string())),
         };
 
         let local_revision = git.local_head(flake_path).await?;
@@ -89,6 +95,7 @@ impl SyncStatusUseCase {
             backoff_secs,
             unreachable: state.unreachable,
             hosts: host_statuses,
+            state_error,
         })
     }
 }
