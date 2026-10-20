@@ -55,6 +55,22 @@ pub struct SyncArgs {
     #[arg(long, default_value_t = 60)]
     pub interval: u64,
 
+    /// Remote-head check interval in seconds; 0 disables the gate
+    #[arg(long, default_value_t = 15)]
+    pub gate_interval: u64,
+
+    /// First retry delay in seconds for a host that does not answer
+    #[arg(long, default_value_t = 60)]
+    pub offline_backoff: u64,
+
+    /// Ceiling in seconds for the offline retry delay
+    #[arg(long, default_value_t = 1800)]
+    pub offline_backoff_max: u64,
+
+    /// Seconds offline after which a host is reported as gone; 0 disables it
+    #[arg(long, default_value_t = 86400)]
+    pub gone_after: u64,
+
     /// Random spread applied to the interval, in percent (0-50)
     #[arg(long, default_value_t = 10)]
     pub jitter: u8,

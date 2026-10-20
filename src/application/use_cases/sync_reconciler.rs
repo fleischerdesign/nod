@@ -28,7 +28,8 @@ use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
 use crate::domain::plan::{DeploymentAction, DeploymentOptions, RolloutStrategy};
 use crate::domain::sync::{
-    now_secs, SyncHostReport, SyncHostResult, SyncPlanEntry, SyncReport, SyncState,
+    now_secs, HostCondition, HostMemory, RetryPolicy, SyncHostReport, SyncHostResult,
+    SyncPlanEntry, SyncReport, SyncState,
 };
 use crate::domain::watch::SyncOptions;
 
@@ -98,7 +99,7 @@ impl SyncReconcilerUseCase {
             Err(error) => {
                 // A network failure is a failed cycle, not a refused one: it
                 // backs off and reports instead of flooding the next interval.
-                let backoff = state.record_failure(now);
+                let backoff = state.record_failure(now, local_before.clone());
                 state_store.save(&state).await?;
                 let mut report = SyncReport::failed(local_before, error.to_string());
                 report.backoff_secs = backoff;
@@ -116,7 +117,14 @@ impl SyncReconcilerUseCase {
         let mut selected: Option<Vec<HostEntity>> = None;
 
         if revision_unchanged && proven_applied && !recovered {
-            if state.unreachable.is_empty() {
+            let policy = RetryPolicy::from_options(options);
+            let away: Vec<(&String, &HostMemory)> = state
+                .hosts
+                .iter()
+                .filter(|(_, memory)| memory.condition != HostCondition::Reachable)
+                .collect();
+
+            if away.is_empty() {
                 let report = SyncReport {
                     revision: local_before.clone(),
                     previous_revision: Some(local_before),
@@ -135,22 +143,32 @@ impl SyncReconcilerUseCase {
                 return Ok(report);
             }
 
-            // Probe-only retry: the fleet was reconciled at this revision, but
-            // some hosts never answered. Probing just those costs milliseconds;
-            // a full drift sweep would re-evaluate every host each interval.
+            // Retry only the hosts whose retry is due. A host that is simply
+            // off costs one probe per backoff step, not one per cycle.
             let hosts = select_hosts().await?;
-            let mut still_unreachable = Vec::new();
             let mut any_back = false;
-            for host in hosts
-                .iter()
-                .filter(|host| state.unreachable.contains(&host.name))
-            {
+            for host in &hosts {
+                let due = match state.host(&host.name).map(|m| &m.condition) {
+                    Some(HostCondition::Offline { next_probe_at, .. }) => *next_probe_at <= now,
+                    Some(HostCondition::Misconfigured { .. }) => true,
+                    Some(HostCondition::Reachable) | None => false,
+                };
+                if !due {
+                    continue;
+                }
                 match self.ctx.deployer_for(host).check_reachability(host).await {
-                    Ok(true) => any_back = true,
-                    _ => still_unreachable.push(host.name.clone()),
+                    Ok(true) => {
+                        state.observe_reachable(&host.name, now);
+                        any_back = true;
+                    }
+                    Ok(false) => {
+                        state.observe_offline(&host.name, now, &policy);
+                    }
+                    Err(error) => {
+                        Self::observe_probe_error(&mut state, &host.name, now, &policy, &error);
+                    }
                 }
             }
-            state.unreachable = still_unreachable;
             if !options.dry_run {
                 state_store.save(&state).await?;
             }
@@ -161,15 +179,28 @@ impl SyncReconcilerUseCase {
                     previous_revision: Some(local_before),
                     applied: false,
                     hosts: state
-                        .unreachable
+                        .hosts
                         .iter()
-                        .map(|name| SyncHostReport::new(name.clone(), SyncHostResult::Unreachable))
+                        .filter(|(_, memory)| memory.condition != HostCondition::Reachable)
+                        .map(|(name, memory)| {
+                            let detail = match &memory.condition {
+                                HostCondition::Offline {
+                                    since, attempts, ..
+                                } => format!("offline since {since} ({attempts} probe(s) failed)"),
+                                HostCondition::Misconfigured { detail, .. } => detail.clone(),
+                                HostCondition::Reachable => String::new(),
+                            };
+                            SyncHostReport::new(name.clone(), SyncHostResult::Unreachable)
+                                .with_detail(detail)
+                        })
                         .collect(),
                     refused: None,
                     error: None,
                     backoff_secs: 0,
                     plan: Vec::new(),
                 };
+                // A cycle that only confirmed known outages is not a success and
+                // not a failure: nothing about the fleet changed.
                 self.notify(&report, options).await;
                 return Ok(report);
             }
@@ -195,7 +226,7 @@ impl SyncReconcilerUseCase {
                 .fetch(flake_path, &options.remote, &options.branch)
                 .await
             {
-                let backoff = state.record_failure(now);
+                let backoff = state.record_failure(now, remote.clone());
                 state_store.save(&state).await?;
                 let mut report = SyncReport::failed(local_before, error.to_string());
                 report.backoff_secs = backoff;
@@ -245,12 +276,17 @@ impl SyncReconcilerUseCase {
             .iter()
             .find(|host| host.is_self)
             .map(|host| host.name.clone());
+        let retry = RetryPolicy::from_options(options);
+        // Hosts known to be away are deferred until their retry is due, so an
+        // offline laptop costs no probe instead of one per cycle.
+        let policy = state.probe_policy(now, &retry);
         let inspections = inspect_hosts(
             &self.ctx,
             flake_path,
             hosts,
             options.concurrency,
             options.verbose,
+            &policy,
         )
         .await?;
 
@@ -259,7 +295,34 @@ impl SyncReconcilerUseCase {
         let mut plan = Vec::new();
         for inspection in inspections {
             match &inspection.reachability {
+                Reachability::Deferred { reason } => {
+                    // Not probed: what the last cycle learned says the retry is
+                    // not due yet. The detail carries the observation that
+                    // would otherwise be re-measured every interval.
+                    reports.push(
+                        SyncHostReport::new(
+                            inspection.host.name.clone(),
+                            SyncHostResult::Unreachable,
+                        )
+                        .with_detail(format!("deferred: {reason}")),
+                    );
+                }
+                Reachability::Misconfigured { detail } => {
+                    if !options.dry_run {
+                        state.observe_misconfigured(&inspection.host.name, now, detail.clone());
+                    }
+                    reports.push(
+                        SyncHostReport::new(
+                            inspection.host.name.clone(),
+                            SyncHostResult::Unreachable,
+                        )
+                        .with_detail(detail.clone()),
+                    );
+                }
                 Reachability::Unreachable { detail } => {
+                    if !options.dry_run {
+                        state.observe_offline(&inspection.host.name, now, &retry);
+                    }
                     let mut report = SyncHostReport::new(
                         inspection.host.name.clone(),
                         SyncHostResult::Unreachable,
@@ -270,6 +333,9 @@ impl SyncReconcilerUseCase {
                     reports.push(report);
                 }
                 Reachability::Reachable => {
+                    if !options.dry_run {
+                        state.observe_reachable(&inspection.host.name, now);
+                    }
                     if inspection.drifted() {
                         if options.plan || options.dry_run {
                             plan.push(SyncPlanEntry {
@@ -290,6 +356,23 @@ impl SyncReconcilerUseCase {
             }
         }
         changed = Self::order_last(changed, &options.last_hosts);
+
+        // Under `canary` the first host of the first wave is the probe host
+        // (ADR-005). No election is needed, and none is written: only hosts
+        // that answered and drifted enter `changed`, so an unreachable canary
+        // cannot exist and cannot block the rollout. Naming it is enough - an
+        // operator reading the journal should not have to infer the order.
+        if matches!(
+            RolloutStrategy::parse(&options.strategy),
+            Some(RolloutStrategy::Canary)
+        ) {
+            if let Some(first) = changed.first() {
+                tracing::info!(
+                    canary = %first.name,
+                    "canary selected from the hosts that must change"
+                );
+            }
+        }
 
         if options.dry_run {
             for host in &changed {
@@ -325,11 +408,6 @@ impl SyncReconcilerUseCase {
 
         if changed.is_empty() {
             let settled = reports.iter().all(|host| host.result.is_settled());
-            let unreachable: Vec<String> = reports
-                .iter()
-                .filter(|host| host.result == SyncHostResult::Unreachable)
-                .map(|host| host.host.clone())
-                .collect();
             let report = SyncReport {
                 revision: head.clone(),
                 previous_revision: Some(local_before),
@@ -343,16 +421,13 @@ impl SyncReconcilerUseCase {
             if settled {
                 state.record_success(head);
             } else {
-                // Nothing to deploy, but some hosts did not answer. Record the
-                // revision the observed fleet reached and keep the missing ones
-                // in the probe list: the next cycle probes only those, and a
-                // full check runs as soon as one returns. Leaving the revision
-                // unset here is what would force a full sweep every minute.
+                // Nothing to deploy, but some hosts did not answer. Their state
+                // is already in the memory written by the sweep: the next cycle
+                // probes a host only when its retry is due.
                 let revision = head;
                 state.last_attempt_rev = Some(revision.clone());
                 state.last_applied_rev = Some(revision);
                 state.in_progress = None;
-                state.unreachable = unreachable;
             }
             state_store.save(&state).await?;
             self.notify(&report, options).await;
@@ -394,7 +469,7 @@ impl SyncReconcilerUseCase {
         };
 
         if failed {
-            report.backoff_secs = state.record_failure(now_secs());
+            report.backoff_secs = state.record_failure(now_secs(), head.clone());
             report.error = Some(format!(
                 "{} host(s) failed",
                 report
@@ -407,18 +482,12 @@ impl SyncReconcilerUseCase {
             state.record_success(head);
         } else {
             // Some hosts were unreachable: record the revision the observed
-            // fleet reached, keep the missing hosts in the probe list, and skip
-            // the backoff. The next cycle probes only those hosts; a full check
-            // runs as soon as one answers.
+            // fleet reached and skip the backoff. Each host's condition is
+            // already in the memory the sweep wrote; the next cycle probes a
+            // host only when its retry is due.
             state.last_attempt_rev = Some(head.clone());
             state.last_applied_rev = Some(head);
             state.in_progress = None;
-            state.unreachable = report
-                .hosts
-                .iter()
-                .filter(|host| host.result == SyncHostResult::Unreachable)
-                .map(|host| host.host.clone())
-                .collect();
         }
         state_store.save(&state).await?;
         self.notify(&report, options).await;
@@ -501,6 +570,26 @@ impl SyncReconcilerUseCase {
     /// Hosts in `last_hosts` and the executing host declare a dependency on
     /// every other target, which the existing DAG planner turns into a final
     /// wave.
+    /// Records what a failed probe means for host memory.
+    ///
+    /// A refusal is stored as a defect, an unanswered probe as an outage: the
+    /// operator has to be able to tell "the key is wrong" from "the machine is
+    /// off", and only one of those resolves itself with time.
+    fn observe_probe_error(
+        state: &mut SyncState,
+        host: &str,
+        now: u64,
+        policy: &RetryPolicy,
+        error: &NodError,
+    ) {
+        match error {
+            NodError::Auth { detail } => state.observe_misconfigured(host, now, detail.clone()),
+            _ => {
+                state.observe_offline(host, now, policy);
+            }
+        }
+    }
+
     fn order_last(mut hosts: Vec<HostEntity>, last_hosts: &[String]) -> Vec<HostEntity> {
         let last: Vec<String> = hosts
             .iter()
@@ -1026,10 +1115,12 @@ mod tests {
             Some("bbb"),
             "the observed fleet reached the revision"
         );
-        assert_eq!(
-            last.unreachable,
-            vec!["atlas".to_string()],
-            "the missing host stays in the probe list instead of forcing a full sweep"
+        assert!(
+            matches!(
+                last.host("atlas").map(|memory| &memory.condition),
+                Some(HostCondition::Offline { .. })
+            ),
+            "the missing host is remembered as offline instead of forcing a full sweep"
         );
     }
 
@@ -1043,7 +1134,11 @@ mod tests {
 
         let mut state = SyncState::new("origin/main", "main");
         state.record_success("bbb");
-        state.unreachable = vec!["atlas".to_string()];
+        state.observe_offline(
+            "atlas",
+            now_secs().saturating_sub(120),
+            &RetryPolicy::from_options(&options()),
+        );
         let mut store = MockState::new();
         store
             .expect_load()
@@ -1082,7 +1177,11 @@ mod tests {
 
         let mut state = SyncState::new("origin/main", "main");
         state.record_success("bbb");
-        state.unreachable = vec!["atlas".to_string()];
+        state.observe_offline(
+            "atlas",
+            now_secs().saturating_sub(120),
+            &RetryPolicy::from_options(&options()),
+        );
         let mut store = MockState::new();
         store
             .expect_load()

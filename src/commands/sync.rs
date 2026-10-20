@@ -75,13 +75,43 @@ pub(crate) fn validate(options: &SyncOptions) -> Result<(), NodError> {
             "--interval must be at least 15 seconds (ADR-028)",
         ));
     }
+    if options.gate_interval_secs > 0 && options.gate_interval_secs < 5 {
+        return Err(NodError::config(
+            "--gate-interval must be 0 (off) or at least 5 seconds",
+        ));
+    }
     if options.jitter_percent > 50 {
         return Err(NodError::config("--jitter must be at most 50 percent"));
     }
     if options.concurrency == 0 {
         return Err(NodError::config("--concurrency must be at least 1"));
     }
+    if options.offline_backoff_secs == 0 {
+        return Err(NodError::config(
+            "--offline-backoff must be at least 1 second",
+        ));
+    }
+    if options.offline_backoff_max_secs < options.offline_backoff_secs {
+        return Err(NodError::config(
+            "--offline-backoff-max must not be smaller than --offline-backoff",
+        ));
+    }
     Ok(())
+}
+
+/// Reads the remote head without fetching.
+///
+/// The daemon's gate uses this to notice a push within seconds; it is the
+/// cheapest possible observation, which is what lets it run far more often than
+/// a sweep without touching the fleet or the store.
+pub(crate) async fn remote_head(
+    ctx: &AppContext,
+    flake_path: &Path,
+    options: &SyncOptions,
+) -> Result<String, NodError> {
+    ctx.git_port()?
+        .remote_head(flake_path, &options.remote, &options.branch)
+        .await
 }
 
 /// Runs one cycle over the lazily selected host set.

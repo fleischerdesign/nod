@@ -18,6 +18,24 @@ use crate::domain::ssh_args::{build_ssh_args, build_ssh_opts};
 /// activation.
 pub struct SshCliDeployer;
 
+/// `true` when an SSH failure looks like a credential or host-key problem.
+///
+/// SSH reports authentication failures only as text, so the classification
+/// lives in one place and turns into a typed error at the boundary. Everything
+/// else is an outage: routed, silent, or refused.
+fn looks_like_auth_failure(stderr: &str) -> bool {
+    let lowered = stderr.to_lowercase();
+    [
+        "permission denied",
+        "host key verification failed",
+        "no matching host key",
+        "too many authentication failures",
+        "authentication failed",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
 impl SshCliDeployer {
     pub fn new() -> Self {
         Self
@@ -70,11 +88,22 @@ impl DeployerPort for SshCliDeployer {
         })
         .await?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             // A failed query is not "no live closure": conflating the two made
             // a status reader without the deploy key report every remote host
             // as drifted. The caller must be able to tell "unknown" from
             // "absent".
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            //
+            // SSH reports authentication failure as an exit status and a
+            // message; that is the only signal it offers, so it is matched in
+            // one place and surfaced as a typed error.
+            if looks_like_auth_failure(&stderr) {
+                return Err(NodError::auth(format!(
+                    "{} refused our credentials: {}",
+                    host.name,
+                    stderr.trim()
+                )));
+            }
             return Err(NodError::deployment(format!(
                 "cannot read the live closure of {}: {}",
                 host.name,

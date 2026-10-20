@@ -12,7 +12,10 @@ use crate::application::context::AppContext;
 use crate::application::use_cases::sync_inspect::inspect_hosts;
 use crate::domain::errors::NodError;
 use crate::domain::host::HostEntity;
-use crate::domain::sync::{now_secs, SyncHostStatus, SyncState, SyncStatus};
+use crate::domain::sync::{
+    now_secs, HostCondition, HostStateEntry, ProbePolicy, RetryPolicy, SyncHostStatus, SyncState,
+    SyncStatus,
+};
 use crate::domain::watch::SyncOptions;
 
 /// Builds a [`SyncStatus`] snapshot.
@@ -71,6 +74,9 @@ impl SyncStatusUseCase {
                 hosts,
                 options.concurrency,
                 options.verbose,
+                // A status query was asked to observe: it must not inherit the
+                // daemon's retry memory and report a host it did not probe.
+                &ProbePolicy::probe_all(),
             )
             .await?;
             host_statuses = inspections
@@ -86,6 +92,33 @@ impl SyncStatusUseCase {
         }
 
         let backoff_secs = state.backoff_remaining(now_secs());
+        let policy = RetryPolicy::from_options(options);
+        let conditions = state
+            .hosts
+            .iter()
+            .map(|(host, memory)| HostStateEntry {
+                host: host.clone(),
+                label: if memory.condition.is_gone(now_secs(), policy.gone_after_secs) {
+                    "gone".to_string()
+                } else {
+                    memory.condition.label().to_string()
+                },
+                since: memory.condition.since(),
+                next_probe_in: match memory.condition {
+                    HostCondition::Offline { next_probe_at, .. } => {
+                        Some(next_probe_at.saturating_sub(now_secs()))
+                    }
+                    _ => None,
+                },
+                detail: match &memory.condition {
+                    HostCondition::Misconfigured { detail, .. } => Some(detail.clone()),
+                    HostCondition::Offline { attempts, .. } => {
+                        Some(format!("{attempts} probe(s) failed"))
+                    }
+                    HostCondition::Reachable => None,
+                },
+            })
+            .collect();
 
         Ok(SyncStatus {
             local_revision,
@@ -93,7 +126,7 @@ impl SyncStatusUseCase {
             applied_revision: state.last_applied_rev,
             behind,
             backoff_secs,
-            unreachable: state.unreachable,
+            conditions,
             hosts: host_statuses,
             state_error,
         })

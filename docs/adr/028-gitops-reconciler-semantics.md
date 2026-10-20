@@ -42,13 +42,27 @@ so there is no implicit fleet default:
 
 ### 3. Trigger model
 
-- Each cycle starts with `git ls-remote <remote> <branch>` (one small request).
-  Only a changed head triggers `git fetch`.
-- Default interval 60 s; values below 15 s are rejected as a configuration error.
-- Jitter of ±10 % by default, so many hosts sharing a repository do not poll in
-  lockstep.
-- Errors back off exponentially (30 s, 60 s, 120 s, … capped at 10 min) and reset
-  on success. A broken commit is not rebuilt every cycle.
+Two cadences, one truth. The **sweep** is the authoritative cycle: it probes,
+evaluates and deploys. The **gate** is a cheap remote-head check that may start
+a sweep earlier than its cadence.
+
+- The gate runs `git ls-remote <remote> <branch>` every `--gate-interval`
+  (default 15 s) and compares the head with its previous observation. A change
+  starts a sweep immediately, so a push is noticed in seconds rather than an
+  interval.
+- The gate never *replaces* a sweep. Host drift happens without a push - a
+  manual `nixos-rebuild`, a reboot into an older generation, a dead unit - so
+  the sweep keeps its own cadence (`--interval`, default 60 s) whether or not
+  the remote moved.
+- `--gate-interval 0` disables the gate. That is the right setting for a
+  repository on a local path, where `ls-remote` has no meaning.
+- Values below 5 s are rejected; the sweep still requires at least 15 s.
+- Jitter of ±10 % applies to both cadences, so many hosts sharing a repository
+  neither poll nor check in lockstep.
+- Errors back off exponentially (30 s, 60 s, 120 s, … capped at 10 min).
+- A backoff belongs to the revision that failed. A newer remote head clears it:
+  waiting out a pause for code that cannot be its cause is pure delay, and that
+  pause is precisely what delays a fix.
 
 ### 4. Change detection
 
@@ -81,11 +95,25 @@ terminal states. They deliberately do not extend the ADR-003 state machine: a
 skipped or unreachable host never enters a deployment lifecycle at all.
 
 Reachability is checked before evaluation, in parallel with the rest of the
-sweep. An unreachable host is reported and skipped so an offline laptop cannot
-turn every cycle into a failed deployment. While the applied revision is current
-and hosts remain unreachable, the next cycles probe only those hosts: an offline
-laptop costs one TCP probe per interval instead of a fleet-wide evaluation, and
-a full check runs as soon as one answers.
+sweep. What a probe learned is remembered per host, in one of three conditions:
+
+- `reachable` - the host answered.
+- `offline` - the host did not answer. The next probe is deferred by an
+  exponential delay (60 s, 120 s, … capped at 30 min by default), so an offline
+  laptop costs *no* probe instead of one per cycle. An outage longer than
+  `--gone-after` (24 h by default) is labelled `gone` in `nod sync-status` - a
+  label, never a removal: the inventory is the truth, and a wrong address must
+  not look like success.
+- `misconfigured` - the host answers but refuses our credentials. This is a
+  typed condition (`NodError::Auth`), never conflated with an outage: a wrong
+  deploy key needs an operator, not time. Conflating the two is how a broken
+  rollout hides behind a plausible label.
+
+Only hosts that answered *and* drifted enter the rollout. A designated canary
+therefore cannot be an unreachable host and cannot hold back the fleet, and no
+election mechanism is needed: under `--strategy canary` the first host in
+deployment order is logged as the canary, so the journal states the order
+instead of leaving it to inference.
 
 ### 6. Health and rollback
 
@@ -123,20 +151,32 @@ applied state is *derived* from closures and must never be trusted over them:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "repo": "github.com/example/nixfiles",
   "branch": "main",
   "last_attempt_rev": "…",
   "last_applied_rev": "…",
   "consecutive_failures": 0,
   "backoff_until": null,
-  "in_progress": { "rev": "…", "started_at": "…", "hosts": ["…"] }
+  "backoff_rev": null,
+  "in_progress": { "rev": "…", "started_at": "…", "hosts": ["…"] },
+  "hosts": {
+    "hom-srv-01": {
+      "condition": { "kind": "offline", "since": 0, "attempts": 3, "next_probe_at": 0 },
+      "last_seen": 0
+    }
+  }
 }
 ```
 
 `in_progress` is written before the first activation and cleared only after a
 complete report. A run that starts with a non-empty `in_progress` performs a
 drift check instead of assuming the previous attempt succeeded.
+
+`backoff_rev` is the revision the current pause belongs to; a different remote
+head clears the pause. `hosts` is the probe memory described in §5. Both are
+memory, not truth: a document written by an older schema version is discarded
+whole, which costs one sweep and nothing else.
 
 A PID lock file in the state directory admits exactly one reconciler per
 repository. A lock whose owner is gone is reclaimed; without a process probe
@@ -149,10 +189,16 @@ unit — in a NixOS fleet the module options that render that unit — and not a
 second `.nod.toml [sync]` tier:
 
 ```
-remote, branch, interval, jitter, state-dir,
+remote, branch, interval, gate-interval, jitter, state-dir,
+offline-backoff, offline-backoff-max, gone-after,
 strategy, batch-size, concurrency, fail-fast, no-auto-rollback,
 allow-downgrade, require-signature, last-host, notify, json, dry-run
 ```
+
+The cadence knobs are separable on purpose. A fleet of servers keeps the gate
+short and the sweep short; a fleet with a laptop that sleeps for days leaves the
+gate short and stretches `--offline-backoff` and `--gone-after`. None of that
+requires a fork, and none of it is a constant in the loop.
 
 Rationale: a daemon started by systemd already has one declarative source for
 its arguments. Duplicating them in `.nod.toml` would create two places to
@@ -166,7 +212,8 @@ NixOS module in the consuming fleet owns it.
 
 ```
 nod sync   [--once] [--dry-run] [--target T | --all] [--tag TAG] [--role ROLE]
-           [--interval S] [--jitter P] [--state-dir PATH]
+           [--interval S] [--gate-interval S] [--jitter P] [--state-dir PATH]
+           [--offline-backoff S] [--offline-backoff-max S] [--gone-after S]
            [--strategy S] [--batch-size N] [--concurrency N] [--fail-fast]
            [--no-auto-rollback] [--allow-downgrade] [--require-signature]
            [--last-host HOST] [--notify COMMAND] [--json]

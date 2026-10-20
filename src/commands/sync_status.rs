@@ -9,7 +9,7 @@ use crate::application::context::AppContext;
 use crate::application::use_cases::sync_status::SyncStatusUseCase;
 use crate::commands::wiring;
 use crate::domain::errors::NodError;
-use crate::domain::sync::SyncStatus;
+use crate::domain::sync::{now_secs, SyncStatus};
 use crate::domain::watch::SyncOptions;
 
 /// Executes the status query and renders it.
@@ -25,6 +25,20 @@ pub async fn execute(
         .await?;
     render(&status, options.json);
     Ok(())
+}
+
+/// Renders a duration since `since` in the largest useful unit.
+fn age(now: u64, since: Option<u64>) -> String {
+    let Some(since) = since else {
+        return "unknown".to_string();
+    };
+    let secs = now.saturating_sub(since);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
 }
 
 fn render(status: &SyncStatus, json: bool) {
@@ -60,12 +74,27 @@ fn render(status: &SyncStatus, json: bool) {
     if let Some(error) = &status.state_error {
         println!("  {} state unreadable: {error}", "!".yellow());
     }
-    if !status.unreachable.is_empty() {
-        println!(
-            "  {} unreachable: {}",
+
+    // Host conditions are the reconciler's memory. They are printed even when
+    // this call did not probe anything: "offline for an hour" is the answer to
+    // "why is this host not at the revision", and re-probing would not change
+    // it. A condition that needs no action (`reachable`) stays quiet.
+    let now = now_secs();
+    for entry in status.conditions.iter().filter(|e| e.label != "reachable") {
+        let mut line = format!(
+            "  {} {} {} for {}",
             "!".yellow(),
-            status.unreachable.join(", ")
+            entry.host.bold(),
+            entry.label.yellow(),
+            age(now, entry.since)
         );
+        if let Some(detail) = &entry.detail {
+            line.push_str(&format!(", {detail}"));
+        }
+        if let Some(seconds) = entry.next_probe_in {
+            line.push_str(&format!(", next probe in {seconds}s"));
+        }
+        println!("{line}");
     }
 
     for host in &status.hosts {
@@ -85,4 +114,27 @@ fn render(status: &SyncStatus, json: bool) {
 
 fn short(revision: &str) -> &str {
     revision.get(..12).unwrap_or(revision)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn age_picks_the_largest_useful_unit() {
+        assert_eq!(age(1_000, Some(970)), "30s");
+        assert_eq!(age(1_000, Some(700)), "5m");
+        assert_eq!(age(100_000, Some(92_800)), "2h");
+        assert_eq!(age(200_000, Some(27_200)), "2d");
+    }
+
+    #[test]
+    fn age_never_underflows_on_a_clock_that_jumped_back() {
+        assert_eq!(age(100, Some(500)), "0s");
+    }
+
+    #[test]
+    fn a_missing_timestamp_is_reported_as_unknown() {
+        assert_eq!(age(100, None), "unknown");
+    }
 }

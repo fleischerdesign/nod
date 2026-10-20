@@ -28,8 +28,11 @@ pub struct SyncOptions {
     pub remote: String,
     /// Target Git branch (default: `main`).
     pub branch: String,
-    /// Reconciliation interval in seconds.
+    /// Reconciliation interval in seconds: the authoritative sweep.
     pub interval_secs: u64,
+    /// Interval in seconds between remote-head checks that may prepose a
+    /// sweep. Zero disables the gate and leaves the sweep as the only cadence.
+    pub gate_interval_secs: u64,
     /// Random spread applied to the interval, in percent (0-50).
     pub jitter_percent: u8,
     /// Target specifiers; empty means the caller must not guess (ADR-028).
@@ -58,6 +61,13 @@ pub struct SyncOptions {
     pub require_signature: bool,
     /// Hosts that must be deployed after every other target.
     pub last_hosts: Vec<String>,
+    /// First retry delay in seconds for a host that did not answer.
+    pub offline_backoff_secs: u64,
+    /// Upper bound in seconds for the offline retry delay.
+    pub offline_backoff_max_secs: u64,
+    /// Seconds offline after which a host is reported as gone rather than
+    /// unreachable. Zero disables the distinction.
+    pub gone_after_secs: u64,
     /// Commands run after each cycle; they receive the report as JSON on stdin.
     pub notify: Vec<String>,
     /// Emit the report as JSON.
@@ -78,6 +88,7 @@ impl Default for SyncOptions {
             remote: "origin".to_string(),
             branch: "main".to_string(),
             interval_secs: 60,
+            gate_interval_secs: 15,
             jitter_percent: 10,
             targets: Vec::new(),
             all: false,
@@ -92,6 +103,9 @@ impl Default for SyncOptions {
             allow_downgrade: false,
             require_signature: false,
             last_hosts: Vec::new(),
+            offline_backoff_secs: 60,
+            offline_backoff_max_secs: 1800,
+            gone_after_secs: 86400,
             notify: Vec::new(),
             json: false,
             verbose: false,

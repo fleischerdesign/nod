@@ -23,6 +23,10 @@ pub enum NodError {
     /// Reachability and post-activation verification failures.
     #[error("health check error: {detail}")]
     HealthCheck { detail: String },
+    /// The host answered but refused our credentials. Distinct from an
+    /// unreachable host: this needs an operator, not a retry.
+    #[error("authentication error: {detail}")]
+    Auth { detail: String },
     /// Secrets verification or rekeying failures.
     #[error("secret error: {detail}")]
     Secret { detail: String },
@@ -35,6 +39,13 @@ pub enum NodError {
 }
 
 impl NodError {
+    /// Raised when a host answers but rejects our credentials.
+    pub fn auth(detail: impl Into<String>) -> Self {
+        NodError::Auth {
+            detail: detail.into(),
+        }
+    }
+
     /// Raised when the reconciler refuses to act before deploying anything.
     pub fn refused(detail: impl Into<String>) -> Self {
         NodError::Refused {

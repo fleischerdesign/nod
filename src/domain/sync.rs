@@ -9,11 +9,18 @@
 //!   presentation never has to know how the deployment pipeline reports.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::domain::watch::SyncOptions;
+
 /// Version of the on-disk state document.
-pub const STATE_VERSION: u32 = 1;
+///
+/// Version 2 replaced the flat `unreachable` list with per-host memory. The
+/// state is memory, never the source of truth: an older document is discarded
+/// and costs one sweep, not correctness.
+pub const STATE_VERSION: u32 = 2;
 
 /// First backoff step after a failed cycle, in seconds.
 const BACKOFF_BASE_SECS: u64 = 30;
@@ -46,12 +53,16 @@ pub struct SyncState {
     pub consecutive_failures: u32,
     /// Unix time before which no new cycle starts.
     pub backoff_until: Option<u64>,
+    /// Revision whose failure the current backoff belongs to. A backoff is a
+    /// statement about one revision, not about the fleet: a newer revision
+    /// clears it, because the failure cannot apply to code that did not exist.
+    #[serde(default)]
+    pub backoff_rev: Option<String>,
     /// Marker written before the first activation and cleared after a report.
     pub in_progress: Option<InProgress>,
-    /// Hosts the last cycle could not reach. While this is non-empty, the next
-    /// cycles probe only these hosts instead of re-evaluating the fleet.
+    /// What the last cycles learned about each host, keyed by host name.
     #[serde(default)]
-    pub unreachable: Vec<String>,
+    pub hosts: BTreeMap<String, HostMemory>,
 }
 
 /// A cycle that started activating and has not reported yet.
@@ -65,6 +76,141 @@ pub struct InProgress {
     pub hosts: Vec<String>,
 }
 
+/// How a host that is not answering is retried (ADR-028).
+///
+/// The cadence is data, not a constant in the loop: a fleet with a laptop that
+/// sleeps for days stretches it without touching code, and a fleet of servers
+/// keeps it short without a fork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Delay before the first retry, in seconds.
+    pub base_secs: u64,
+    /// Ceiling for the retry delay, in seconds.
+    pub max_secs: u64,
+    /// Seconds offline after which a host is reported as gone (0 disables).
+    pub gone_after_secs: u64,
+}
+
+impl RetryPolicy {
+    /// Derives the policy from the reconciler options.
+    pub fn from_options(options: &SyncOptions) -> Self {
+        Self {
+            base_secs: options.offline_backoff_secs.max(1),
+            max_secs: options.offline_backoff_max_secs.max(1),
+            gone_after_secs: options.gone_after_secs,
+        }
+    }
+
+    /// Delay before the next probe after `attempts` consecutive failed probes.
+    pub fn delay(&self, attempts: u32) -> u64 {
+        let shift = attempts.saturating_sub(1).min(16);
+        self.base_secs
+            .saturating_mul(1u64 << shift)
+            .min(self.max_secs.max(self.base_secs))
+    }
+}
+
+/// What the reconciler knows about one host between cycles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostCondition {
+    /// The host answered when it was last probed.
+    Reachable,
+    /// The host did not answer: off, rebooting, or cut off.
+    Offline {
+        /// Unix time the outage was first observed.
+        since: u64,
+        /// Consecutive failed probes.
+        attempts: u32,
+        /// Unix time before which the host is not probed again.
+        next_probe_at: u64,
+    },
+    /// The host answers but refuses us: a wrong key or a changed host key.
+    ///
+    /// This is a configuration defect, not an outage. Skipping it like an
+    /// offline host would hide a broken rollout behind a plausible label.
+    Misconfigured {
+        /// Unix time the condition was first observed.
+        since: u64,
+        /// Operator-facing reason.
+        detail: String,
+    },
+}
+
+impl HostCondition {
+    /// Short label for status output and audit records.
+    pub fn label(&self) -> &'static str {
+        match self {
+            HostCondition::Reachable => "reachable",
+            HostCondition::Offline { .. } => "offline",
+            HostCondition::Misconfigured { .. } => "misconfigured",
+        }
+    }
+
+    /// Unix time the condition was first observed, when it is a defect.
+    pub fn since(&self) -> Option<u64> {
+        match self {
+            HostCondition::Reachable => None,
+            HostCondition::Offline { since, .. } | HostCondition::Misconfigured { since, .. } => {
+                Some(*since)
+            }
+        }
+    }
+
+    /// `true` when the host has been away long enough to be treated as gone
+    /// rather than temporarily unreachable.
+    pub fn is_gone(&self, now: u64, threshold_secs: u64) -> bool {
+        if threshold_secs == 0 {
+            return false;
+        }
+        match self {
+            HostCondition::Offline { since, .. } => now.saturating_sub(*since) >= threshold_secs,
+            _ => false,
+        }
+    }
+}
+
+/// One host's remembered condition and when it was last seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostMemory {
+    /// What the last probe learned.
+    pub condition: HostCondition,
+    /// Unix time the host was last observed answering, zero when never.
+    pub last_seen: u64,
+}
+
+/// The hosts a sweep may probe now, and why the rest wait.
+///
+/// Kept as a value object so the decision is pure and testable, and so a
+/// caller that genuinely wants a full sweep (`nod sync-status --drift`) says
+/// so explicitly instead of inheriting the daemon's memory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProbePolicy {
+    deferred: BTreeMap<String, String>,
+}
+
+impl ProbePolicy {
+    /// Probes every host: the caller asked for observation, not for memory.
+    pub fn probe_all() -> Self {
+        Self::default()
+    }
+
+    /// Defers `host` with a reason.
+    pub fn defer(&mut self, host: impl Into<String>, reason: impl Into<String>) {
+        self.deferred.insert(host.into(), reason.into());
+    }
+
+    /// The reason `host` is not probed, when it is deferred.
+    pub fn reason(&self, host: &str) -> Option<&str> {
+        self.deferred.get(host).map(String::as_str)
+    }
+
+    /// `true` when every host may be probed.
+    pub fn is_empty(&self) -> bool {
+        self.deferred.is_empty()
+    }
+}
+
 impl SyncState {
     /// A fresh state document for one repository and branch.
     pub fn new(repo: impl Into<String>, branch: impl Into<String>) -> Self {
@@ -76,28 +222,141 @@ impl SyncState {
             last_applied_rev: None,
             consecutive_failures: 0,
             backoff_until: None,
+            backoff_rev: None,
             in_progress: None,
-            unreachable: Vec::new(),
+            hosts: BTreeMap::new(),
         }
     }
 
+    /// What is known about `host`, when anything is.
+    pub fn host(&self, host: &str) -> Option<&HostMemory> {
+        self.hosts.get(host)
+    }
+
+    /// The probe policy implied by what the last cycles learned.
+    pub fn probe_policy(&self, now: u64, policy: &RetryPolicy) -> ProbePolicy {
+        let mut deferred = BTreeMap::new();
+        for (name, memory) in &self.hosts {
+            if let HostCondition::Offline {
+                since,
+                attempts,
+                next_probe_at,
+            } = memory.condition
+            {
+                if next_probe_at > now {
+                    let wait = (next_probe_at - now).min(policy.max_secs.max(1));
+                    deferred.insert(
+                        name.clone(),
+                        format!(
+                            "offline since {since} ({attempts} probe(s) failed), next probe in {wait}s"
+                        ),
+                    );
+                }
+            }
+        }
+        ProbePolicy { deferred }
+    }
+
+    /// Records that `host` answered.
+    pub fn observe_reachable(&mut self, host: &str, now: u64) {
+        self.hosts.insert(
+            host.to_string(),
+            HostMemory {
+                condition: HostCondition::Reachable,
+                last_seen: now,
+            },
+        );
+    }
+
+    /// Records a failed probe and returns the delay before the next one.
+    ///
+    /// The `since` of an ongoing outage is preserved, so the report says how
+    /// long a host has been away rather than when it was last tried.
+    pub fn observe_offline(&mut self, host: &str, now: u64, policy: &RetryPolicy) -> u64 {
+        let (since, attempts) = match self.hosts.get(host).map(|m| &m.condition) {
+            Some(HostCondition::Offline {
+                since, attempts, ..
+            }) => (*since, attempts.saturating_add(1)),
+            _ => (now, 1),
+        };
+        let delay = policy.delay(attempts);
+        self.hosts.insert(
+            host.to_string(),
+            HostMemory {
+                condition: HostCondition::Offline {
+                    since,
+                    attempts,
+                    next_probe_at: now.saturating_add(delay),
+                },
+                last_seen: self
+                    .hosts
+                    .get(host)
+                    .map(|memory| memory.last_seen)
+                    .unwrap_or(0),
+            },
+        );
+        delay
+    }
+
+    /// Records that `host` answers but refuses us: a wrong key or a changed
+    /// host key. This is not an outage and must reach the operator.
+    pub fn observe_misconfigured(&mut self, host: &str, now: u64, detail: impl Into<String>) {
+        let since = match self.hosts.get(host).map(|m| &m.condition) {
+            Some(HostCondition::Misconfigured { since, .. }) => *since,
+            _ => now,
+        };
+        self.hosts.insert(
+            host.to_string(),
+            HostMemory {
+                condition: HostCondition::Misconfigured {
+                    since,
+                    detail: detail.into(),
+                },
+                last_seen: now,
+            },
+        );
+    }
+
     /// Seconds still to wait before the next cycle, zero when not backing off.
+    ///
+    /// Capped at the backoff ceiling: a wall clock that jumped backwards must
+    /// not turn a 10-minute pause into an hour-long one.
     pub fn backoff_remaining(&self, now: u64) -> u64 {
         self.backoff_until
             .map(|until| until.saturating_sub(now))
             .unwrap_or(0)
+            .min(BACKOFF_MAX_SECS)
     }
 
-    /// Records a failed cycle and returns the backoff that now applies.
-    pub fn record_failure(&mut self, now: u64) -> u64 {
+    /// Records a failed cycle for `rev` and returns the backoff that applies.
+    pub fn record_failure(&mut self, now: u64, rev: impl Into<String>) -> u64 {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let shift = self.consecutive_failures.saturating_sub(1).min(6);
         let backoff = BACKOFF_BASE_SECS
             .saturating_mul(1u64 << shift)
             .min(BACKOFF_MAX_SECS);
         self.backoff_until = Some(now.saturating_add(backoff));
+        self.backoff_rev = Some(rev.into());
         self.in_progress = None;
         backoff
+    }
+
+    /// Drops a backoff that belonged to a superseded revision.
+    ///
+    /// Returns `true` when a backoff was cleared. The caller observed a remote
+    /// head that is not the revision that failed, so waiting out the backoff
+    /// would only delay the fix.
+    pub fn supersede_backoff(&mut self, remote: &str) -> bool {
+        if self.backoff_remaining(now_secs()) == 0 {
+            return false;
+        }
+        if self.backoff_rev.as_deref() == Some(remote) {
+            return false;
+        }
+        self.consecutive_failures = 0;
+        self.backoff_until = None;
+        self.backoff_rev = None;
+        true
     }
 
     /// Records a successful cycle: the backoff resets and the revision is
@@ -106,8 +365,8 @@ impl SyncState {
         self.last_applied_rev = Some(rev.into());
         self.consecutive_failures = 0;
         self.backoff_until = None;
+        self.backoff_rev = None;
         self.in_progress = None;
-        self.unreachable.clear();
     }
 
     /// Marks the start of an activation phase.
@@ -242,6 +501,22 @@ pub struct SyncHostStatus {
     pub target: Option<String>,
 }
 
+/// One host's remembered condition, for status output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostStateEntry {
+    /// Host name.
+    pub host: String,
+    /// Condition label: `reachable`, `offline`, `misconfigured` or `gone`.
+    pub label: String,
+    /// Unix time the condition was first observed, when it is a defect.
+    pub since: Option<u64>,
+    /// Seconds until the next probe, when the host is deferred.
+    pub next_probe_in: Option<u64>,
+    /// Operator-facing detail, when the condition carries one.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 /// Snapshot of the reconciler's view: revisions, state and optional drift.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStatus {
@@ -256,8 +531,9 @@ pub struct SyncStatus {
     pub behind: Option<bool>,
     /// Seconds until the next attempt, when backing off.
     pub backoff_secs: u64,
-    /// Hosts the last cycle could not reach.
-    pub unreachable: Vec<String>,
+    /// What the state remembers about each host.
+    #[serde(default)]
+    pub conditions: Vec<HostStateEntry>,
     /// Per-host drift, populated on request.
     #[serde(default)]
     pub hosts: Vec<SyncHostStatus>,
@@ -316,11 +592,11 @@ mod tests {
     #[test]
     fn backoff_grows_exponentially_and_is_capped() {
         let mut state = SyncState::new("repo", "main");
-        assert_eq!(state.record_failure(100), 30);
-        assert_eq!(state.record_failure(200), 60);
-        assert_eq!(state.record_failure(300), 120);
+        assert_eq!(state.record_failure(100, "a"), 30);
+        assert_eq!(state.record_failure(200, "a"), 60);
+        assert_eq!(state.record_failure(300, "a"), 120);
         for _ in 0..10 {
-            state.record_failure(400);
+            state.record_failure(400, "a");
         }
         assert_eq!(state.backoff_until, Some(400 + BACKOFF_MAX_SECS));
     }
@@ -328,7 +604,7 @@ mod tests {
     #[test]
     fn success_clears_backoff_and_records_revision() {
         let mut state = SyncState::new("repo", "main");
-        state.record_failure(100);
+        state.record_failure(100, "a");
         state.record_success("abc");
         assert_eq!(state.last_applied_rev.as_deref(), Some("abc"));
         assert_eq!(state.consecutive_failures, 0);
@@ -339,7 +615,7 @@ mod tests {
     #[test]
     fn backoff_remaining_never_underflows() {
         let mut state = SyncState::new("repo", "main");
-        state.record_failure(100);
+        state.record_failure(100, "a");
         assert_eq!(state.backoff_remaining(1000), 0);
     }
 
@@ -359,5 +635,98 @@ mod tests {
         assert!(!report.is_success());
         assert!(report.refused.is_some());
         assert!(report.error.is_none());
+    }
+
+    fn retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            base_secs: 60,
+            max_secs: 1800,
+            gone_after_secs: 86_400,
+        }
+    }
+
+    #[test]
+    fn the_retry_delay_grows_and_is_capped() {
+        let policy = retry_policy();
+        assert_eq!(policy.delay(1), 60);
+        assert_eq!(policy.delay(2), 120);
+        assert_eq!(policy.delay(3), 240);
+        assert_eq!(policy.delay(50), 1800);
+    }
+
+    #[test]
+    fn a_host_is_deferred_until_its_retry_is_due() {
+        let policy = retry_policy();
+        let mut state = SyncState::new("repo", "main");
+        state.observe_offline("atlas", 1_000, &policy);
+
+        let early = state.probe_policy(1_010, &policy);
+        assert!(
+            early.reason("atlas").is_some(),
+            "probing before the retry is due is the cost this exists to avoid"
+        );
+
+        let due = state.probe_policy(1_060, &policy);
+        assert!(due.reason("atlas").is_none());
+    }
+
+    #[test]
+    fn an_outage_keeps_its_original_start_time() {
+        let policy = retry_policy();
+        let mut state = SyncState::new("repo", "main");
+        state.observe_offline("atlas", 1_000, &policy);
+        state.observe_offline("atlas", 5_000, &policy);
+        assert_eq!(
+            state.host("atlas").and_then(|m| m.condition.since()),
+            Some(1_000),
+            "the report must say when the host went away, not when it was retried"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_stored_as_a_defect_not_an_outage() {
+        let mut state = SyncState::new("repo", "main");
+        state.observe_misconfigured("atlas", 1_000, "Permission denied (publickey)");
+        let memory = state.host("atlas").unwrap();
+        assert_eq!(memory.condition.label(), "misconfigured");
+        assert!(!memory.condition.is_gone(200_000, 86_400));
+    }
+
+    #[test]
+    fn a_host_offline_past_the_threshold_is_gone() {
+        let policy = retry_policy();
+        let mut state = SyncState::new("repo", "main");
+        state.observe_offline("atlas", 1_000, &policy);
+        let condition = &state.host("atlas").unwrap().condition;
+        assert!(!condition.is_gone(10_000, policy.gone_after_secs));
+        assert!(condition.is_gone(90_000, policy.gone_after_secs));
+    }
+
+    #[test]
+    fn a_newer_revision_clears_the_backoff() {
+        let mut state = SyncState::new("repo", "main");
+        state.record_failure(now_secs(), "bad");
+        assert!(
+            state.supersede_backoff("fix"),
+            "waiting out a backoff for code that does not exist is pure delay"
+        );
+        assert_eq!(state.backoff_remaining(now_secs()), 0);
+        assert_eq!(state.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn the_same_revision_keeps_its_backoff() {
+        let mut state = SyncState::new("repo", "main");
+        state.record_failure(now_secs(), "bad");
+        assert!(!state.supersede_backoff("bad"));
+        assert!(state.backoff_remaining(now_secs()) > 0);
+    }
+
+    #[test]
+    fn a_clock_that_jumped_back_cannot_stretch_the_pause() {
+        let mut state = SyncState::new("repo", "main");
+        state.record_failure(100_000, "a");
+        // The wall clock now claims an hour earlier than the failure.
+        assert!(state.backoff_remaining(96_400) <= BACKOFF_MAX_SECS);
     }
 }
