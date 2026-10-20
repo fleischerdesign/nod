@@ -127,9 +127,11 @@ impl SyncReconcilerUseCase {
                     backoff_secs: 0,
                     plan: Vec::new(),
                 };
-                state.record_success(report.revision.clone());
-                state_store.save(&state).await?;
-                self.notify(&report, options).await;
+                if !options.dry_run {
+                    state.record_success(report.revision.clone());
+                    state_store.save(&state).await?;
+                    self.notify(&report, options).await;
+                }
                 return Ok(report);
             }
 
@@ -149,7 +151,9 @@ impl SyncReconcilerUseCase {
                 }
             }
             state.unreachable = still_unreachable;
-            state_store.save(&state).await?;
+            if !options.dry_run {
+                state_store.save(&state).await?;
+            }
 
             if !any_back {
                 let report = SyncReport {
@@ -178,6 +182,15 @@ impl SyncReconcilerUseCase {
         if revision_unchanged {
             // Recovered cycle or first observation: verify drifts below.
         } else {
+            if options.dry_run {
+                // A preview writes nothing, including the checkout: integrating
+                // the remote here would be a side effect the caller did not ask
+                // for and, for a non-root caller, an impossible one.
+                return Ok(SyncReport::refused(
+                    local_before,
+                    format!("checkout is behind {remote}; a preview does not integrate"),
+                ));
+            }
             if let Err(error) = git
                 .fetch(flake_path, &options.remote, &options.branch)
                 .await
@@ -305,7 +318,8 @@ impl SyncReconcilerUseCase {
                 backoff_secs: 0,
                 plan,
             };
-            self.notify(&report, options).await;
+            // A preview also does not run notify hooks: they are deployment
+            // side effects, not part of an answer about what would happen.
             return Ok(report);
         }
 
@@ -839,12 +853,8 @@ mod tests {
     async fn dry_run_reports_drift_without_activating() {
         let mut git = MockGit::new();
         git.expect_is_dirty().returning(|_| Ok(false));
-        git.expect_local_head().returning(|_| Ok("aaa".into()));
+        git.expect_local_head().returning(|_| Ok("bbb".into()));
         git.expect_remote_head()
-            .returning(|_, _, _| Ok("bbb".into()));
-        git.expect_fetch().returning(|_, _, _| Ok(()));
-        git.expect_is_ancestor().returning(|_, _, _| Ok(true));
-        git.expect_fast_forward()
             .returning(|_, _, _| Ok("bbb".into()));
 
         let mut state = SyncState::new("origin/main", "main");
@@ -877,6 +887,42 @@ mod tests {
         assert!(!report.applied);
         assert_eq!(report.hosts.len(), 1);
         assert_eq!(report.hosts[0].result, SyncHostResult::Skipped);
+        assert_eq!(report.plan.len(), 1, "a plan describes the drifted host");
+        assert!(report.plan[0].current.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_preview_does_not_integrate_a_behind_checkout() {
+        let mut git = MockGit::new();
+        git.expect_is_dirty().returning(|_| Ok(false));
+        git.expect_local_head().returning(|_| Ok("aaa".into()));
+        git.expect_remote_head()
+            .returning(|_, _, _| Ok("bbb".into()));
+        // No fetch/ff expectation: a preview that integrates would panic here.
+
+        let mut store = MockState::new();
+        store.expect_load().returning(|| Ok(None));
+
+        let mut evaluator = MockEvaluator::new();
+        evaluator.expect_build_toplevel().times(0);
+
+        let ctx = context(git, store, evaluator, MockDeployer::new());
+        let mut options = options();
+        options.dry_run = true;
+
+        let report = SyncReconcilerUseCase::new(ctx)
+            .reconcile_once(Path::new("/repo"), &options, || async { Ok(vec![host()]) })
+            .await
+            .unwrap();
+
+        assert!(
+            report
+                .refused
+                .as_deref()
+                .unwrap_or_default()
+                .contains("behind"),
+            "a preview must say it cannot see the new revision: {report:?}"
+        );
     }
 
     #[tokio::test]
