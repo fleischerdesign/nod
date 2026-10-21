@@ -72,6 +72,36 @@ pub fn restarting_units(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Builds the observation the deployment compares, honouring the host's
+/// switches.
+///
+/// A disabled check contributes nothing to the snapshot, which is what makes
+/// opting out mean "do not judge this" rather than "judge it as clean".
+pub fn snapshot(
+    host: &HostEntity,
+    failed_output: &str,
+    restarting_output: &str,
+) -> crate::domain::health::HealthSnapshot {
+    use crate::domain::health::HealthSnapshot;
+
+    if !enabled(host) {
+        return HealthSnapshot::clean();
+    }
+
+    HealthSnapshot {
+        failed_units: if checks_failed_units(host) {
+            failed_units(failed_output)
+        } else {
+            Vec::new()
+        },
+        restarting_units: if checks_restart_loops(host) {
+            restarting_units(restarting_output)
+        } else {
+            Vec::new()
+        },
+    }
+}
+
 /// Probe timeout for `host`.
 pub fn timeout(host: &HostEntity) -> Duration {
     Duration::from_secs(u64::from(

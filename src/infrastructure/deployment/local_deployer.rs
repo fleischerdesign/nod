@@ -9,6 +9,7 @@ use std::time::Instant;
 use tokio::process::Command;
 
 use crate::domain::errors::NodError;
+use crate::domain::health::HealthSnapshot;
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::deployer::DeployerPort;
 
@@ -92,7 +93,12 @@ fn sanitize_unit_name(name: &str) -> String {
 }
 
 /// Verifies the freshly activated local system.
-async fn verify_local_health(host: &HostEntity) -> Result<(), NodError> {
+async fn verify_local_health(
+    host: &HostEntity,
+    baseline: Option<&HealthSnapshot>,
+) -> Result<(), NodError> {
+    use crate::domain::health::verdict_against;
+    use crate::domain::health::HealthVerdict;
     use crate::infrastructure::health::probe;
 
     if !probe::enabled(host) {
@@ -102,8 +108,45 @@ async fn verify_local_health(host: &HostEntity) -> Result<(), NodError> {
     let failed =
         run_local_probe(host, "systemctl", &["--failed", "--no-legend", "--plain"]).await?;
     let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND]).await?;
+    let current = probe::snapshot(host, &failed, &restarting);
 
-    probe::verdict_with_restarts(host, &failed, &restarting)
+    match verdict_against(baseline, &current) {
+        HealthVerdict::Degraded { units } => Err(NodError::health_check(format!(
+            "host {} degraded after activation: {}",
+            host.name,
+            units.join(", ")
+        ))),
+        HealthVerdict::DegradedPreExisting { units } => {
+            tracing::warn!(
+                host = %host.name,
+                units = %units.join(", "),
+                "health problems predate this deployment; not rolling back"
+            );
+            Ok(())
+        }
+        HealthVerdict::Healthy => Ok(()),
+    }
+}
+
+/// Observes the local host's health inputs, tolerating probe failures.
+///
+/// `None` means "could not observe", which the verdict treats as no baseline
+/// rather than as a clean host.
+async fn snapshot_local(host: &HostEntity) -> Option<HealthSnapshot> {
+    use crate::infrastructure::health::probe;
+
+    if !probe::enabled(host) {
+        return Some(HealthSnapshot::clean());
+    }
+
+    let failed = run_local_probe(host, "systemctl", &["--failed", "--no-legend", "--plain"])
+        .await
+        .ok()?;
+    let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND])
+        .await
+        .ok()?;
+
+    Some(probe::snapshot(host, &failed, &restarting))
 }
 
 /// Runs one local probe command under the host's timeout, returning its stdout.
@@ -187,6 +230,11 @@ impl DeployerPort for LocalDeployer {
 
         let root = running_as_root();
 
+        // Observe the host as it is, before this activation can change it.
+        // Best-effort: an unreadable baseline is a statement of ignorance, not
+        // a reason to skip verification (ADR-029).
+        let baseline = snapshot_local(host).await;
+
         let status = if is_agentless {
             let activate_bin = resolve_activation_binary(closure, &host.name)?;
             Command::new(&activate_bin).args([action]).status().await
@@ -228,7 +276,7 @@ impl DeployerPort for LocalDeployer {
             ));
         }
 
-        verify_local_health(host).await?;
+        verify_local_health(host, baseline.as_ref()).await?;
 
         if verbose {
             tracing::debug!(

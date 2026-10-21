@@ -10,6 +10,7 @@ pub mod errors;
 pub mod eval;
 pub mod flake;
 pub mod generation;
+pub mod health;
 pub mod host;
 pub mod info;
 pub mod plan;
