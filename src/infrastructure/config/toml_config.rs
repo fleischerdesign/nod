@@ -129,6 +129,7 @@ pub struct TomlRollout {
 pub struct TomlSystemd {
     pub check_running: Option<bool>,
     pub check_failed_units: Option<bool>,
+    pub check_restart_loops: Option<bool>,
     #[serde(default)]
     pub required_units: Option<Vec<String>>,
 }
@@ -494,6 +495,7 @@ fn to_health_config(h: &TomlHealth) -> HealthCheckConfig {
         Some(s) => SystemdHealthConfig {
             check_running: s.check_running,
             check_failed_units: s.check_failed_units,
+            check_restart_loops: s.check_restart_loops,
             required_units: s.required_units.clone(),
         },
         None => SystemdHealthConfig::default(),

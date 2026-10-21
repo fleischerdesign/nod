@@ -95,34 +95,41 @@ fn sanitize_unit_name(name: &str) -> String {
 async fn verify_local_health(host: &HostEntity) -> Result<(), NodError> {
     use crate::infrastructure::health::probe;
 
-    if !probe::enabled(host) || !probe::checks_failed_units(host) {
+    if !probe::enabled(host) {
         return Ok(());
     }
 
+    let failed =
+        run_local_probe(host, "systemctl", &["--failed", "--no-legend", "--plain"]).await?;
+    let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND]).await?;
+
+    probe::verdict_with_restarts(host, &failed, &restarting)
+}
+
+/// Runs one local probe command under the host's timeout, returning its stdout.
+async fn run_local_probe(
+    host: &HostEntity,
+    program: &str,
+    args: &[&str],
+) -> Result<String, NodError> {
+    use crate::infrastructure::health::probe;
+
     let probe_run = tokio::time::timeout(
         probe::timeout(host),
-        Command::new("systemctl")
-            .args(["--failed", "--no-legend", "--plain"])
-            .output(),
+        Command::new(program).args(args).output(),
     )
     .await;
 
-    let output = match probe_run {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            return Err(NodError::health_check(format!(
-                "cannot run the local health probe: {error}"
-            )))
-        }
-        Err(_) => {
-            return Err(NodError::health_check(format!(
-                "health probe on {} timed out",
-                host.name
-            )))
-        }
-    };
-
-    probe::verdict(host, &String::from_utf8_lossy(&output.stdout))
+    match probe_run {
+        Ok(Ok(output)) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Ok(Err(error)) => Err(NodError::health_check(format!(
+            "cannot run the local health probe: {error}"
+        ))),
+        Err(_) => Err(NodError::health_check(format!(
+            "health probe on {} timed out",
+            host.name
+        ))),
+    }
 }
 
 /// Deploys local hosts through `sudo <closure>/bin/switch-to-configuration`.

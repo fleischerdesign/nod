@@ -448,16 +448,25 @@ async fn run_ssh(
 async fn verify_remote_health(host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
     use crate::infrastructure::health::probe;
 
-    if !probe::enabled(host) || !probe::checks_failed_units(host) {
+    if !probe::enabled(host) {
         return Ok(());
     }
 
-    let args = build_ssh_args(
-        profile,
-        &host.target_host,
-        false,
-        &[probe::FAILED_UNITS_COMMAND.to_string()],
-    );
+    let failed = run_remote_probe(host, profile, probe::FAILED_UNITS_COMMAND).await?;
+    let restarting = run_remote_probe(host, profile, probe::RESTARTING_UNITS_COMMAND).await?;
+
+    probe::verdict_with_restarts(host, &failed, &restarting)
+}
+
+/// Runs one probe command on `host` over SSH, returning its stdout.
+async fn run_remote_probe(
+    host: &HostEntity,
+    profile: &SshProfile,
+    command: &str,
+) -> Result<String, NodError> {
+    use crate::infrastructure::health::probe;
+
+    let args = build_ssh_args(profile, &host.target_host, false, &[command.to_string()]);
     let probe_run = tokio::time::timeout(
         probe::timeout(host),
         run_ssh("ssh", &args, || {
@@ -469,25 +478,22 @@ async fn verify_remote_health(host: &HostEntity, profile: &SshProfile) -> Result
     )
     .await;
 
-    let output = match probe_run {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => {
-            return Err(NodError::health_check(format!(
-                "health probe on {} timed out",
-                host.name
-            )))
+    match probe_run {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                return Err(NodError::health_check(format!(
+                    "health probe on {} failed",
+                    host.name
+                )));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         }
-    };
-
-    if !output.status.success() {
-        return Err(NodError::health_check(format!(
-            "health probe on {} failed",
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(NodError::health_check(format!(
+            "health probe on {} timed out",
             host.name
-        )));
+        ))),
     }
-
-    probe::verdict(host, &String::from_utf8_lossy(&output.stdout))
 }
 
 /// Spawns `program` with `args` with stdio inherited (streamed to the

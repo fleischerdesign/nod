@@ -13,6 +13,22 @@ use crate::domain::host::HostEntity;
 /// Command that lists failed units without a legend or colour.
 pub const FAILED_UNITS_COMMAND: &str = "systemctl --failed --no-legend --plain";
 
+/// Command that prints the units systemd is restarting on its own.
+///
+/// `systemctl --failed` cannot answer this: a unit with `Restart=on-failure`
+/// that keeps dying is `activating`/`auto-restart`, not `failed`, so a restart
+/// loop is invisible to the failed-unit probe (ADR-029).
+///
+/// The trailing `true` is load-bearing: without it the pipeline exits with the
+/// status of the last test, so a host with nothing restarting would report a
+/// failed probe instead of a clean one.
+pub const RESTARTING_UNITS_COMMAND: &str = concat!(
+    "systemctl list-units --all --plain --no-legend --state=activating --no-pager | ",
+    "while read -r unit _; do ",
+    "[ \"$(systemctl show -p SubState --value \"$unit\")\" = auto-restart ] && echo \"$unit\"; ",
+    "done; true"
+);
+
 /// Parses `systemctl --failed --no-legend --plain` output into unit names.
 pub fn failed_units(output: &str) -> Vec<String> {
     output
@@ -37,11 +53,59 @@ pub fn checks_failed_units(host: &HostEntity) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether a restart loop makes `host` unhealthy.
+pub fn checks_restart_loops(host: &HostEntity) -> bool {
+    host.nod_config
+        .health_checks
+        .systemd
+        .check_restart_loops
+        .unwrap_or(true)
+}
+
+/// Unit names from the restarting-units probe, one per line.
+pub fn restarting_units(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Probe timeout for `host`.
 pub fn timeout(host: &HostEntity) -> Duration {
     Duration::from_secs(u64::from(
         host.nod_config.health_checks.timeout_secs.unwrap_or(60),
     ))
+}
+
+/// Turns the two probes into a health verdict.
+///
+/// A failed unit and a restart loop are separate answers because they are
+/// separate observations; either one makes the host unhealthy, and neither can
+/// be inferred from the other.
+pub fn verdict_with_restarts(
+    host: &HostEntity,
+    failed_output: &str,
+    restarting_output: &str,
+) -> Result<(), NodError> {
+    if !enabled(host) {
+        return Ok(());
+    }
+    verdict(host, failed_output)?;
+    if !checks_restart_loops(host) {
+        return Ok(());
+    }
+    let restarting = restarting_units(restarting_output);
+    if restarting.is_empty() {
+        Ok(())
+    } else {
+        Err(NodError::health_check(format!(
+            "host {} is restarting units: {}",
+            host.name,
+            restarting.join(", ")
+        )))
+    }
 }
 
 /// Turns raw `systemctl --failed` output into a health verdict.
@@ -87,6 +151,33 @@ mod tests {
     fn failed_units_are_unhealthy_and_named() {
         let error = verdict(&host(), "nginx.service loaded failed failed\n").unwrap_err();
         assert!(error.to_string().contains("nginx.service"), "got: {error}");
+    }
+
+    #[test]
+    fn restarting_units_are_read_one_per_line() {
+        assert_eq!(
+            restarting_units("crowdsec.service\n\n  foo.service  \n"),
+            vec!["crowdsec.service".to_string(), "foo.service".to_string()]
+        );
+        assert!(restarting_units("").is_empty());
+    }
+
+    #[test]
+    fn a_restart_loop_fails_the_verdict() {
+        let error = verdict_with_restarts(&host(), "", "crowdsec.service\n").unwrap_err();
+        assert!(
+            error.to_string().contains("crowdsec.service"),
+            "got: {error}"
+        );
+        assert!(verdict_with_restarts(&host(), "", "").is_ok());
+    }
+
+    #[test]
+    fn restart_loop_check_can_be_disabled_per_host() {
+        let mut host = host();
+        host.nod_config.health_checks.systemd.check_restart_loops = Some(false);
+
+        assert!(verdict_with_restarts(&host, "", "crowdsec.service\n").is_ok());
     }
 
     #[test]

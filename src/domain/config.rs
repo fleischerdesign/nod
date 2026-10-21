@@ -97,6 +97,9 @@ pub struct SystemdHealthConfig {
     pub check_running: Option<bool>,
     #[serde(alias = "check_failed_units")]
     pub check_failed_units: Option<bool>,
+    /// Whether units in systemd's automatic restart cycle make the host
+    /// unhealthy (ADR-029). Defaults to true where it is read.
+    pub check_restart_loops: Option<bool>,
     #[serde(alias = "required_units")]
     pub required_units: Option<Vec<String>>,
 }
