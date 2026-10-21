@@ -1,4 +1,4 @@
-//! `nod sync-status` command: read-only view of the reconciler (ADR-028).
+//! `nod sync status` command: read-only view of the reconciler (ADR-028).
 
 use std::path::Path;
 use std::sync::Arc;

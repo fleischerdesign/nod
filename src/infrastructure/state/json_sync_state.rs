@@ -104,7 +104,7 @@ impl SyncStatePort for JsonSyncStateStore {
             ))
         })?;
         // The document holds revisions, host names and counters - no secrets -
-        // and `nod sync-status` must be able to read it as a normal user. The
+        // and `nod sync status` must be able to read it as a normal user. The
         // daemon's own umask is deliberately strict, so the mode is set here
         // instead of widening it for every file the unit touches.
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).map_err(|e| {
@@ -283,7 +283,7 @@ mod tests {
             & 0o777;
         assert_eq!(
             mode, 0o644,
-            "`nod sync-status` must be able to read the state as a normal user"
+            "`nod sync status` must be able to read the state as a normal user"
         );
     }
 }

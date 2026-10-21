@@ -797,6 +797,9 @@ pub enum Commands {
         /// Run a single reconciliation cycle and exit
         #[arg(long)]
         once: bool,
+
+        #[command(subcommand)]
+        command: Option<SyncCommand>,
     },
 
     /// Run as a background systemd GitOps reconciler daemon
@@ -808,27 +811,15 @@ pub enum Commands {
         #[command(flatten)]
         sync: SyncArgs,
     },
+}
 
+/// Read-only views of the reconciler, grouped under `nod sync`.
+#[derive(Subcommand, Debug)]
+pub enum SyncCommand {
     /// Show the reconciler's view: revisions, stored state and optional drift
-    SyncStatus {
+    Status {
         #[command(flatten)]
         target_args: TargetArgs,
-
-        /// Custom path to flake root directory
-        #[arg(long, default_value = ".")]
-        flake: String,
-
-        /// Upstream Git remote name
-        #[arg(long, default_value = "origin")]
-        remote: String,
-
-        /// Target Git branch
-        #[arg(long, default_value = "main")]
-        branch: String,
-
-        /// Directory holding the reconciler state document
-        #[arg(long, default_value = "/var/lib/nod")]
-        state_dir: PathBuf,
 
         /// Compare every selected host's closure (builds them)
         #[arg(long)]

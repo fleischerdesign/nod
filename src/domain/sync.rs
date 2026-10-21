@@ -186,7 +186,7 @@ pub struct HostMemory {
 /// The hosts a sweep may probe now, and why the rest wait.
 ///
 /// Kept as a value object so the decision is pure and testable, and so a
-/// caller that genuinely wants a full sweep (`nod sync-status --drift`) says
+/// caller that genuinely wants a full sweep (`nod sync status --drift`) says
 /// so explicitly instead of inheriting the daemon's memory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbePolicy {

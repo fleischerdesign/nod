@@ -683,12 +683,59 @@ async fn run(cli: Cli) -> Result<()> {
             nod::commands::watch::execute(ctx, &flake_path, &target_args, options, cli.verbose)
                 .await?;
         }
-        Commands::Sync { flake, sync, once } => {
+        Commands::Sync {
+            flake,
+            sync,
+            once,
+            command,
+        } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
-            let mut options = sync_options(sync, once);
-            options.verbose = cli.verbose;
-            nod::commands::sync::execute(ctx, &flake_path, options).await?;
+            match command {
+                Some(nod::config::options::SyncCommand::Status {
+                    target_args,
+                    drift,
+                    json,
+                }) => {
+                    let options = SyncOptions {
+                        remote: sync.remote.clone(),
+                        branch: sync.branch.clone(),
+                        state_dir: sync.state_dir.clone(),
+                        json,
+                        verbose: cli.verbose,
+                        ..Default::default()
+                    };
+                    let hosts = if drift {
+                        let discovered = ctx
+                            .evaluator()
+                            .discover_hosts_degraded(&flake_path, cli.verbose)
+                            .await?;
+                        let local_hostname = hostname::get()
+                            .map(|host| host.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let scope = SyncOptions {
+                            targets: target_args.target.into_iter().collect(),
+                            all: target_args.all,
+                            tag: target_args.tag,
+                            role: target_args.role,
+                            ..options.clone()
+                        };
+                        Some(nod::commands::sync::select_hosts(
+                            discovered,
+                            &scope,
+                            &local_hostname,
+                        )?)
+                    } else {
+                        None
+                    };
+                    nod::commands::sync_status::execute(ctx, &flake_path, options, hosts).await?;
+                }
+                None => {
+                    let mut options = sync_options(sync, once);
+                    options.verbose = cli.verbose;
+                    nod::commands::sync::execute(ctx, &flake_path, options).await?;
+                }
+            }
         }
         Commands::Daemon { flake, sync } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
@@ -696,50 +743,6 @@ async fn run(cli: Cli) -> Result<()> {
             let mut options = sync_options(sync, false);
             options.verbose = cli.verbose;
             nod::commands::daemon::execute(ctx, &flake_path, options).await?;
-        }
-        Commands::SyncStatus {
-            target_args,
-            flake,
-            remote,
-            branch,
-            state_dir,
-            drift,
-            json,
-        } => {
-            let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
-            let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
-            let options = SyncOptions {
-                remote,
-                branch,
-                state_dir,
-                json,
-                verbose: cli.verbose,
-                ..Default::default()
-            };
-            let hosts = if drift {
-                let discovered = ctx
-                    .evaluator()
-                    .discover_hosts_degraded(&flake_path, cli.verbose)
-                    .await?;
-                let local_hostname = hostname::get()
-                    .map(|host| host.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let scope = SyncOptions {
-                    targets: target_args.target.into_iter().collect(),
-                    all: target_args.all,
-                    tag: target_args.tag,
-                    role: target_args.role,
-                    ..options.clone()
-                };
-                Some(nod::commands::sync::select_hosts(
-                    discovered,
-                    &scope,
-                    &local_hostname,
-                )?)
-            } else {
-                None
-            };
-            nod::commands::sync_status::execute(ctx, &flake_path, options, hosts).await?;
         }
     }
 

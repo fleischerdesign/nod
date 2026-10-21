@@ -101,7 +101,7 @@ sweep. What a probe learned is remembered per host, in one of three conditions:
 - `offline` - the host did not answer. The next probe is deferred by an
   exponential delay (60 s, 120 s, … capped at 30 min by default), so an offline
   laptop costs *no* probe instead of one per cycle. An outage longer than
-  `--gone-after` (24 h by default) is labelled `gone` in `nod sync-status` - a
+  `--gone-after` (24 h by default) is labelled `gone` in `nod sync status` - a
   label, never a removal: the inventory is the truth, and a wrong address must
   not look like success.
 - `misconfigured` - the host answers but refuses our credentials. This is a
@@ -217,8 +217,13 @@ nod sync   [--once] [--dry-run] [--target T | --all] [--tag TAG] [--role ROLE]
            [--strategy S] [--batch-size N] [--concurrency N] [--fail-fast]
            [--no-auto-rollback] [--allow-downgrade] [--require-signature]
            [--last-host HOST] [--notify COMMAND] [--json]
-nod daemon [same flags, without --once]
+nod sync status [TARGET | --all] [--tag TAG] [--role ROLE] [--drift] [--json]
+nod daemon [same flags as sync, without --once]
 ```
+
+Read-only views are subcommands of the verb they describe (`nod sync status`),
+not a separate hyphenated top-level command: the command surface has one word
+per command, and a view of `sync` is not a verb of its own.
 
 `--dry-run` reports drift per host — which hosts would change and to which
 closure — and activates nothing. `--json` prints the same report machine-readable.
