@@ -17,6 +17,9 @@ pub async fn execute(
     // The audit store is bound by `main` (a single, explicit site) because it
     // is an opt-in service: `production` builds the base graph without it.
     let ctx = Arc::new(ctx);
+    // An empty answer means "no deployment matched", not "no deployment
+    // happened": the daemon writes as its service account. Name the file.
+    let location = ctx.audit_store().ok().and_then(|store| store.location());
     let use_case = AuditLogUseCase::new(ctx);
     let entries = use_case.execute(target, limit).await?;
 
@@ -26,7 +29,17 @@ pub async fn execute(
     }
 
     if entries.is_empty() {
-        println!("{}", "No deployment history recorded yet.".dimmed());
+        match location {
+            Some(path) => println!(
+                "{}",
+                format!(
+                    "No deployment history recorded yet (read {}).",
+                    path.display()
+                )
+                .dimmed()
+            ),
+            None => println!("{}", "No deployment history recorded yet.".dimmed()),
+        }
         return Ok(());
     }
 

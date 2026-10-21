@@ -38,7 +38,7 @@ pub fn production(flake_path: &Path, cli_overrides: CliOverrides) -> Result<AppC
     Ok(
         AppContext::new(Arc::new(NixCliEvaluator::new()), local.clone(), ssh.clone())
             .with_config_store(Arc::new(TomlConfigStore::new(flake_path, cli_overrides)?))
-            .with_audit_store(Arc::new(JsonAuditStore::new()))
+            .with_audit_store(Arc::new(JsonAuditStore::from_env()))
             .with_flake_port(Arc::new(NixCliFlakeStore::new()))
             .with_secret_port(Arc::new(PluggableSecretStore::new()))
             .with_provisioner_port(Arc::new(NixosAnywhereProvisioner::new()))

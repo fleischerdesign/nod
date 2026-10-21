@@ -19,4 +19,15 @@ pub trait AuditStorePort: Send + Sync {
         host: Option<String>,
         limit: Option<usize>,
     ) -> Result<Vec<AuditEntry>, NodError>;
+
+    /// Where this store keeps its history, when it has a single location.
+    ///
+    /// An empty answer means "no deployment matched", which is not the same
+    /// as "no deployment happened": the reconciler writes as its service
+    /// account, so an operator reads a different file unless the location is
+    /// shared. `nod audit` names the file it read so the two cannot be
+    /// confused.
+    fn location(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }

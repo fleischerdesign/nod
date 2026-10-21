@@ -6,7 +6,7 @@
 //! count cap. A missing file reads as an empty history, not an error.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::audit::AuditEntry;
@@ -26,6 +26,25 @@ impl JsonAuditStore {
         Self {
             path: Self::default_path(),
         }
+    }
+
+    /// Builds a store at `NOD_AUDIT_PATH` when it is set and non-empty, else
+    /// at the platform history path.
+    ///
+    /// A fleet whose reconciler runs as a service account and whose operators
+    /// run as themselves needs one shared file. The environment variable is how
+    /// that file is chosen without adding a second configuration source: the
+    /// daemon's unit sets it, and the CLI inherits the same location.
+    pub fn from_env() -> Self {
+        match std::env::var_os("NOD_AUDIT_PATH") {
+            Some(path) if !path.is_empty() => Self::at(PathBuf::from(path)),
+            _ => Self::new(),
+        }
+    }
+
+    /// The file this store reads and appends to.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -120,6 +139,10 @@ impl JsonAuditStore {
 
 #[async_trait]
 impl AuditStorePort for JsonAuditStore {
+    fn location(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
+    }
+
     async fn record(&self, host_name: &str, outcome: &str) -> Result<(), NodError> {
         self.append(AuditEntry::new(host_name, outcome, Self::now_epoch()))
     }
@@ -187,6 +210,27 @@ mod tests {
         assert_eq!(all[0].outcome, "rolled_back");
         assert_eq!(all[2].host_name, "jello");
         assert_eq!(all[2].outcome, "completed");
+    }
+
+    #[test]
+    fn location_reports_the_backing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let store = JsonAuditStore::at(path.clone());
+
+        assert_eq!(store.location(), Some(path));
+    }
+
+    #[test]
+    fn from_env_prefers_the_configured_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.json");
+
+        std::env::set_var("NOD_AUDIT_PATH", &path);
+        let store = JsonAuditStore::from_env();
+        std::env::remove_var("NOD_AUDIT_PATH");
+
+        assert_eq!(store.location(), Some(path));
     }
 
     #[tokio::test]
