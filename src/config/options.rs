@@ -331,6 +331,8 @@ pub enum Commands {
     },
 
     /// Generate package & systemd unit diff preview before switching
+    ///
+    /// See also: `plan` for the deployment actions, `drift` for live versus flake.
     Diff {
         #[command(flatten)]
         target_args: TargetArgs,
@@ -344,6 +346,8 @@ pub enum Commands {
     },
 
     /// Preview the deployment plan for a target without activating it
+    ///
+    /// See also: `diff` for package and unit changes, `drift` for live versus flake.
     Plan {
         #[command(flatten)]
         target_args: TargetArgs,
@@ -378,6 +382,8 @@ pub enum Commands {
     },
 
     /// Detect configuration drift between live closures and the flake
+    ///
+    /// See also: `diff` for the pre-switch preview, `plan` for deployment actions.
     Drift {
         #[command(flatten)]
         target_args: TargetArgs,
@@ -410,6 +416,8 @@ pub enum Commands {
     },
 
     /// Open an interactive SSH session or execute a remote command on a host
+    ///
+    /// For one command across many hosts, use `exec`.
     Ssh {
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
@@ -436,6 +444,8 @@ pub enum Commands {
     },
 
     /// Execute an arbitrary shell command across resolved target hosts
+    ///
+    /// For a single host, use `ssh`.
     Exec {
         /// Target host name or glob pattern
         target: Option<String>,
@@ -662,7 +672,7 @@ pub enum Commands {
     },
 
     /// Manage host secrets (verification and rekeying)
-    Secret {
+    Secrets {
         #[command(subcommand)]
         command: SecretCommands,
     },

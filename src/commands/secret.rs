@@ -1,4 +1,4 @@
-//! `nod secret` command: pre-flight secret verification and fleet rekeying (ADR-018).
+//! `nod secrets` command: pre-flight secret verification and fleet rekeying (ADR-018).
 
 use colored::Colorize;
 use std::path::Path;

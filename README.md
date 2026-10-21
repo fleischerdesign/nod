@@ -79,10 +79,10 @@ nod cache push [TARGET/GLOB] [--all] [--cache <URI>] [--concurrency 4] [--json]
 ### Secrets & Security
 ```bash
 # Pre-flight secret decryptability and recipient verification (sops / agenix / custom)
-nod secret check [TARGET/GLOB] [--all] [--json]
+nod secrets check [TARGET/GLOB] [--all] [--json]
 
 # Fleet-wide secret re-encryption and recipient rotation
-nod secret rekey [TARGET/GLOB] [--all] [--dry-run] [--no-backup] [--json]
+nod secrets rekey [TARGET/GLOB] [--all] [--dry-run] [--no-backup] [--json]
 ```
 
 ### Developer, Diagnostics & Fleet Tools

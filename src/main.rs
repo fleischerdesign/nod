@@ -504,7 +504,7 @@ async fn run(cli: Cli) -> Result<()> {
             nod::commands::reboot::execute(ctx, &flake_path, &target_args, options, cli.verbose)
                 .await?;
         }
-        Commands::Secret { command } => match command {
+        Commands::Secrets { command } => match command {
             nod::config::options::SecretCommands::Check {
                 target_args,
                 flake,
