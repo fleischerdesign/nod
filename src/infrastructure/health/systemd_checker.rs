@@ -1,9 +1,16 @@
 //! Systemd health checker adapter: verifies a local host post-activation
 //! (ADR-003 observability).
 //!
-//! Probes `systemctl is-system-running` (the system state) and
-//! `systemctl --failed` (the failed-unit list). A host is healthy only when
-//! the system is up and no unit is in a failed state.
+//! Probes `systemctl is-system-running` (the system state),
+//! `systemctl --failed` (the failed-unit list) and the units systemd is
+//! restarting on its own. A host is healthy only when the system is up, no unit
+//! is failed, and no unit is in `auto-restart`.
+//!
+//! The restart probe exists because `--failed` cannot see it: a unit with
+//! `Restart=on-failure` that keeps dying is `ActiveState=activating`,
+//! `SubState=auto-restart`, and never appears in the failed list. Measured on
+//! 2026-10-21: a service looped for four hours while this checker called the
+//! host healthy (ADR-029).
 //!
 //! Systemd is a *local* surface: this adapter verifies local hosts only and
 //! raises a typed health error for remote hosts (the SSH deployer owns those
@@ -34,6 +41,45 @@ impl Default for SystemdHealthChecker {
 }
 
 impl SystemdHealthChecker {
+    /// Whether a unit is in systemd's automatic restart cycle.
+    ///
+    /// `auto-restart` means systemd is waiting to start the unit again after it
+    /// died; `--failed` does not list it, so it is the one state a health probe
+    /// must ask for explicitly.
+    pub fn is_restarting(sub_state: &str) -> bool {
+        sub_state.trim() == "auto-restart"
+    }
+
+    /// Unit names from `systemctl list-units --state=activating` output.
+    ///
+    /// The output has one unit per row and may end with a "N units listed."
+    /// summary; the name is the first column.
+    pub fn activating_units(output: &str) -> Vec<String> {
+        output
+            .lines()
+            .filter_map(|line| {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                // Unit rows carry unit, load, active and sub state; the header
+                // and the "N loaded units listed." summary carry fewer
+                // meaningful columns and would otherwise parse as unit names.
+                if cols.len() < 4 || cols[0] == "UNIT" || cols.last() == Some(&"listed.") {
+                    return None;
+                }
+                Some(cols[0].to_string())
+            })
+            .collect()
+    }
+
+    /// Reaches a health verdict from a reported systemd state, the failed-unit
+    /// rows and the units systemd is restarting on its own.
+    pub fn healthy_with_restarts(
+        state: &str,
+        failed_units: &[String],
+        restarting_units: &[String],
+    ) -> bool {
+        Self::healthy(state, failed_units) && restarting_units.is_empty()
+    }
+
     /// Reaches a health verdict from a reported systemd state and the
     /// failed-unit rows. `running`/`degraded` count as "the system is up";
     /// any failed unit flips the verdict to unhealthy.
@@ -82,12 +128,13 @@ impl SystemdHealthChecker {
     fn healthy_with_required(
         state: &str,
         failed_units: &[String],
+        restarting_units: &[String],
         required_active: &[bool],
     ) -> bool {
         if required_active.iter().any(|active| !*active) {
             return false;
         }
-        Self::healthy(state, failed_units)
+        Self::healthy_with_restarts(state, failed_units, restarting_units)
     }
 }
 
@@ -130,6 +177,37 @@ impl HealthCheckerPort for SystemdHealthChecker {
         let failed_output = String::from_utf8_lossy(&failed.stdout);
         let failed_units = Self::failed_units(&failed_output);
 
+        // A unit in `auto-restart` is not in the failed list; ask separately.
+        let listed = Command::new("systemctl")
+            .args([
+                "list-units",
+                "--all",
+                "--plain",
+                "--no-legend",
+                "--state=activating",
+            ])
+            .output()
+            .await;
+        if listed.is_err() {
+            return Err(NodError::health_check(
+                "failed to launch `systemctl list-units`",
+            ));
+        }
+        let listed = listed.unwrap();
+        let listed_output = String::from_utf8_lossy(&listed.stdout);
+        let mut restarting_units = Vec::new();
+        for unit in Self::activating_units(&listed_output) {
+            let sub_state = Command::new("systemctl")
+                .args(["show", "-p", "SubState", "--value", unit.as_str()])
+                .output()
+                .await;
+            if let Ok(sub_state) = sub_state {
+                if Self::is_restarting(&String::from_utf8_lossy(&sub_state.stdout)) {
+                    restarting_units.push(unit);
+                }
+            }
+        }
+
         // AC2: every configured required unit must be active.
         let mut required_active = Vec::new();
         if let Some(required) = &host.nod_config.health_checks.systemd.required_units {
@@ -145,6 +223,7 @@ impl HealthCheckerPort for SystemdHealthChecker {
         Ok(Self::healthy_with_required(
             state,
             &failed_units,
+            &restarting_units,
             &required_active,
         ))
     }
@@ -197,6 +276,39 @@ mod tests {
     }
 
     #[test]
+    fn a_restarting_unit_flips_the_verdict_unhealthy() {
+        let restarting = vec!["crowdsec.service".to_string()];
+
+        assert!(!SystemdHealthChecker::healthy_with_restarts(
+            "running",
+            &[],
+            &restarting
+        ));
+        assert!(SystemdHealthChecker::healthy_with_restarts(
+            "running",
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn only_auto_restart_counts_as_restarting() {
+        assert!(SystemdHealthChecker::is_restarting("auto-restart\n"));
+        assert!(!SystemdHealthChecker::is_restarting("start"));
+        assert!(!SystemdHealthChecker::is_restarting(""));
+    }
+
+    #[test]
+    fn activating_units_skips_the_header_and_the_summary() {
+        let output = "  UNIT             LOAD   ACTIVE   SUB          DESCRIPTION\n  crowdsec.service loaded activating auto-restart CrowdSec\n\n1 loaded units listed.\n";
+
+        assert_eq!(
+            SystemdHealthChecker::activating_units(output),
+            vec!["crowdsec.service".to_string()]
+        );
+    }
+
+    #[test]
     fn digit_leading_failed_unit_is_detected_while_summary_is_skipped() {
         // A failed unit whose name starts with a digit must not be dropped by
         // the summary-line heuristic (AC2), while the "N units listed."
@@ -211,11 +323,13 @@ mod tests {
         assert!(!SystemdHealthChecker::healthy_with_required(
             "running",
             &[],
+            &[],
             &[false]
         ));
         assert!(!SystemdHealthChecker::healthy_with_required(
             "running",
             &["dep.service".to_string()],
+            &[],
             &[true, false]
         ));
     }
@@ -225,10 +339,12 @@ mod tests {
         assert!(SystemdHealthChecker::healthy_with_required(
             "running",
             &[],
+            &[],
             &[]
         ));
         assert!(!SystemdHealthChecker::healthy_with_required(
             "offline",
+            &[],
             &[],
             &[]
         ));
