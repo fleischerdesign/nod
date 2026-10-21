@@ -50,6 +50,10 @@ fn render(status: &SyncStatus, json: bool) {
         return;
     }
 
+    // Every verdict below inherits the age of the state document, so the age is
+    // computed once and printed next to the claim it qualifies.
+    let now = now_secs();
+
     println!("{} checkout {}", "→".cyan(), short(&status.local_revision));
     match &status.remote_revision {
         Some(remote) => println!("  remote    {}", short(remote)),
@@ -58,6 +62,13 @@ fn render(status: &SyncStatus, json: bool) {
     match &status.applied_revision {
         Some(applied) => println!("  applied   {}", short(applied)),
         None => println!("  applied   {}", "never".yellow()),
+    }
+    match status.observed_at {
+        Some(at) => println!(
+            "  observed  {}",
+            format!("{} ago", age(now, Some(at))).dimmed()
+        ),
+        None => println!("  observed  {}", "unknown".dimmed()),
     }
     match status.behind {
         Some(true) => println!("  {}", "fleet is behind the remote revision".yellow()),
@@ -79,7 +90,6 @@ fn render(status: &SyncStatus, json: bool) {
     // this call did not probe anything: "offline for an hour" is the answer to
     // "why is this host not at the revision", and re-probing would not change
     // it. A condition that needs no action (`reachable`) stays quiet.
-    let now = now_secs();
     for entry in status.conditions.iter().filter(|e| e.label != "reachable") {
         let mut line = format!(
             "  {} {} {} for {}",

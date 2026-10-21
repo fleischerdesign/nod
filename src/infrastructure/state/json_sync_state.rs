@@ -91,6 +91,9 @@ impl SyncStatePort for JsonSyncStateStore {
         // version rather than preserving a number that no longer describes it.
         let mut state = state.clone();
         state.version = STATE_VERSION;
+        // The age of this document is the age of everything the status
+        // command reports, so it is stamped rather than inferred from mtime.
+        state.saved_at = Some(crate::domain::sync::now_secs());
         let serialized = serde_json::to_vec_pretty(&state)
             .map_err(|e| NodError::internal(format!("cannot serialize sync state: {e}")))?;
         let temporary = self.path.with_extension("json.tmp");
@@ -229,7 +232,11 @@ mod tests {
         state.record_success("abc");
         store.save(&state).await.unwrap();
 
-        let loaded = store.load().await.unwrap().unwrap();
+        let mut loaded = store.load().await.unwrap().unwrap();
+        // The store stamps the write time and the schema version, so the round
+        // trip is compared on everything else and the stamp is asserted.
+        assert!(loaded.saved_at.is_some());
+        loaded.saved_at = None;
         assert_eq!(loaded, state);
         assert!(store.path().exists());
         assert!(!store.path().with_extension("json.tmp").exists());

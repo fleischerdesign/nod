@@ -127,6 +127,7 @@ impl SyncStatusUseCase {
             applied_revision: state.last_applied_rev,
             behind,
             backoff_secs,
+            observed_at: state.saved_at,
             conditions,
             hosts: host_statuses,
             state_error,

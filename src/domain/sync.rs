@@ -60,6 +60,10 @@ pub struct SyncState {
     pub backoff_rev: Option<String>,
     /// Marker written before the first activation and cleared after a report.
     pub in_progress: Option<InProgress>,
+    /// Unix time the document was last written. `None` for documents written
+    /// before the field existed, which is why it is not part of the version.
+    #[serde(default)]
+    pub saved_at: Option<u64>,
     /// What the last cycles learned about each host, keyed by host name.
     #[serde(default)]
     pub hosts: BTreeMap<String, HostMemory>,
@@ -224,6 +228,7 @@ impl SyncState {
             backoff_until: None,
             backoff_rev: None,
             in_progress: None,
+            saved_at: None,
             hosts: BTreeMap::new(),
         }
     }
@@ -531,6 +536,11 @@ pub struct SyncStatus {
     pub behind: Option<bool>,
     /// Seconds until the next attempt, when backing off.
     pub backoff_secs: u64,
+    /// When the reconciler last wrote this state; `None` when it cannot say.
+    /// A verdict without an age is a claim without a date, and a claim without
+    /// a date is what made "offline" ambiguous.
+    #[serde(default)]
+    pub observed_at: Option<u64>,
     /// What the state remembers about each host.
     #[serde(default)]
     pub conditions: Vec<HostStateEntry>,
