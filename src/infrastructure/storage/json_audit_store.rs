@@ -6,6 +6,7 @@
 //! count cap. A missing file reads as an empty history, not an error.
 
 use async_trait::async_trait;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -112,6 +113,19 @@ impl JsonAuditStore {
                 e
             ))
         })?;
+        // The history holds host names, outcomes and timestamps - no secrets -
+        // and an operator must be able to read it while the reconciler writes
+        // as its service account. The daemon's umask is deliberately strict, so
+        // the mode is set here instead of widening it for every file it touches.
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o644)).map_err(
+            |e| {
+                NodError::config(format!(
+                    "cannot make history readable {}: {}",
+                    self.path.display(),
+                    e
+                ))
+            },
+        )?;
         Ok(())
     }
 
