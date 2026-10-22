@@ -40,6 +40,33 @@ pub fn build_ssh_opts(profile: &SshProfile) -> Vec<String> {
     opts
 }
 
+/// Builds the argv for a health probe: the profile's connection flags, but a
+/// fresh connection that fails fast.
+///
+/// A probe runs immediately after an activation, when an existing control
+/// master (`ControlMaster=auto`, `ControlPersist=60s`) may be dead but still
+/// selected. A multiplexed `ssh` then waits until the probe's own timeout fires
+/// and reports `Unverified` for a host that is perfectly healthy - measured on
+/// three hosts during the 2026-10-22 rollout. The probe opens its own
+/// connection instead, bounded by `ConnectTimeout`, and never prompts.
+///
+/// ssh honours the *first* value it sees for an option, so the probe flags come
+/// before the profile's `ControlMaster=auto`.
+pub fn build_ssh_probe_args(profile: &SshProfile, target_host: &str, command: &str) -> Vec<String> {
+    let mut args = vec![
+        "-o".to_string(),
+        "ControlMaster=no".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+    ];
+    args.extend(build_ssh_opts(profile));
+    args.push(format!("{}@{}", profile.user(), target_host));
+    args.push(command.to_string());
+    args
+}
+
 /// Builds the `ssh(1)` argument vector for one host profile.
 ///
 /// Emits the connection flags (see [`build_ssh_opts`]), the `user@host`
@@ -283,5 +310,27 @@ mod tests {
                 "-a"
             ]
         );
+    }
+
+    #[test]
+    fn probe_args_disable_connection_reuse_before_the_profile_options() {
+        let profile = SshProfile::for_host(&HostEntity::new("atlas", "atlas", false));
+        let args = build_ssh_probe_args(&profile, "atlas", "systemctl --failed");
+
+        // ssh honours the first value it sees, so the probe's `no` must come
+        // before the profile's `auto`, or the probe reuses a master that may be
+        // dead after an activation.
+        let no = args
+            .iter()
+            .position(|arg| arg == "ControlMaster=no")
+            .unwrap();
+        let auto = args
+            .iter()
+            .position(|arg| arg == "ControlMaster=auto")
+            .unwrap();
+        assert!(no < auto);
+        assert!(args.iter().any(|arg| arg == "ConnectTimeout=10"));
+        assert!(args.iter().any(|arg| arg == "BatchMode=yes"));
+        assert_eq!(args.last().unwrap(), "systemctl --failed");
     }
 }

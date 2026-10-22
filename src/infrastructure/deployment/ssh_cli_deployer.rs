@@ -508,7 +508,7 @@ async fn run_remote_probe(
 ) -> Result<String, NodError> {
     use crate::infrastructure::health::probe;
 
-    let args = build_ssh_args(profile, &host.target_host, false, &[command.to_string()]);
+    let args = crate::domain::ssh_args::build_ssh_probe_args(profile, &host.target_host, command);
     let probe_run = tokio::time::timeout(
         probe::timeout(host),
         run_ssh("ssh", &args, || {
