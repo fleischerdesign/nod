@@ -65,9 +65,37 @@ pub async fn load(flake_path: &Path, store: &TomlConfigStore) -> Result<Fleet, N
         }),
         (None, _) => Ok(Fleet {
             source: FleetSource::File(store.base_dir().map(Path::to_path_buf)),
-            providers: from_file,
+            providers: resolve_relative(from_file, store.base_dir()),
         }),
     }
+}
+
+/// Resolves provider paths that come from a file against the file's directory.
+///
+/// A path in a configuration file is relative to that file, never to the
+/// directory the process happens to run in.
+fn resolve_relative(
+    providers: BTreeMap<String, TomlProvider>,
+    base: Option<&Path>,
+) -> BTreeMap<String, TomlProvider> {
+    let Some(base) = base else {
+        return providers;
+    };
+
+    providers
+        .into_iter()
+        .map(|(name, mut provider)| {
+            if provider.command.is_relative() {
+                provider.command = base.join(&provider.command);
+            }
+            if let Some(desired) = &provider.desired {
+                if desired.is_relative() {
+                    provider.desired = Some(base.join(desired));
+                }
+            }
+            (name, provider)
+        })
+        .collect()
 }
 
 /// Reads `.#nod` from the flake, or `None` when the output does not exist.
@@ -164,5 +192,47 @@ mod tests {
         let raw = r#"{"schema": 99, "providers": {}}"#;
         let parsed: FlakeFleet = serde_json::from_str(raw).unwrap();
         assert_ne!(parsed.schema, SCHEMA);
+    }
+
+    fn provider() -> TomlProvider {
+        TomlProvider {
+            command: PathBuf::from("bin/provider"),
+            settings: None,
+            desired: Some(PathBuf::from("desired.json")),
+            apply: None,
+            interval_secs: None,
+            order: None,
+        }
+    }
+
+    #[test]
+    fn file_paths_resolve_against_the_file_directory() {
+        let mut providers = BTreeMap::new();
+        providers.insert("example".to_string(), provider());
+
+        let resolved = resolve_relative(providers, Some(Path::new("/etc/nod")));
+        let provider = resolved.get("example").unwrap();
+        assert_eq!(provider.command, PathBuf::from("/etc/nod/bin/provider"));
+        assert_eq!(
+            provider.desired,
+            Some(PathBuf::from("/etc/nod/desired.json"))
+        );
+    }
+
+    #[test]
+    fn absolute_paths_survive_the_resolution() {
+        let mut providers = BTreeMap::new();
+        let mut provider = provider();
+        provider.command = PathBuf::from("/nix/store/x/bin/provider");
+        provider.desired = Some(PathBuf::from("/nix/store/y/desired.json"));
+        providers.insert("example".to_string(), provider);
+
+        let resolved = resolve_relative(providers, Some(Path::new("/etc/nod")));
+        let provider = resolved.get("example").unwrap();
+        assert_eq!(provider.command, PathBuf::from("/nix/store/x/bin/provider"));
+        assert_eq!(
+            provider.desired,
+            Some(PathBuf::from("/nix/store/y/desired.json"))
+        );
     }
 }
