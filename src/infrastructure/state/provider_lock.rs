@@ -40,6 +40,13 @@ impl ProviderLock {
                 directory.display()
             ))
         })?;
+        // A 0700 lock directory would also hide the rollback plans stored next
+        // to it; operators must be able to read them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&directory, fs::Permissions::from_mode(0o755));
+        }
         let path = directory.join(format!("{provider}.lock"));
 
         for attempt in 0..2 {

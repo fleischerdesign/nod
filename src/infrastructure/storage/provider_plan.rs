@@ -46,6 +46,13 @@ impl ProviderPlanStore {
                     parent.display()
                 ))
             })?;
+            // The daemon runs under a strict umask; a plan an operator cannot
+            // read is not a record. The directory stays traversable.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+            }
         }
 
         let raw = serde_json::to_vec_pretty(plan)
