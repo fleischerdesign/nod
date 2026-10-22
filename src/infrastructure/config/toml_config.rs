@@ -182,6 +182,19 @@ pub struct TomlConfig {
     pub fleet: Option<SshOverrides>,
     #[serde(default)]
     pub hosts: HashMap<String, TomlHost>,
+    /// Provider executables declared for `nod reconcile` (ADR-030).
+    #[serde(default)]
+    pub providers: HashMap<String, TomlProvider>,
+}
+
+/// `[providers.<name>]` — one provider executable and its settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TomlProvider {
+    /// Path to the provider executable.
+    pub command: PathBuf,
+    /// Provider settings, opaque to nod and validated by the provider.
+    #[serde(default)]
+    pub settings: Option<toml::Value>,
 }
 
 /// Fully merged SSH overrides for one host across the TOML and CLI tiers.
@@ -257,6 +270,11 @@ impl TomlConfigStore {
             None => TomlConfig::default(),
         };
         Ok(Self { cli, toml })
+    }
+
+    /// The `[providers.<name>]` entry, when the configuration declares one.
+    pub fn provider(&self, name: &str) -> Option<&TomlProvider> {
+        self.toml.providers.get(name)
     }
 
     /// Returns the raw `[defaults].flake` value from the parsed config file,
@@ -653,6 +671,27 @@ mod tests {
 
     fn host(name: &str) -> HostEntity {
         HostEntity::new(name, "10.0.0.8", false)
+    }
+
+    #[test]
+    fn providers_are_parsed_with_their_settings() {
+        let dir = tempdir().unwrap();
+        write_toml(
+            dir.path(),
+            "[providers.example]\ncommand = \"/bin/true\"\n\n[providers.example.settings]\nstate = \"/tmp/state.json\"\n",
+        );
+
+        let config = store(dir.path(), CliOverrides::default());
+        let provider = config.provider("example").expect("declared provider");
+        assert_eq!(provider.command, PathBuf::from("/bin/true"));
+        assert_eq!(
+            provider
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.get("state"))
+                .and_then(|value| value.as_str()),
+            Some("/tmp/state.json")
+        );
     }
 
     #[tokio::test]

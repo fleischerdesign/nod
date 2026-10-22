@@ -522,17 +522,21 @@ async fn run(cli: Cli) -> Result<()> {
         },
         Commands::Reconcile {
             provider,
+            command,
             settings,
             desired,
             apply,
             json,
+            flake,
         } => {
             nod::commands::reconcile::execute(
-                &provider,
+                provider.as_deref(),
+                command.as_deref(),
                 settings.as_deref(),
                 &desired,
                 apply,
                 json,
+                &flake,
             )
             .await?;
         }

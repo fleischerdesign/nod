@@ -61,6 +61,26 @@ verify.
 - **Unknown fields are ignored.** Both sides may add optional fields; a required
   field is a protocol major change.
 
+## Running it from a configuration
+
+Declare the provider once and `nod reconcile` resolves it by name:
+
+```toml
+# .nod.toml
+[providers.example]
+command = "/path/to/nod-provider-example"
+
+[providers.example.settings]
+state = "/tmp/example-provider.json"
+```
+
+```bash
+nod reconcile example --desired plan.json
+```
+
+`--command` and `--settings` override the configured values for one run. Nothing
+is discovered: a provider exists because the configuration names it.
+
 ## Testing
 
 ```bash

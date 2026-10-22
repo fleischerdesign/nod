@@ -685,11 +685,14 @@ pub enum Commands {
 
     /// Reconcile declared state against a provider API (ADR-030)
     Reconcile {
-        /// Path to the provider executable
-        #[arg(long)]
-        provider: PathBuf,
+        /// Provider name declared in `.nod.toml` under `[providers.<name>]`
+        provider: Option<String>,
 
-        /// JSON file with the provider settings (default: empty object)
+        /// Provider executable (overrides the configured command)
+        #[arg(long)]
+        command: Option<PathBuf>,
+
+        /// JSON file with the provider settings (overrides the configured ones)
         #[arg(long)]
         settings: Option<PathBuf>,
 
@@ -704,6 +707,10 @@ pub enum Commands {
         /// Print the report as JSON
         #[arg(long)]
         json: bool,
+
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
     },
 
     /// Manage Nix store operations (optimization and deduplication)
