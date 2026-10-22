@@ -231,6 +231,12 @@ pub struct TomlProvider {
     /// Cadence in seconds for the daemon (default: 300).
     #[serde(default)]
     pub interval_secs: Option<u64>,
+    /// Timeout for one provider operation in seconds (default: 60).
+    ///
+    /// A provider that talks to a slow API declares more here; the handshake
+    /// keeps its own short timeout regardless.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     /// Where the provider runs relative to the host sweep.
     #[serde(default)]
     pub order: Option<crate::domain::provider::ProviderOrder>,

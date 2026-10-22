@@ -68,6 +68,7 @@ Credentials are named, never embedded:
 ```toml
 [providers.cloudflare]
 env = ["CLOUDFLARE_API_TOKEN"]
+timeout_secs = 120
 ```
 
 The core forwards those variables from its own environment (a systemd
@@ -77,6 +78,10 @@ business. A declared variable that is unset is a configuration error naming the
 variable — a provider that silently runs without its credential would report an
 empty world instead of an auth error. Values never appear in argv, logs or the
 rendered report.
+
+`timeout_secs` (default 60) bounds one operation. A provider that talks to a
+slow API declares its own number; the handshake keeps a short 5-second timeout
+so a broken binary cannot stall the reconciler before it has said anything.
 
 ### 3. Handshake before anything is observed
 

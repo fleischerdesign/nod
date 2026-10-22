@@ -16,9 +16,6 @@ use crate::domain::provider::{
 };
 use crate::infrastructure::provider::process::ProcessProvider;
 
-/// Timeout for one provider operation.
-const OP_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// What a reconcile run should do.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReconcileOptions {
@@ -119,8 +116,9 @@ pub async fn execute(
     options: ReconcileOptions,
     policy: &Policy,
     env: &[String],
+    timeout: Duration,
 ) -> Result<ReconcileReport, NodError> {
-    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, env).await?;
+    let (mut provider, handshake) = ProcessProvider::open(command, timeout, env).await?;
 
     let observed = provider.observe(settings).await?;
     check_capabilities(&handshake, &observed.resources, &[])?;
@@ -257,10 +255,11 @@ pub async fn rollback(
     plan: &crate::domain::provider::RollbackPlan,
     policy: &Policy,
     env: &[String],
+    timeout: Duration,
 ) -> Result<RollbackReport, NodError> {
     use crate::domain::provider::matches_expected;
 
-    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, env).await?;
+    let (mut provider, handshake) = ProcessProvider::open(command, timeout, env).await?;
     let observed = provider.observe(settings).await?;
 
     let mut refused = Vec::new();

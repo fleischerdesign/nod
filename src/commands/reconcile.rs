@@ -1,6 +1,7 @@
 //! `nod reconcile` command: one provider, one cycle or one rollback (ADR-030).
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::application::use_cases::reconcile::{self, ReconcileOptions};
 use crate::domain::config::CliOverrides;
@@ -103,6 +104,14 @@ pub async fn execute(
         names
     };
 
+    // The operation timeout is declared per provider: a slow API says so in
+    // its entry instead of forcing every provider onto one number.
+    let timeout = Duration::from_secs(
+        configured
+            .and_then(|entry| entry.timeout_secs)
+            .unwrap_or(60),
+    );
+
     if rollback {
         return run_rollback(
             provider,
@@ -112,6 +121,7 @@ pub async fn execute(
             json,
             &policy,
             &environment,
+            timeout,
         )
         .await;
     }
@@ -140,6 +150,7 @@ pub async fn execute(
         ReconcileOptions { apply },
         &policy,
         &environment,
+        timeout,
     )
     .await?;
 
@@ -210,6 +221,7 @@ pub async fn execute(
 }
 
 /// Applies the recorded plan for `provider`, or refuses when the world moved.
+#[allow(clippy::too_many_arguments)]
 async fn run_rollback(
     provider: Option<&str>,
     command: &Path,
@@ -218,6 +230,7 @@ async fn run_rollback(
     json: bool,
     policy: &Policy,
     env: &[String],
+    timeout: Duration,
 ) -> Result<(), NodError> {
     let name = provider
         .ok_or_else(|| NodError::config("--rollback needs a provider name to find its plan"))?;
@@ -226,7 +239,7 @@ async fn run_rollback(
         .load(name)?
         .ok_or_else(|| NodError::config(format!("no recorded plan for provider `{name}`")))?;
 
-    let report = reconcile::rollback(command, settings, &plan, policy, env).await?;
+    let report = reconcile::rollback(command, settings, &plan, policy, env, timeout).await?;
 
     if json {
         let text = serde_json::to_string_pretty(&serde_json::json!({

@@ -204,6 +204,7 @@ mod tests {
             order: None,
             policy: None,
             env: Vec::new(),
+            timeout_secs: None,
         }
     }
 

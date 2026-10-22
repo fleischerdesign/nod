@@ -6,6 +6,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nod::application::use_cases::reconcile::{execute, ReconcileOptions};
 use nod::domain::policy::Policy;
@@ -69,6 +70,7 @@ async fn a_half_applied_plan_records_only_what_happened() {
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
+        Duration::from_secs(5),
     )
     .await
     .unwrap();
@@ -121,6 +123,7 @@ done
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
+        Duration::from_secs(5),
     )
     .await
     .unwrap();
@@ -132,6 +135,39 @@ done
         report.failed
     );
     assert!(report.inverse.is_empty());
+}
+
+#[tokio::test]
+async fn a_provider_that_stops_answering_is_killed_at_the_declared_timeout() {
+    let _guard = SERIAL.lock().await;
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      sleep 30
+      ;;
+  esac
+done
+"#,
+    );
+
+    let error = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired(&["a"]),
+        ReconcileOptions { apply: false },
+        &Policy::default(),
+        &[],
+        Duration::from_millis(200),
+    )
+    .await
+    .expect_err("a provider that never answers must not block the reconciler");
+
+    assert!(error.to_string().contains("timed out"), "{error}");
 }
 
 #[tokio::test]
@@ -159,6 +195,7 @@ done
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
+        Duration::from_secs(5),
     )
     .await
     .expect_err("an undeclared kind must fail the run");

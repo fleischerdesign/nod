@@ -173,6 +173,7 @@ struct ProviderEntry {
     schedule: ProviderSchedule,
     policy: crate::domain::policy::Policy,
     env: Vec<String>,
+    timeout: std::time::Duration,
 }
 
 /// Builds the provider loop from `[providers.<name>]` in the configuration.
@@ -222,6 +223,7 @@ async fn load_providers(
             order: provider.order.unwrap_or_default(),
             policy: provider.policy.clone().unwrap_or_default(),
             env: provider.env.clone(),
+            timeout: std::time::Duration::from_secs(provider.timeout_secs.unwrap_or(60)),
             schedule: ProviderSchedule::new(
                 Duration::from_secs(provider.interval_secs.unwrap_or(300)),
                 now,
@@ -261,6 +263,7 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
             ReconcileOptions { apply: entry.apply },
             &entry.policy,
             &entry.env,
+            entry.timeout,
         )
         .await;
 
