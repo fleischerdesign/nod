@@ -33,7 +33,39 @@
             pkgs.openssl
           ];
         };
+
+        # Providers are separate packages on purpose: they carry their own
+        # dependencies and must not pull an HTTP client into the core.
+        nod-provider-cloudflare = pkgs.rustPlatform.buildRustPackage {
+          pname = "nod-provider-cloudflare";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ./providers/cloudflare;
+            fileset = pkgs.lib.fileset.unions [
+              ./providers/cloudflare/Cargo.toml
+              ./providers/cloudflare/Cargo.lock
+              ./providers/cloudflare/src
+            ];
+          };
+          cargoLock.lockFile = ./providers/cloudflare/Cargo.lock;
+        };
+
+        nod-provider-example = pkgs.writeShellApplication {
+          name = "nod-provider-example";
+          runtimeInputs = [ pkgs.python3 ];
+          text = ''
+            exec python3 ${./providers/example/nod-provider-example.py} "$@"
+          '';
+        };
       };
+
+      # Building the providers is part of the gate: a provider that does not
+      # build is not a provider.
+      checks.${system}.providers = pkgs.runCommand "nod-providers-check" { } ''
+        test -x ${self.packages.${system}.nod-provider-cloudflare}/bin/nod-provider-cloudflare
+        test -x ${self.packages.${system}.nod-provider-example}/bin/nod-provider-example
+        touch $out
+      '';
 
       apps.${system}.default = {
         type = "app";
