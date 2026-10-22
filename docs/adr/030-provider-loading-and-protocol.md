@@ -140,8 +140,9 @@ leaves a world that neither the declaration nor the observation describes, and
 the next run then has no explanation. Rollback is exempt from the cap because it
 is operator-initiated and reverts a recorded plan.
 
-A refusal is data, not an error: the report lists every reason and the run exits
-with the others unchanged.
+A refusal is data, not an error: the report lists every reason. An individual
+refusal leaves the rest of the plan untouched; a plan over the cap is refused
+entirely, so nothing half-applies.
 
 ### 6. Ownership
 
