@@ -413,7 +413,9 @@ impl SyncReconcilerUseCase {
 
         if changed.is_empty() {
             let settled = reports.iter().all(|host| host.result.is_settled());
-            let verified = Self::verified(&state, &reports);
+            // An idle cycle has no fresh observation, so it can preserve a
+            // verified marker but never create one.
+            let verified = settled && state.last_verified_rev.as_deref() == Some(head.as_str());
             let report = SyncReport {
                 revision: head.clone(),
                 previous_revision: Some(local_before),
@@ -463,7 +465,7 @@ impl SyncReconcilerUseCase {
 
         let settled = reports.iter().all(|host| host.result.is_settled());
         let applied = settled && !failed;
-        let verified = Self::verified(&state, &reports);
+        let verified = Self::verified(&reports);
         for report in &reports {
             if let Some(verdict) = &report.health {
                 state.record_health(&report.host, verdict.clone(), now);
@@ -666,20 +668,14 @@ impl SyncReconcilerUseCase {
         report
     }
 
-    /// A cycle is verified when every host is settled and its health verdict —
-    /// fresh from this cycle or remembered from the last one — is `healthy`.
-    /// `pending-reboot` and `unverified` are not converged (ADR-029 §1).
-    fn verified(state: &SyncState, reports: &[SyncHostReport]) -> bool {
+    /// A cycle is verified when every selected host is settled and its health
+    /// verdict from this cycle is `healthy`. `pending-reboot` and `unverified`
+    /// are not converged (ADR-029 §1). A remembered verdict does not count:
+    /// verification is a statement about observations, not about memory.
+    fn verified(reports: &[SyncHostReport]) -> bool {
         !reports.is_empty()
             && reports.iter().all(|report| {
-                report.result.is_settled()
-                    && matches!(
-                        report.health.as_ref().or_else(|| state
-                            .hosts
-                            .get(&report.host)
-                            .and_then(|m| m.health.as_ref())),
-                        Some(HealthVerdict::Healthy)
-                    )
+                report.result.is_settled() && matches!(report.health, Some(HealthVerdict::Healthy))
             })
     }
 
@@ -835,27 +831,29 @@ mod tests {
     fn only_healthy_settled_hosts_make_a_cycle_verified() {
         use crate::domain::health::HealthVerdict;
 
-        let state = SyncState::new("repo", "main");
         let healthy = SyncHostReport::new("a", SyncHostResult::Deployed)
             .with_health(Some(HealthVerdict::Healthy));
-        assert!(SyncReconcilerUseCase::verified(&state, &[healthy]));
+        assert!(SyncReconcilerUseCase::verified(&[healthy]));
 
         let pending = SyncHostReport::new("a", SyncHostResult::Deployed)
             .with_health(Some(HealthVerdict::PendingReboot));
-        assert!(!SyncReconcilerUseCase::verified(&state, &[pending]));
+        assert!(!SyncReconcilerUseCase::verified(&[pending]));
 
         let unknown = SyncHostReport::new("a", SyncHostResult::Deployed);
-        assert!(!SyncReconcilerUseCase::verified(&state, &[unknown]));
+        assert!(!SyncReconcilerUseCase::verified(&[unknown]));
     }
 
     #[test]
-    fn a_remembered_healthy_verdict_verifies_an_unchanged_host() {
-        use crate::domain::health::HealthVerdict;
-
+    fn an_idle_cycle_preserves_but_does_not_create_a_verified_marker() {
         let mut state = SyncState::new("repo", "main");
-        state.record_health("a", HealthVerdict::Healthy, 10);
-        let unchanged = SyncHostReport::new("a", SyncHostResult::Unchanged);
-        assert!(SyncReconcilerUseCase::verified(&state, &[unchanged]));
+        assert_ne!(state.last_verified_rev.as_deref(), Some("abc"));
+
+        state.record_success("abc");
+        assert_eq!(state.last_verified_rev.as_deref(), Some("abc"));
+
+        // A later idle cycle must not clear it.
+        state.record_deployed("abc");
+        assert_eq!(state.last_verified_rev.as_deref(), Some("abc"));
     }
 
     #[test]
