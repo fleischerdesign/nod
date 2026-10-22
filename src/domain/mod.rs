@@ -17,6 +17,7 @@ pub mod plan;
 pub mod ports;
 pub mod provider;
 pub mod provision;
+pub mod runtime_config;
 pub mod secret;
 pub mod ssh_args;
 pub mod sync;

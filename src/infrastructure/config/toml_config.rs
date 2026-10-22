@@ -175,6 +175,7 @@ pub struct TomlHooks {
 /// Parsed shape of `.nod.toml`. `[defaults]` is [`TomlDefaults`]: the shared
 /// SSH settings plus the optional default flake root.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TomlConfig {
     #[serde(default)]
     pub defaults: Option<TomlDefaults>,
@@ -185,6 +186,27 @@ pub struct TomlConfig {
     /// Provider executables declared for `nod reconcile` (ADR-030).
     #[serde(default)]
     pub providers: HashMap<String, TomlProvider>,
+    /// Operational defaults for this fleet (ADR-031).
+    #[serde(default)]
+    pub runtime: Option<TomlRuntime>,
+}
+
+/// `[runtime]` — operational values used when no flag or environment sits above them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TomlRuntime {
+    /// Flake root.
+    #[serde(default)]
+    pub flake: Option<String>,
+    /// State directory.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
+    /// Log level.
+    #[serde(default)]
+    pub log: Option<String>,
+    /// Machine-readable output by default.
+    #[serde(default)]
+    pub json: Option<bool>,
 }
 
 /// `[providers.<name>]` — one provider executable and its settings.
@@ -275,26 +297,34 @@ fn merge_cli_into(merged: &mut Merged, cli: &CliOverrides) {
 pub struct TomlConfigStore {
     cli: CliOverrides,
     toml: TomlConfig,
+    base: Option<PathBuf>,
 }
 
 impl TomlConfigStore {
     /// Builds the store for `root`, discovering `.nod.toml` (or `nod.toml`)
     /// by walking up from `root`. Applies `cli` overrides as the top tier.
     pub fn new(root: &Path, cli: CliOverrides) -> Result<Self, NodError> {
-        let toml = match Self::discover(root) {
-            Some(path) => Self::parse(&path)?,
-            None => TomlConfig::default(),
+        let (toml, base) = match Self::discover(root) {
+            Some(path) => (
+                Self::parse(&path)?,
+                path.parent().map(std::path::Path::to_path_buf),
+            ),
+            None => (TomlConfig::default(), None),
         };
-        Ok(Self { cli, toml })
+        Ok(Self { cli, toml, base })
     }
 
     /// Builds the store from an explicit file, skipping discovery.
     ///
-    /// This is the seam for a configuration rendered by Nix: the file lives in
-    /// the store, and the daemon must read exactly it (ADR-004, ADR-030).
+    /// This is the seam for a configuration rendered by Nix or handed in by an
+    /// operator: the daemon must read exactly it (ADR-031).
     pub fn from_file(path: &Path, cli: CliOverrides) -> Result<Self, NodError> {
         let toml = Self::parse(path)?;
-        Ok(Self { cli, toml })
+        Ok(Self {
+            cli,
+            toml,
+            base: path.parent().map(std::path::Path::to_path_buf),
+        })
     }
 
     /// The `[providers.<name>]` entry, when the configuration declares one.
@@ -305,6 +335,16 @@ impl TomlConfigStore {
     /// Every declared provider, in name order.
     pub fn providers(&self) -> impl Iterator<Item = (&String, &TomlProvider)> {
         self.toml.providers.iter()
+    }
+
+    /// Directory of the configuration file, for relative paths.
+    pub fn base_dir(&self) -> Option<&Path> {
+        self.base.as_deref()
+    }
+
+    /// The `[runtime]` section, when the configuration declares one.
+    pub fn runtime(&self) -> Option<&TomlRuntime> {
+        self.toml.runtime.as_ref()
     }
 
     /// Returns the raw `[defaults].flake` value from the parsed config file,

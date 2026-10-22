@@ -520,6 +520,15 @@ async fn run(cli: Cli) -> Result<()> {
                 write,
             } => nod::commands::provider::test(&command, settings.as_deref(), write).await?,
         },
+        Commands::Config {
+            flake,
+            config,
+            state_dir,
+            log,
+            format,
+        } => {
+            nod::commands::config::execute(flake, config, state_dir, log, &format).await?;
+        }
         Commands::Reconcile {
             provider,
             command,

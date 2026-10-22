@@ -683,6 +683,29 @@ pub enum Commands {
         command: ProviderCommands,
     },
 
+    /// Show the effective operational configuration and where it comes from
+    Config {
+        /// Flake root
+        #[arg(long)]
+        flake: Option<String>,
+
+        /// Configuration file
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// State directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
+        /// Log level
+        #[arg(long)]
+        log: Option<String>,
+
+        /// Output format: table or json
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
     /// Reconcile declared state against a provider API (ADR-030)
     Reconcile {
         /// Provider name declared in `.nod.toml` under `[providers.<name>]`

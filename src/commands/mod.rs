@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod build;
 pub mod cache;
 pub mod check;
+pub mod config;
 pub mod copy;
 pub mod daemon;
 pub mod dashboard;
