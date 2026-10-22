@@ -76,6 +76,20 @@ pub struct Manifest {
     /// What the provider manages, in one sentence.
     #[serde(default)]
     pub description: Option<String>,
+    /// Write-conformance fixture.
+    ///
+    /// Without it, `nod provider test --write` refuses: a write test needs a
+    /// namespace that is allowed to be destroyed, and only the provider knows
+    /// which resources express that.
+    #[serde(default)]
+    pub sandbox: Option<Sandbox>,
+}
+
+/// What the write conformance creates and removes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sandbox {
+    /// Resources the test creates, verifies and deletes again.
+    pub desired: Vec<DesiredResource>,
 }
 
 impl Manifest {

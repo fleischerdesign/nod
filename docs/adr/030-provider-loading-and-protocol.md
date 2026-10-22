@@ -166,10 +166,19 @@ it come from, and is it compatible.
 
 ### 10. Conformance is a test, not a promise
 
-`nod provider test` runs a provider against a fake API and asserts the
-properties that matter: idempotency, dry-run, ownership, `429` handling, auth
-errors as conditions, protocol validity. A provider that fails the suite is not
-compatible, however well it works against the real API.
+`nod provider test` asserts the properties the core depends on: protocol
+validity, ownership, error shape, and the handshake/manifest agreement. It does
+not write unless asked.
+
+`--write` runs a full cycle - create, verify, observe again, delete - and proves
+idempotency: the same declaration must produce an empty plan after it was
+applied. It requires a `sandbox` fixture in the provider's manifest, because a
+write test needs a namespace that may be destroyed, and only the provider knows
+which resources express that. Cleanup deletes exactly the fixture ids, never the
+whole namespace: a conformance run must not be able to empty a real zone.
+
+A provider that fails the suite is not compatible, however well it works
+against the real API.
 
 ## Consequences
 

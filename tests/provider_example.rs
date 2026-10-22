@@ -61,3 +61,29 @@ async fn a_missing_setting_is_an_error_not_an_empty_world() {
         .expect_err("an empty config must be reported, not read as an empty world");
     assert!(error.to_string().contains("config.state"), "got: {error}");
 }
+
+#[tokio::test]
+async fn the_write_conformance_creates_proves_idempotency_and_cleans_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let settings_path = dir.path().join("settings.json");
+    std::fs::write(
+        &settings_path,
+        serde_json::json!({ "state": state }).to_string(),
+    )
+    .unwrap();
+
+    nod::commands::provider::test(&example(), Some(&settings_path), true)
+        .await
+        .expect("the example must pass the write conformance");
+
+    let raw = std::fs::read_to_string(&state).unwrap_or_else(|_| "{}".to_string());
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        value
+            .as_object()
+            .map(|object| object.is_empty())
+            .unwrap_or(true),
+        "the sandbox must be cleaned up, got: {value}"
+    );
+}

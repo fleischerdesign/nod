@@ -938,6 +938,12 @@ pub enum ProviderCommands {
     Test {
         /// Path to the provider executable
         command: PathBuf,
+        /// JSON file with the provider settings
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        /// Also run the write conformance in the provider's declared sandbox
+        #[arg(long)]
+        write: bool,
     },
 }
 

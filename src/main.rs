@@ -514,9 +514,11 @@ async fn run(cli: Cli) -> Result<()> {
             nod::config::options::ProviderCommands::Schema { command } => {
                 nod::commands::provider::schema(&command).await?
             }
-            nod::config::options::ProviderCommands::Test { command } => {
-                nod::commands::provider::test(&command).await?
-            }
+            nod::config::options::ProviderCommands::Test {
+                command,
+                settings,
+                write,
+            } => nod::commands::provider::test(&command, settings.as_deref(), write).await?,
         },
         Commands::Reconcile {
             provider,

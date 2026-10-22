@@ -86,7 +86,12 @@ pub async fn schema(command: &Path) -> Result<(), NodError> {
 /// provider's own fake API. It proves the properties the core depends on:
 /// handshake, a valid observe, a plan that obeys ownership, and an apply that
 /// accepts an empty change set.
-pub async fn test(command: &Path) -> Result<(), NodError> {
+pub async fn test(
+    command: &Path,
+    settings_path: Option<&Path>,
+    write: bool,
+) -> Result<(), NodError> {
+    let settings = read_settings(settings_path)?;
     let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
 
     println!(
@@ -122,11 +127,10 @@ pub async fn test(command: &Path) -> Result<(), NodError> {
         }
     );
 
-    let config = serde_json::Value::Object(serde_json::Map::new());
-    let observed = provider.observe(&config).await?;
+    let observed = provider.observe(&settings).await?;
     println!("observe     ok   {} resource(s)", observed.resources.len());
 
-    let plan = provider.plan(&config, &[], &observed.resources).await?;
+    let plan = provider.plan(&settings, &[], &observed.resources).await?;
     println!("plan        ok   {} change(s)", plan.changes.len());
 
     if let Some(change) = plan
@@ -140,12 +144,118 @@ pub async fn test(command: &Path) -> Result<(), NodError> {
         )));
     }
 
-    let applied = provider.apply(&config, &[]).await?;
+    let applied = provider.apply(&settings, &[]).await?;
     println!("apply       ok   {} applied", applied.applied.len());
 
-    let verified = provider.observe(&config).await?;
+    let verified = provider.observe(&settings).await?;
     println!("verify      ok   {} resource(s)", verified.resources.len());
 
+    if write {
+        let manifest = manifest_for(command).ok_or_else(|| {
+            NodError::config("write conformance needs a provider.json with a sandbox")
+        })?;
+        let sandbox = manifest
+            .sandbox
+            .ok_or_else(|| NodError::config("provider declares no sandbox; refusing to write"))?;
+        write_conformance(&mut provider, &handshake, &settings, &sandbox).await?;
+    }
+
     println!("PASS");
+    Ok(())
+}
+
+/// Reads provider settings from a JSON file, or an empty object.
+fn read_settings(path: Option<&Path>) -> Result<serde_json::Value, NodError> {
+    match path {
+        None => Ok(serde_json::Value::Object(serde_json::Map::new())),
+        Some(path) => {
+            let raw = std::fs::read_to_string(path).map_err(|error| {
+                NodError::config(format!("cannot read settings {}: {error}", path.display()))
+            })?;
+            serde_json::from_str(&raw).map_err(|error| {
+                NodError::config(format!("cannot parse settings {}: {error}", path.display()))
+            })
+        }
+    }
+}
+
+/// Creates the sandbox fixture, proves idempotency, then removes exactly what
+/// the fixture named.
+async fn write_conformance(
+    provider: &mut ProcessProvider,
+    handshake: &crate::domain::provider::Handshake,
+    settings: &serde_json::Value,
+    sandbox: &crate::domain::provider::Sandbox,
+) -> Result<(), NodError> {
+    use crate::application::use_cases::reconcile::approve;
+    use crate::domain::provider::{Change, ChangeKind, DesiredResource};
+
+    if !handshake.ownership.allows_writes() {
+        return Err(NodError::config(
+            "provider is read-only; there is nothing to write",
+        ));
+    }
+
+    let observed = provider.observe(settings).await?;
+    let plan = provider
+        .plan(settings, &sandbox.desired, &observed.resources)
+        .await?;
+    let (approved, refused) = approve(handshake, &plan.changes);
+    if !refused.is_empty() {
+        return Err(NodError::provider(format!(
+            "sandbox plan refused: {}",
+            refused.join("; ")
+        )));
+    }
+
+    let applied = provider.apply(settings, &approved).await?;
+    if applied.applied.iter().any(|entry| !entry.ok) {
+        return Err(NodError::provider("apply reported a failed change"));
+    }
+
+    // Idempotency: the same declaration must now produce an empty plan.
+    let after = provider.observe(settings).await?;
+    let second = provider
+        .plan(settings, &sandbox.desired, &after.resources)
+        .await?;
+    if !second.changes.is_empty() {
+        return Err(NodError::provider(format!(
+            "provider is not idempotent: {} change(s) after apply",
+            second.changes.len()
+        )));
+    }
+
+    // Cleanup deletes exactly the fixture ids, never the whole namespace.
+    let ids: Vec<&str> = sandbox
+        .desired
+        .iter()
+        .map(|resource| resource.id.as_str())
+        .collect();
+    let deletes: Vec<Change> = after
+        .resources
+        .iter()
+        .filter(|resource| ids.contains(&resource.id.as_str()) && resource.owned)
+        .map(|resource| Change {
+            kind: ChangeKind::Delete,
+            owned: true,
+            destructive: true,
+            resource: DesiredResource {
+                kind: resource.kind.clone(),
+                id: resource.id.clone(),
+                attributes: resource.attributes.clone(),
+            },
+        })
+        .collect();
+
+    if !deletes.is_empty() {
+        let cleanup = provider.apply(settings, &deletes).await?;
+        if cleanup.applied.iter().any(|entry| !entry.ok) {
+            return Err(NodError::provider(
+                "cleanup failed; the sandbox may hold leftovers",
+            ));
+        }
+    }
+
+    println!("write       ok   created, idempotent, cleaned up");
     Ok(())
 }

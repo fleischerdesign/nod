@@ -4,5 +4,14 @@
   "protocol": 1,
   "capabilities": ["example.record"],
   "ownership": "marker",
-  "description": "A minimal provider over a JSON file, for learning the protocol"
+  "description": "A minimal provider over a JSON file, for learning the protocol",
+  "sandbox": {
+    "desired": [
+      {
+        "kind": "example.record",
+        "id": "conformance",
+        "attributes": { "value": "nod-provider-test" }
+      }
+    ]
+  }
 }
