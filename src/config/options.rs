@@ -740,6 +740,11 @@ pub enum Commands {
         #[arg(long)]
         max_deletions: Option<usize>,
 
+        /// Environment variable the provider inherits (repeatable; adds to the
+        /// declared list)
+        #[arg(long)]
+        env: Vec<String>,
+
         /// Directory holding the reconciler state (plan records)
         #[arg(long, default_value = "/var/lib/nod")]
         state_dir: PathBuf,
@@ -1003,6 +1008,9 @@ pub enum ProviderCommands {
         /// Also run the write conformance in the provider's declared sandbox
         #[arg(long)]
         write: bool,
+        /// Environment variable the provider inherits (repeatable)
+        #[arg(long)]
+        env: Vec<String>,
     },
 }
 

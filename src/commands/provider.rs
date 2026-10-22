@@ -64,7 +64,7 @@ fn manifest_for(command: &Path) -> Option<Manifest> {
 
 /// Prints the provider's handshake.
 pub async fn inspect(command: &Path) -> Result<(), NodError> {
-    let (_provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
+    let (_provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, &[]).await?;
     let text = serde_json::to_string_pretty(&handshake)
         .map_err(|error| NodError::provider(format!("cannot render handshake: {error}")))?;
     println!("{text}");
@@ -73,7 +73,7 @@ pub async fn inspect(command: &Path) -> Result<(), NodError> {
 
 /// Prints the provider's settings schema.
 pub async fn schema(command: &Path) -> Result<(), NodError> {
-    let (_provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
+    let (_provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, &[]).await?;
     let text = serde_json::to_string_pretty(&handshake.settings_schema)
         .map_err(|error| NodError::provider(format!("cannot render schema: {error}")))?;
     println!("{text}");
@@ -90,9 +90,10 @@ pub async fn test(
     command: &Path,
     settings_path: Option<&Path>,
     write: bool,
+    env: &[String],
 ) -> Result<(), NodError> {
     let settings = read_settings(settings_path)?;
-    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
+    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, env).await?;
 
     println!(
         "handshake   ok   {} {} (protocol {})",
@@ -132,6 +133,15 @@ pub async fn test(
 
     let plan = provider.plan(&settings, &[], &observed.resources).await?;
     println!("plan        ok   {} change(s)", plan.changes.len());
+
+    // A declaration that names capabilities must stay inside them — checked
+    // here as well, so `provider test` catches it before a real run does.
+    crate::application::use_cases::reconcile::check_capabilities(
+        &handshake,
+        &observed.resources,
+        &plan.changes,
+    )?;
+    println!("capabilities ok  stays inside the declaration");
 
     if let Some(change) = plan
         .changes

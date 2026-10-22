@@ -203,6 +203,7 @@ mod tests {
             interval_secs: None,
             order: None,
             policy: None,
+            env: Vec::new(),
         }
     }
 

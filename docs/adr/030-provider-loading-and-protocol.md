@@ -63,6 +63,21 @@ Three sources, in order of preference:
 The Nix module and a hand-written file render the **same** structure; the only
 difference is who writes it (ADR-004).
 
+Credentials are named, never embedded:
+
+```toml
+[providers.cloudflare]
+env = ["CLOUDFLARE_API_TOKEN"]
+```
+
+The core forwards those variables from its own environment (a systemd
+`EnvironmentFile` rendered from SOPS, in the fleet) and clears everything else.
+It forwards **names**, not semantics: what a variable means is the provider's
+business. A declared variable that is unset is a configuration error naming the
+variable — a provider that silently runs without its credential would report an
+empty world instead of an auth error. Values never appear in argv, logs or the
+rendered report.
+
 ### 3. Handshake before anything is observed
 
 ```jsonc
@@ -100,9 +115,18 @@ Rules that make the conversation safe:
 - `apply` receives **only** the changes the core approved. A provider cannot
   smuggle a deletion the core did not see.
 - `verify` is not an operation. The core calls `observe` again and compares;
-  "the API returned 200" is not verification.
-- Pagination is part of the protocol from the first version (`has_more`,
-  `cursor`). A zone with 100k records must not require a breaking change later.
+  "the API returned 200" is not verification. The comparison is against the
+  declaration: `verified` counts desired resources that match, never the size
+  of the world.
+- `observe` returns the **complete** world or fails. Pagination is the
+  provider's business, not the protocol's: a provider that cannot enumerate
+  everything reports an error instead of a truncated list. A partial world read
+  as complete is how a reconciler plans deletions for resources it simply did
+  not see.
+- A provider declares what it manages (`capabilities`). When the list is not
+  empty, any observed resource or proposed change of another kind is a
+  protocol violation, checked by the core on every run and by `provider test`.
+  An empty list means "no declaration" and is not enforced.
 
 ### 5. The core keeps the policy
 
@@ -185,12 +209,13 @@ nod provider list           resolved providers, source, version, protocol, statu
 nod provider test NAME      conformance suite against a fake API
 nod provider schema NAME    print the settings schema
 
-nod reconcile NAME [--apply] [--protect GLOB]... [--max-deletions N]
+nod reconcile NAME [--apply] [--protect GLOB]... [--max-deletions N] [--env NAME]...
 ```
 
 `--protect` and `--max-deletions` narrow the declared policy for one run: they
 add patterns and can only lower the cap. No flag can widen a guard; that is a
-declaration change.
+declaration change. `--env` adds a variable name to forward, so a one-off run
+can use a credential the daemon does not hold.
 
 `list` answers the question plugins usually cannot: what is installed, where did
 it come from, and is it compatible.
@@ -225,6 +250,29 @@ order = "before-hosts"   # or "after-hosts"; default "independent"
 Ordered providers run with the sweep, on the sweep's cadence, not on their own:
 their work is a prerequisite or a consequence of that sweep, and a separate
 clock would only add a race. Independent providers keep their own interval.
+
+### 12. Failure is classified, and partial application is visible
+
+One failed change must not read like a policy refusal, and a half-applied plan
+must not look complete:
+
+| Outcome | Where it lives | Meaning |
+|---|---|---|
+| `refused` | core | policy said no; nothing was attempted |
+| `failed` | provider, classified | attempted, did not happen |
+| `applied` | provider, confirmed | happened, and the undo is recorded |
+
+`apply` answers per change: `ok`, plus either a classified `error`
+(`auth`, `rate-limited`, `config`, `transient`, `protocol`) or a message. The
+core counts a change as applied only when the provider says `ok` for that id. A
+change with **no result at all** is unproven, and unproven is not done.
+
+The recorded undo covers exactly the changes that succeeded. An undo that
+includes a change which never happened would delete a resource the fleet never
+created — the most expensive way to be helpful.
+
+Provider output is bounded: one frame may not exceed 16 MiB. A broken or
+hostile provider must not be able to exhaust the reconciler's memory.
 
 ## Consequences
 

@@ -234,6 +234,13 @@ pub struct TomlProvider {
     /// Where the provider runs relative to the host sweep.
     #[serde(default)]
     pub order: Option<crate::domain::provider::ProviderOrder>,
+    /// Environment variables the provider inherits, by name (ADR-030).
+    ///
+    /// Names only: the core forwards values from its own environment and never
+    /// stores or logs them. A declared variable that is unset is an error, not
+    /// an empty credential.
+    #[serde(default)]
+    pub env: Vec<String>,
     /// What the core allows this provider's runs to delete (ADR-030).
     ///
     /// Absent means the strict default: nothing may be deleted. A provider

@@ -355,6 +355,10 @@ pub struct AppliedChange {
     /// Optional detail.
     #[serde(default)]
     pub message: String,
+    /// Classified failure, when the provider has one. `message` stays for
+    /// providers that predate this field; the core prefers `error`.
+    #[serde(default)]
+    pub error: Option<ProviderError>,
 }
 
 /// `observe` request.

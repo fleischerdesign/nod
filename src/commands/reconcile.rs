@@ -31,6 +31,7 @@ pub async fn execute(
     flake: &str,
     protect: &[String],
     max_deletions: Option<usize>,
+    env: &[String],
 ) -> Result<(), NodError> {
     let store = match config {
         Some(path) => TomlConfigStore::from_file(path, CliOverrides::default())?,
@@ -88,8 +89,31 @@ pub async fn execute(
         .unwrap_or_default()
         .narrowed(protect, max_deletions);
 
+    // Credentials travel by name: the declaration and the CLI name variables,
+    // the core forwards their values from its own environment.
+    let environment = {
+        let mut names = configured
+            .map(|entry| entry.env.clone())
+            .unwrap_or_default();
+        for name in env {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    };
+
     if rollback {
-        return run_rollback(provider, command_path, &settings, state_dir, json, &policy).await;
+        return run_rollback(
+            provider,
+            command_path,
+            &settings,
+            state_dir,
+            json,
+            &policy,
+            &environment,
+        )
+        .await;
     }
 
     let desired_path = match desired_path {
@@ -115,6 +139,7 @@ pub async fn execute(
         &desired,
         ReconcileOptions { apply },
         &policy,
+        &environment,
     )
     .await?;
 
@@ -133,10 +158,12 @@ pub async fn execute(
             "provider": report.provider,
             "version": report.version,
             "observed": report.observed,
+            "desired": report.desired,
             "planned": report.planned,
             "approved": report.approved.len(),
             "refused": report.refused,
             "applied": report.applied,
+            "failed": report.failed,
             "verified": report.verified,
             "rollback_recorded": apply && !report.inverse.is_empty(),
         }))
@@ -154,13 +181,19 @@ pub async fn execute(
         println!("          {reason}");
     }
     println!("applied   {}", report.applied);
-    println!("verified  {}", report.verified);
+    println!("failed    {}", report.failed.len());
+    for reason in &report.failed {
+        println!("          {reason}");
+    }
+    println!("verified  {}/{}", report.verified, report.desired);
     if apply && !report.inverse.is_empty() {
         println!("rollback  recorded ({} operation(s))", report.inverse.len());
     }
 
     let outcome = if !report.refused.is_empty() {
         "refused"
+    } else if !report.failed.is_empty() {
+        "failed"
     } else if report.applied > 0 {
         "applied"
     } else if report.planned > 0 {
@@ -184,6 +217,7 @@ async fn run_rollback(
     state_dir: &Path,
     json: bool,
     policy: &Policy,
+    env: &[String],
 ) -> Result<(), NodError> {
     let name = provider
         .ok_or_else(|| NodError::config("--rollback needs a provider name to find its plan"))?;
@@ -192,7 +226,7 @@ async fn run_rollback(
         .load(name)?
         .ok_or_else(|| NodError::config(format!("no recorded plan for provider `{name}`")))?;
 
-    let report = reconcile::rollback(command, settings, &plan, policy).await?;
+    let report = reconcile::rollback(command, settings, &plan, policy, env).await?;
 
     if json {
         let text = serde_json::to_string_pretty(&serde_json::json!({

@@ -518,7 +518,8 @@ async fn run(cli: Cli) -> Result<()> {
                 command,
                 settings,
                 write,
-            } => nod::commands::provider::test(&command, settings.as_deref(), write).await?,
+                env,
+            } => nod::commands::provider::test(&command, settings.as_deref(), write, &env).await?,
         },
         Commands::Config {
             flake,
@@ -538,6 +539,7 @@ async fn run(cli: Cli) -> Result<()> {
             rollback,
             protect,
             max_deletions,
+            env,
             state_dir,
             json,
             flake,
@@ -556,6 +558,7 @@ async fn run(cli: Cli) -> Result<()> {
                 &flake,
                 &protect,
                 max_deletions,
+                &env,
             )
             .await?;
         }

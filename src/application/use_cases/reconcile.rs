@@ -11,7 +11,8 @@ use std::time::Duration;
 use crate::domain::errors::NodError;
 use crate::domain::policy::Policy;
 use crate::domain::provider::{
-    Change, ChangeKind, DesiredResource, Handshake, InverseChange, ObservedResource,
+    matches_expected, AppliedChange, Change, ChangeKind, DesiredResource, Handshake, InverseChange,
+    ObservedResource,
 };
 use crate::infrastructure::provider::process::ProcessProvider;
 
@@ -34,15 +35,19 @@ pub struct ReconcileReport {
     pub version: String,
     /// Resources the provider reported.
     pub observed: usize,
+    /// Resources the declaration asks for.
+    pub desired: usize,
     /// Changes the provider proposed.
     pub planned: usize,
     /// Changes the policy approved.
     pub approved: Vec<Change>,
     /// Changes the policy refused, with the reason.
     pub refused: Vec<String>,
-    /// Results of applying, when `--apply` was set.
+    /// Changes the provider reported as applied.
     pub applied: usize,
-    /// Resources observed after applying (or after the dry run).
+    /// Changes that failed, with the provider's classification.
+    pub failed: Vec<String>,
+    /// Desired resources that match the declaration after the run.
     pub verified: usize,
     /// Inverse of what was applied, for `nod reconcile --rollback`.
     pub inverse: Vec<InverseChange>,
@@ -113,41 +118,119 @@ pub async fn execute(
     desired: &[DesiredResource],
     options: ReconcileOptions,
     policy: &Policy,
+    env: &[String],
 ) -> Result<ReconcileReport, NodError> {
-    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
+    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, env).await?;
 
     let observed = provider.observe(settings).await?;
+    check_capabilities(&handshake, &observed.resources, &[])?;
     let plan = provider
         .plan(settings, desired, &observed.resources)
         .await?;
+    check_capabilities(&handshake, &[], &plan.changes)?;
     let (approved, refused) = approve(&handshake, &plan.changes, policy);
 
     let mut applied = 0;
+    let mut failed = Vec::new();
     let mut inverse = Vec::new();
     if options.apply && !approved.is_empty() {
         let result = provider.apply(settings, &approved).await?;
-        applied = result.applied.iter().filter(|entry| entry.ok).count();
-        if applied > 0 {
-            // Record what would undo this run, computed from the observation
+
+        // A change counts as applied only when the provider reports it as ok.
+        // A change with no result at all is unproven, and unproven is not done.
+        let mut succeeded: Vec<Change> = Vec::new();
+        for change in &approved {
+            let id = &change.resource.id;
+            match result.applied.iter().find(|entry| &entry.id == id) {
+                Some(entry) if entry.ok => succeeded.push(change.clone()),
+                Some(entry) => failed.push(format!("{id}: {}", describe_failure(entry))),
+                None => failed.push(format!("{id}: the provider reported no result")),
+            }
+        }
+
+        applied = succeeded.len();
+        if !succeeded.is_empty() {
+            // Undo only what actually happened, computed from the observation
             // taken before the apply.
-            inverse = crate::domain::provider::invert(&approved, &observed.resources);
+            inverse = crate::domain::provider::invert(&succeeded, &observed.resources);
         }
     }
 
     // Verification is a second observation, never "the API said 200".
-    let verified = provider.observe(settings).await?;
+    let after = provider.observe(settings).await?;
+    let verified = desired
+        .iter()
+        .filter(|want| {
+            after
+                .resources
+                .iter()
+                .any(|resource| resource.id == want.id && matches_expected(resource, want))
+        })
+        .count();
 
     Ok(ReconcileReport {
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
         observed: observed.resources.len(),
+        desired: desired.len(),
         planned: plan.changes.len(),
         approved,
         refused,
         applied,
-        verified: verified.resources.len(),
+        failed,
+        verified,
         inverse,
     })
+}
+
+/// Rejects a provider that reports outside its declared capabilities.
+///
+/// An empty list means the provider declares nothing; enforcement is opt-in so
+/// an adapter without capabilities keeps working. A non-empty list is a
+/// promise, and the core is the only place that can check it.
+pub fn check_capabilities(
+    handshake: &Handshake,
+    observed: &[ObservedResource],
+    changes: &[Change],
+) -> Result<(), NodError> {
+    if handshake.capabilities.is_empty() {
+        return Ok(());
+    }
+    let declared = |kind: &str| handshake.capabilities.iter().any(|entry| entry == kind);
+
+    for resource in observed {
+        if !declared(&resource.kind) {
+            return Err(NodError::provider(format!(
+                "provider {} declared capabilities [{}] but observed kind `{}` (resource `{}`)",
+                handshake.provider,
+                handshake.capabilities.join(", "),
+                resource.kind,
+                resource.id
+            )));
+        }
+    }
+    for change in changes {
+        if !declared(&change.resource.kind) {
+            return Err(NodError::provider(format!(
+                "provider {} declared capabilities [{}] but proposed kind `{}` (resource `{}`)",
+                handshake.provider,
+                handshake.capabilities.join(", "),
+                change.resource.kind,
+                change.resource.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Renders one provider-reported failure with its classification when given.
+fn describe_failure(entry: &AppliedChange) -> String {
+    match &entry.error {
+        Some(error) if !error.message.is_empty() => format!("{}: {}", error.kind, error.message),
+        Some(error) => error.kind.clone(),
+        None if !entry.message.is_empty() => entry.message.clone(),
+        None => "apply failed".to_string(),
+    }
 }
 
 /// What a rollback run produced.
@@ -173,10 +256,11 @@ pub async fn rollback(
     settings: &serde_json::Value,
     plan: &crate::domain::provider::RollbackPlan,
     policy: &Policy,
+    env: &[String],
 ) -> Result<RollbackReport, NodError> {
     use crate::domain::provider::matches_expected;
 
-    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
+    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT, env).await?;
     let observed = provider.observe(settings).await?;
 
     let mut refused = Vec::new();
@@ -285,7 +369,9 @@ pub fn missing_from_desired(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::provider::{DesiredResource, OwnershipMode};
+    use crate::domain::provider::{
+        AppliedChange, DesiredResource, ObservedResource, OwnershipMode, ProviderError,
+    };
 
     fn handshake(ownership: OwnershipMode) -> Handshake {
         Handshake {
@@ -458,6 +544,81 @@ mod tests {
             approve(&handshake(OwnershipMode::Marker), &changes, &allows(2, &[]));
         assert_eq!(approved.len(), 2);
         assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn a_provider_that_reports_outside_its_capabilities_is_rejected() {
+        let mut handshake = handshake(OwnershipMode::Marker);
+        handshake.capabilities = vec!["dns.record".to_string()];
+        let observed = vec![ObservedResource {
+            kind: "mail.mailbox".to_string(),
+            id: "inbox".to_string(),
+            attributes: serde_json::json!({}),
+            owned: true,
+        }];
+
+        let error = check_capabilities(&handshake, &observed, &[])
+            .expect_err("an undeclared kind must be a protocol violation");
+        assert!(error.to_string().contains("mail.mailbox"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_capability_list_is_not_enforced() {
+        let handshake = handshake(OwnershipMode::Marker);
+        assert!(handshake.capabilities.is_empty());
+        let observed = vec![ObservedResource {
+            kind: "anything".to_string(),
+            id: "x".to_string(),
+            attributes: serde_json::json!({}),
+            owned: true,
+        }];
+        check_capabilities(&handshake, &observed, &[]).unwrap();
+    }
+
+    #[test]
+    fn a_change_outside_the_declared_capabilities_is_rejected() {
+        let mut handshake = handshake(OwnershipMode::Marker);
+        handshake.capabilities = vec!["dns.record".to_string()];
+        let mut proposal = change(ChangeKind::Create, true, false);
+        proposal.resource.kind = "mail.mailbox".to_string();
+
+        let error = check_capabilities(&handshake, &[], &[proposal])
+            .expect_err("a proposed undeclared kind must be a protocol violation");
+        assert!(error.to_string().contains("proposed kind"), "{error}");
+    }
+
+    #[test]
+    fn a_failure_is_described_by_its_class_and_message() {
+        let entry = AppliedChange {
+            id: "web1".to_string(),
+            ok: false,
+            message: "legacy text".to_string(),
+            error: Some(ProviderError {
+                kind: "auth".to_string(),
+                message: "token expired".to_string(),
+                retry_after_secs: None,
+            }),
+        };
+        assert_eq!(describe_failure(&entry), "auth: token expired");
+    }
+
+    #[test]
+    fn an_unclassified_failure_falls_back_to_its_message() {
+        let legacy = AppliedChange {
+            id: "web1".to_string(),
+            ok: false,
+            message: "quota exceeded".to_string(),
+            error: None,
+        };
+        assert_eq!(describe_failure(&legacy), "quota exceeded");
+
+        let bare = AppliedChange {
+            id: "web1".to_string(),
+            ok: false,
+            message: String::new(),
+            error: None,
+        };
+        assert_eq!(describe_failure(&bare), "apply failed");
     }
 
     #[test]
