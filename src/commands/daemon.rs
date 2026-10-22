@@ -272,10 +272,12 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
                 tracing::info!(
                     provider = %entry.name,
                     observed = report.observed,
+                    unowned = report.unowned,
                     planned = report.planned,
                     approved = report.approved.len(),
                     refused = report.refused.len(),
                     applied = report.applied,
+                    failed = report.failed.len(),
                     apply = entry.apply,
                     "provider reconcile"
                 );
