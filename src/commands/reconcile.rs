@@ -40,29 +40,29 @@ pub async fn execute(
     };
 
     // The fleet lives for the whole function so the resolved provider can be
-    // borrowed instead of cloned. A rollback addresses a recorded plan by
-    // name; the plan is the authority, not a live declaration, so it does not
-    // load the fleet. That is what makes an ad-hoc canary undoable.
+    // borrowed instead of cloned. A rollback is allowed to name a plan whose
+    // provider is no longer declared, so a missing declaration is only an
+    // error outside rollback; when it *is* declared, its command and settings
+    // still resolve.
     let fleet = match provider {
-        Some(_) if !rollback => {
+        Some(_) => {
             Some(crate::infrastructure::config::fleet::load(Path::new(flake), &store).await?)
         }
-        _ => None,
-    };
-    let configured = match provider {
-        Some(_) if rollback => None,
-        Some(name) => Some(
-            fleet
-                .as_ref()
-                .and_then(|fleet| fleet.providers.get(name))
-                .ok_or_else(|| {
-                    NodError::config(format!(
-                        "provider `{name}` is not declared in the fleet declaration"
-                    ))
-                })?,
-        ),
         None => None,
     };
+    let configured = match provider {
+        Some(name) => fleet.as_ref().and_then(|fleet| fleet.providers.get(name)),
+        None => None,
+    };
+    if !rollback {
+        if let Some(name) = provider {
+            if configured.is_none() {
+                return Err(NodError::config(format!(
+                    "provider `{name}` is not declared in the fleet declaration"
+                )));
+            }
+        }
+    }
 
     let command_path = command
         .or_else(|| configured.map(|entry| entry.command.as_path()))
