@@ -189,6 +189,29 @@ without a reason cannot be acted on.
 - **Auto-rollback on `degraded-pre-existing`.** Rolls back a deployment for a
   fault it did not cause, and teaches operators to distrust the verdict.
 
+## Implementation
+
+Present in the code:
+
+- `HealthSnapshot`, `HealthVerdict` and `verdict_against` in
+  `src/domain/health.rs`: baseline attribution, restart-loop detection and the
+  `degraded-pre-existing` distinction.
+- The verdict is persisted per host (`HostMemory.health`), so `nod status` can
+  name a degraded host without re-probing it.
+- `last_applied_rev` (deployed to every host that answered) and
+  `last_verified_rev` (every host settled and healthy) are separate facts.
+  `nod status` prints `deployed` and `verified` on their own lines.
+- A degraded activation maps to a failed cycle; `pending-reboot` and
+  `unverified` are reported and never counted as converged.
+
+Not built yet:
+
+- Declared units, HTTP probes and custom probes: `health_checks.*` is parsed,
+  not consulted.
+- `NRestarts` counters as a scored input; restart loops are detected from
+  `activating`/`auto-restart` instead.
+- Scoring the units an activation touched.
+
 ## Open questions
 
 - Whether `pending-reboot` should be its own exit status (ADR-027) or a flag on

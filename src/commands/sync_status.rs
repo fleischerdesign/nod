@@ -60,8 +60,22 @@ fn render(status: &SyncStatus, json: bool) {
         None => println!("  remote    {}", "unreadable".yellow()),
     }
     match &status.applied_revision {
-        Some(applied) => println!("  applied   {}", short(applied)),
-        None => println!("  applied   {}", "never".yellow()),
+        Some(applied) => println!("  deployed  {}", short(applied)),
+        None => println!("  deployed  {}", "never".yellow()),
+    }
+    match &status.verified_revision {
+        Some(verified) if Some(verified.as_str()) == status.applied_revision.as_deref() => {
+            println!("  verified  {}", short(verified).green())
+        }
+        Some(verified) => println!(
+            "  verified  {} {}",
+            short(verified),
+            "(fleet has moved on)".dimmed()
+        ),
+        None => println!(
+            "  verified  {}",
+            "no host set has proven healthy yet".yellow()
+        ),
     }
     match status.observed_at {
         Some(at) => println!(
@@ -110,12 +124,29 @@ fn render(status: &SyncStatus, json: bool) {
     }
 
     for host in &status.hosts {
-        let label = if host.unreachable {
-            "unreachable".yellow()
-        } else if host.drifted {
-            "drifted".yellow()
-        } else {
-            "current".green()
+        let label = match &host.health {
+            Some(crate::domain::health::HealthVerdict::Degraded { units }) => {
+                format!("degraded: {}", units.join(", "))
+                    .yellow()
+                    .to_string()
+            }
+            Some(crate::domain::health::HealthVerdict::DegradedPreExisting { units }) => {
+                format!("degraded before the deploy: {}", units.join(", "))
+                    .dimmed()
+                    .to_string()
+            }
+            Some(crate::domain::health::HealthVerdict::PendingReboot) => {
+                "reboot required".yellow().to_string()
+            }
+            Some(crate::domain::health::HealthVerdict::Unverified { reason }) => {
+                format!("unverified: {reason}").yellow().to_string()
+            }
+            Some(crate::domain::health::HealthVerdict::Healthy) if host.unreachable => {
+                "unreachable".yellow().to_string()
+            }
+            _ if host.unreachable => "unreachable".yellow().to_string(),
+            _ if host.drifted => "drifted".yellow().to_string(),
+            _ => "current".green().to_string(),
         };
         println!("  {} {}", host.host.bold(), label);
     }

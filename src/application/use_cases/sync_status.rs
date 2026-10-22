@@ -87,6 +87,10 @@ impl SyncStatusUseCase {
                     unreachable: inspection.is_unreachable(),
                     current: inspection.current.map(|path| path.display().to_string()),
                     target: inspection.target.map(|path| path.display().to_string()),
+                    health: state
+                        .hosts
+                        .get(&inspection.host.name)
+                        .and_then(|memory| memory.health.clone()),
                 })
                 .collect();
         }
@@ -125,6 +129,7 @@ impl SyncStatusUseCase {
             local_revision,
             remote_revision,
             applied_revision: state.last_applied_rev,
+            verified_revision: state.last_verified_rev,
             behind,
             backoff_secs,
             observed_at: state.saved_at,

@@ -8,8 +8,10 @@
 //! `probe` turns command output into a snapshot, the deployers run the
 //! commands, and this module decides what the difference means.
 
+use serde::{Deserialize, Serialize};
+
 /// What the health probes observed at one moment.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthSnapshot {
     /// Units systemd reports as failed.
     pub failed_units: Vec<String>,
@@ -45,7 +47,8 @@ impl HealthSnapshot {
 }
 
 /// What a deployment concludes about one host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "kebab-case")]
 pub enum HealthVerdict {
     /// Every problem the snapshot shows is new, and there are none.
     Healthy,

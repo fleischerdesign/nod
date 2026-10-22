@@ -25,6 +25,7 @@ use crate::application::pipeline::state_machine::DeploymentState;
 use crate::application::use_cases::deploy_fleet::{DeployFleetUseCase, HostOutcome};
 use crate::application::use_cases::sync_inspect::{inspect_hosts, Reachability};
 use crate::domain::errors::NodError;
+use crate::domain::health::HealthVerdict;
 use crate::domain::host::HostEntity;
 use crate::domain::plan::{DeploymentAction, DeploymentOptions, RolloutStrategy};
 use crate::domain::sync::{
@@ -125,10 +126,12 @@ impl SyncReconcilerUseCase {
                 .collect();
 
             if away.is_empty() {
+                let verified = state.last_verified_rev.as_deref() == Some(local_before.as_str());
                 let report = SyncReport {
                     revision: local_before.clone(),
                     previous_revision: Some(local_before),
                     applied: true,
+                    verified,
                     hosts: Vec::new(),
                     refused: None,
                     error: None,
@@ -178,6 +181,7 @@ impl SyncReconcilerUseCase {
                     revision: local_before.clone(),
                     previous_revision: Some(local_before),
                     applied: false,
+                    verified: false,
                     hosts: state
                         .hosts
                         .iter()
@@ -395,6 +399,7 @@ impl SyncReconcilerUseCase {
                 revision: head.clone(),
                 previous_revision: Some(local_before.clone()),
                 applied: false,
+                verified: false,
                 hosts: reports,
                 refused: None,
                 error: None,
@@ -408,26 +413,27 @@ impl SyncReconcilerUseCase {
 
         if changed.is_empty() {
             let settled = reports.iter().all(|host| host.result.is_settled());
+            let verified = Self::verified(&state, &reports);
             let report = SyncReport {
                 revision: head.clone(),
                 previous_revision: Some(local_before),
                 applied: settled,
+                verified,
                 hosts: reports,
                 refused: None,
                 error: None,
                 backoff_secs: 0,
                 plan: Vec::new(),
             };
-            if settled {
+            if settled && verified {
                 state.record_success(head);
             } else {
-                // Nothing to deploy, but some hosts did not answer. Their state
-                // is already in the memory written by the sweep: the next cycle
-                // probes a host only when its retry is due.
+                // Nothing to deploy, but some host did not answer or could not
+                // be verified. `record_deployed` keeps the revision as reached
+                // without claiming the fleet is verified at it.
                 let revision = head;
                 state.last_attempt_rev = Some(revision.clone());
-                state.last_applied_rev = Some(revision);
-                state.in_progress = None;
+                state.record_deployed(revision);
             }
             state_store.save(&state).await?;
             self.notify(&report, options).await;
@@ -457,10 +463,17 @@ impl SyncReconcilerUseCase {
 
         let settled = reports.iter().all(|host| host.result.is_settled());
         let applied = settled && !failed;
+        let verified = Self::verified(&state, &reports);
+        for report in &reports {
+            if let Some(verdict) = &report.health {
+                state.record_health(&report.host, verdict.clone(), now);
+            }
+        }
         let mut report = SyncReport {
             revision: head.clone(),
             previous_revision: Some(local_before),
             applied,
+            verified,
             hosts: reports,
             refused: None,
             error: None,
@@ -478,13 +491,15 @@ impl SyncReconcilerUseCase {
                     .filter(|h| h.result.is_failure())
                     .count()
             ));
+        } else if verified {
+            // Every host answered and is verified healthy: the fleet is at the
+            // revision in the strong sense.
+            state.record_success(head);
         } else {
             // A host that did not answer is not a failed cycle: the revision
-            // reached every host that answered. Treating it as one would leave
-            // the counter raised and make the next genuine failure skip the
-            // short backoff steps. Each host's condition already lives in the
-            // memory the sweep wrote; the outcome still reports `applied: false`.
-            state.record_success(head);
+            // reached every host that answered. It is not a verified cycle
+            // either — `record_deployed` keeps that distinction.
+            state.record_deployed(head);
         }
         state_store.save(&state).await?;
         self.notify(&report, options).await;
@@ -614,18 +629,58 @@ impl SyncReconcilerUseCase {
     }
 
     /// Maps a pipeline outcome to the sync report vocabulary.
+    ///
+    /// A degraded host is a failed cycle (ADR-029 §6): the activation returned
+    /// zero, but the deployment broke something, and calling that `deployed`
+    /// would make the report green about its own damage.
     fn map_outcome(outcome: &HostOutcome) -> SyncHostReport {
-        let result = match outcome.state {
+        let mut result = match outcome.state {
             DeploymentState::Completed => SyncHostResult::Deployed,
             DeploymentState::RolledBack => SyncHostResult::RolledBack,
             DeploymentState::Failed => SyncHostResult::Failed,
             _ => SyncHostResult::Skipped,
         };
-        let mut report = SyncHostReport::new(outcome.host_name.clone(), result);
-        if let Some(failure) = &outcome.failure {
-            report = report.with_detail(failure.clone());
+        let mut detail = outcome.failure.clone();
+        match &outcome.health_verdict {
+            Some(HealthVerdict::Degraded { units }) => {
+                result = SyncHostResult::Failed;
+                detail = Some(format!("degraded after activation: {}", units.join(", ")));
+            }
+            Some(HealthVerdict::Unverified { reason }) => {
+                detail = Some(format!("unverified: {reason}"));
+            }
+            Some(HealthVerdict::PendingReboot) => {
+                detail = Some("reboot required before the change takes effect".to_string());
+            }
+            Some(HealthVerdict::DegradedPreExisting { units }) => {
+                detail = Some(format!("pre-existing degradation: {}", units.join(", ")));
+            }
+            Some(HealthVerdict::Healthy) | None => {}
+        }
+
+        let mut report = SyncHostReport::new(outcome.host_name.clone(), result)
+            .with_health(outcome.health_verdict.clone());
+        if let Some(detail) = detail {
+            report = report.with_detail(detail);
         }
         report
+    }
+
+    /// A cycle is verified when every host is settled and its health verdict —
+    /// fresh from this cycle or remembered from the last one — is `healthy`.
+    /// `pending-reboot` and `unverified` are not converged (ADR-029 §1).
+    fn verified(state: &SyncState, reports: &[SyncHostReport]) -> bool {
+        !reports.is_empty()
+            && reports.iter().all(|report| {
+                report.result.is_settled()
+                    && matches!(
+                        report.health.as_ref().or_else(|| state
+                            .hosts
+                            .get(&report.host)
+                            .and_then(|m| m.health.as_ref())),
+                        Some(HealthVerdict::Healthy)
+                    )
+            })
     }
 
     /// Runs the configured notification commands; failures are logged, never
@@ -755,6 +810,52 @@ mod tests {
             SyncReconcilerUseCase::map_outcome(&failed).result,
             SyncHostResult::Failed
         );
+    }
+
+    #[test]
+    fn a_degraded_activation_maps_to_a_failed_cycle() {
+        use crate::domain::health::HealthVerdict;
+
+        let mut outcome = HostOutcome::new("a", DeploymentState::Completed);
+        outcome.health_verdict = Some(HealthVerdict::Degraded {
+            units: vec!["crowdsec.service".to_string()],
+        });
+
+        let report = SyncReconcilerUseCase::map_outcome(&outcome);
+        assert_eq!(report.result, SyncHostResult::Failed);
+        assert!(report
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("crowdsec"));
+        assert_eq!(report.health, outcome.health_verdict);
+    }
+
+    #[test]
+    fn only_healthy_settled_hosts_make_a_cycle_verified() {
+        use crate::domain::health::HealthVerdict;
+
+        let state = SyncState::new("repo", "main");
+        let healthy = SyncHostReport::new("a", SyncHostResult::Deployed)
+            .with_health(Some(HealthVerdict::Healthy));
+        assert!(SyncReconcilerUseCase::verified(&state, &[healthy]));
+
+        let pending = SyncHostReport::new("a", SyncHostResult::Deployed)
+            .with_health(Some(HealthVerdict::PendingReboot));
+        assert!(!SyncReconcilerUseCase::verified(&state, &[pending]));
+
+        let unknown = SyncHostReport::new("a", SyncHostResult::Deployed);
+        assert!(!SyncReconcilerUseCase::verified(&state, &[unknown]));
+    }
+
+    #[test]
+    fn a_remembered_healthy_verdict_verifies_an_unchanged_host() {
+        use crate::domain::health::HealthVerdict;
+
+        let mut state = SyncState::new("repo", "main");
+        state.record_health("a", HealthVerdict::Healthy, 10);
+        let unchanged = SyncHostReport::new("a", SyncHostResult::Unchanged);
+        assert!(SyncReconcilerUseCase::verified(&state, &[unchanged]));
     }
 
     #[test]

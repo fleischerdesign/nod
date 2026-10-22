@@ -49,6 +49,13 @@ pub struct SyncState {
     pub last_attempt_rev: Option<String>,
     /// Revision that was last successfully activated.
     pub last_applied_rev: Option<String>,
+    /// Revision where every host was activated **and** verified healthy.
+    ///
+    /// Distinct from `last_applied_rev` on purpose: reaching every host that
+    /// answered is a deployment, not a proof. A host that was offline or could
+    /// not be observed keeps this behind while `last_applied_rev` advances.
+    #[serde(default)]
+    pub last_verified_rev: Option<String>,
     /// Consecutive failed cycles; drives the backoff.
     pub consecutive_failures: u32,
     /// Unix time before which no new cycle starts.
@@ -181,6 +188,12 @@ pub struct HostMemory {
     pub condition: HostCondition,
     /// Unix time the host was last observed answering, zero when never.
     pub last_seen: u64,
+    /// What the last deployment concluded about this host's health.
+    ///
+    /// Persisted so `nod status` can name a degraded host without re-probing,
+    /// and so an unreachable host cannot silently keep a stale "healthy".
+    #[serde(default)]
+    pub health: Option<crate::domain::health::HealthVerdict>,
 }
 
 /// The hosts a sweep may probe now, and why the rest wait.
@@ -224,6 +237,7 @@ impl SyncState {
             branch: branch.into(),
             last_attempt_rev: None,
             last_applied_rev: None,
+            last_verified_rev: None,
             consecutive_failures: 0,
             backoff_until: None,
             backoff_rev: None,
@@ -269,6 +283,10 @@ impl SyncState {
             HostMemory {
                 condition: HostCondition::Reachable,
                 last_seen: now,
+                health: self
+                    .hosts
+                    .get(host)
+                    .and_then(|memory| memory.health.clone()),
             },
         );
     }
@@ -298,6 +316,9 @@ impl SyncState {
                     .get(host)
                     .map(|memory| memory.last_seen)
                     .unwrap_or(0),
+                // An unreachable host has no current health, whatever it had
+                // before: its last verdict is not evidence about this cycle.
+                health: None,
             },
         );
         delay
@@ -318,8 +339,29 @@ impl SyncState {
                     detail: detail.into(),
                 },
                 last_seen: now,
+                health: None,
             },
         );
+    }
+
+    /// Records the health verdict a deployment reached for `host`.
+    ///
+    /// A host the sweep has not seen yet is inserted as reachable: the
+    /// deployment just talked to it, so that is the condition the memory
+    /// should carry.
+    pub fn record_health(
+        &mut self,
+        host: &str,
+        verdict: crate::domain::health::HealthVerdict,
+        now: u64,
+    ) {
+        let memory = self.hosts.entry(host.to_string()).or_insert(HostMemory {
+            condition: HostCondition::Reachable,
+            last_seen: now,
+            health: None,
+        });
+        memory.health = Some(verdict);
+        memory.last_seen = now;
     }
 
     /// Seconds still to wait before the next cycle, zero when not backing off.
@@ -365,8 +407,20 @@ impl SyncState {
     }
 
     /// Records a successful cycle: the backoff resets and the revision is
-    /// remembered as applied.
+    /// remembered as applied and verified.
     pub fn record_success(&mut self, rev: impl Into<String>) {
+        let rev = rev.into();
+        self.last_applied_rev = Some(rev.clone());
+        self.last_verified_rev = Some(rev);
+        self.consecutive_failures = 0;
+        self.backoff_until = None;
+        self.backoff_rev = None;
+        self.in_progress = None;
+    }
+
+    /// Records a cycle that reached every host that answered, without claiming
+    /// verification: a host was unreachable, unobserved or owed a reboot.
+    pub fn record_deployed(&mut self, rev: impl Into<String>) {
         self.last_applied_rev = Some(rev.into());
         self.consecutive_failures = 0;
         self.backoff_until = None;
@@ -435,6 +489,9 @@ pub struct SyncHostReport {
     pub result: SyncHostResult,
     /// Failure detail, when the outcome is not settled.
     pub detail: Option<String>,
+    /// What health verification concluded, when it ran (ADR-029).
+    #[serde(default)]
+    pub health: Option<crate::domain::health::HealthVerdict>,
 }
 
 impl SyncHostReport {
@@ -444,7 +501,14 @@ impl SyncHostReport {
             host: host.into(),
             result,
             detail: None,
+            health: None,
         }
+    }
+
+    /// Attaches the health verdict the deployment reached.
+    pub fn with_health(mut self, health: Option<crate::domain::health::HealthVerdict>) -> Self {
+        self.health = health;
+        self
     }
 
     /// Attaches failure detail.
@@ -463,6 +527,10 @@ pub struct SyncReport {
     pub previous_revision: Option<String>,
     /// `true` only when every selected host is settled and none failed.
     pub applied: bool,
+    /// `true` only when every selected host is settled **and** verified
+    /// healthy. A deployment that merely ran is not a verification.
+    #[serde(default)]
+    pub verified: bool,
     /// Per-host outcomes.
     pub hosts: Vec<SyncHostReport>,
     /// Why the cycle refused to act, when it did.
@@ -504,6 +572,9 @@ pub struct SyncHostStatus {
     pub current: Option<String>,
     /// Declared closure, when the host answered.
     pub target: Option<String>,
+    /// What the last deployment concluded about this host's health.
+    #[serde(default)]
+    pub health: Option<crate::domain::health::HealthVerdict>,
 }
 
 /// One host's remembered condition, for status output.
@@ -531,6 +602,10 @@ pub struct SyncStatus {
     pub remote_revision: Option<String>,
     /// Revision the last settled cycle recorded.
     pub applied_revision: Option<String>,
+    /// Revision where every host was activated **and** verified healthy.
+    /// `None` says no cycle has proven the fleet healthy at a revision yet.
+    #[serde(default)]
+    pub verified_revision: Option<String>,
     /// Whether the applied revision differs from the remote one; `None` when
     /// the remote could not be read.
     pub behind: Option<bool>,
@@ -559,6 +634,7 @@ impl SyncReport {
             revision: revision.into(),
             previous_revision: None,
             applied: false,
+            verified: false,
             hosts: Vec::new(),
             refused: Some(reason.into()),
             error: None,
@@ -573,6 +649,7 @@ impl SyncReport {
             revision: revision.into(),
             previous_revision: None,
             applied: false,
+            verified: false,
             hosts: Vec::new(),
             refused: None,
             error: Some(error.into()),
@@ -620,6 +697,49 @@ mod tests {
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.backoff_until, None);
         assert_eq!(state.backoff_remaining(100), 0);
+    }
+
+    #[test]
+    fn a_deployment_without_verification_is_not_a_verified_revision() {
+        let mut state = SyncState::new("repo", "main");
+        state.record_deployed("abc");
+        assert_eq!(state.last_applied_rev.as_deref(), Some("abc"));
+        assert_eq!(
+            state.last_verified_rev, None,
+            "reaching every host that answered is not a proof"
+        );
+
+        state.record_success("abc");
+        assert_eq!(state.last_verified_rev.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn an_offline_host_loses_its_health_verdict() {
+        use crate::domain::health::HealthVerdict;
+
+        let mut state = SyncState::new("repo", "main");
+        let policy = RetryPolicy {
+            base_secs: 60,
+            max_secs: 1800,
+            gone_after_secs: 86_400,
+        };
+        state.observe_reachable("atlas", 100);
+        state.record_health("atlas", HealthVerdict::Healthy, 100);
+        assert!(state.host("atlas").unwrap().health.is_some());
+
+        state.observe_offline("atlas", 200, &policy);
+        assert!(
+            state.host("atlas").unwrap().health.is_none(),
+            "a stale verdict is not evidence about this cycle"
+        );
+    }
+
+    #[test]
+    fn a_state_document_written_before_verified_revisions_still_loads() {
+        let json = r#"{"version":2,"repo":"repo","branch":"main","last_attempt_rev":null,"last_applied_rev":"abc","consecutive_failures":0,"backoff_until":null,"in_progress":null,"hosts":{}}"#;
+        let state: SyncState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.last_applied_rev.as_deref(), Some("abc"));
+        assert_eq!(state.last_verified_rev, None);
     }
 
     #[test]
