@@ -119,6 +119,19 @@ pub struct Condition {
     pub message: String,
 }
 
+/// A failed operation.
+///
+/// An error is not an empty answer: a provider that cannot authenticate must
+/// say so, because `resources: []` would read as "the zone is empty" and turn
+/// an unobserved world into a healthy one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderError {
+    /// Error kind: `auth`, `rate-limited`, `transient`, `config`, `protocol`.
+    pub kind: String,
+    /// Human-readable detail.
+    pub message: String,
+}
+
 /// Result of one applied change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppliedChange {

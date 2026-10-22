@@ -1,0 +1,15 @@
+[package]
+name = "nod-provider-cloudflare"
+version = "0.1.0"
+edition = "2021"
+description = "Cloudflare DNS provider for nod (ADR-030)"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "nod-provider-cloudflare"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }

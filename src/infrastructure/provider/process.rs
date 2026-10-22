@@ -191,12 +191,41 @@ impl ProcessProvider {
                 "provider {} closed the connection",
                 self.command.display()
             ))),
-            Ok(Ok(_)) => serde_json::from_str(response.trim()).map_err(|error| {
-                NodError::provider(format!(
-                    "provider {} sent invalid JSON: {error}",
-                    self.command.display()
-                ))
-            }),
+            Ok(Ok(_)) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(response.trim()).map_err(|error| {
+                        NodError::provider(format!(
+                            "provider {} sent invalid JSON: {error}",
+                            self.command.display()
+                        ))
+                    })?;
+
+                // An error is not an empty answer: a provider that cannot
+                // authenticate must say so, or `resources: []` reads as an
+                // empty world.
+                if let Some(error) = value.get("error") {
+                    let kind = error
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("protocol");
+                    let message = error
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("provider reported an error");
+                    return Err(match kind {
+                        "auth" => NodError::auth(message),
+                        "config" => NodError::config(message),
+                        _ => NodError::provider(format!("{kind}: {message}")),
+                    });
+                }
+
+                serde_json::from_value(value).map_err(|error| {
+                    NodError::provider(format!(
+                        "provider {} sent an invalid response: {error}",
+                        self.command.display()
+                    ))
+                })
+            }
             Ok(Err(error)) => Err(NodError::provider(format!(
                 "cannot read from provider {}: {error}",
                 self.command.display()
