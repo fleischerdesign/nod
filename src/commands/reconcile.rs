@@ -21,7 +21,7 @@ pub async fn execute(
     provider: Option<&str>,
     command: Option<&Path>,
     settings_path: Option<&Path>,
-    desired_path: &Path,
+    desired_path: Option<&Path>,
     apply: bool,
     rollback: bool,
     state_dir: &Path,
@@ -81,7 +81,16 @@ pub async fn execute(
         return run_rollback(provider, command_path, &settings, state_dir, json).await;
     }
 
-    let raw = std::fs::read_to_string(desired_path).map_err(|error| {
+    let desired_path = match desired_path {
+        Some(path) => path.to_path_buf(),
+        None => configured
+            .and_then(|entry| entry.desired.clone())
+            .ok_or_else(|| {
+                NodError::config("pass --desired or declare `desired` for the provider")
+            })?,
+    };
+
+    let raw = std::fs::read_to_string(&desired_path).map_err(|error| {
         NodError::config(format!(
             "cannot read desired state {}: {error}",
             desired_path.display()

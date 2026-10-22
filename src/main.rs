@@ -545,7 +545,7 @@ async fn run(cli: Cli) -> Result<()> {
                 provider.as_deref(),
                 command.as_deref(),
                 settings.as_deref(),
-                &desired,
+                desired.as_deref(),
                 apply,
                 rollback,
                 &state_dir,

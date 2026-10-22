@@ -721,7 +721,7 @@ pub enum Commands {
 
         /// Desired state: an array or an object with a `resources` array
         #[arg(long)]
-        desired: PathBuf,
+        desired: Option<PathBuf>,
 
         /// Apply the approved changes
         #[arg(long)]
