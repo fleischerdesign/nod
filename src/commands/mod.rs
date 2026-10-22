@@ -24,6 +24,7 @@ pub mod metadata;
 pub mod plan;
 pub mod provider;
 pub mod reboot;
+pub mod reconcile;
 pub mod repl;
 pub mod rollback;
 pub mod secret;

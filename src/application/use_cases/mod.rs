@@ -21,6 +21,7 @@ pub mod list_inputs;
 pub mod optimize_store;
 pub mod push_cache;
 pub mod reboot_fleet;
+pub mod reconcile;
 pub mod rekey_secrets;
 pub mod render_graph;
 pub mod rollback;

@@ -515,6 +515,22 @@ async fn run(cli: Cli) -> Result<()> {
                 nod::commands::provider::test(&command).await?
             }
         },
+        Commands::Reconcile {
+            provider,
+            settings,
+            desired,
+            apply,
+            json,
+        } => {
+            nod::commands::reconcile::execute(
+                &provider,
+                settings.as_deref(),
+                &desired,
+                apply,
+                json,
+            )
+            .await?;
+        }
         Commands::Secrets { command } => match command {
             nod::config::options::SecretCommands::Check {
                 target_args,

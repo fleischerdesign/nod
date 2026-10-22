@@ -683,6 +683,29 @@ pub enum Commands {
         command: ProviderCommands,
     },
 
+    /// Reconcile declared state against a provider API (ADR-030)
+    Reconcile {
+        /// Path to the provider executable
+        #[arg(long)]
+        provider: PathBuf,
+
+        /// JSON file with the provider settings (default: empty object)
+        #[arg(long)]
+        settings: Option<PathBuf>,
+
+        /// Desired state: an array or an object with a `resources` array
+        #[arg(long)]
+        desired: PathBuf,
+
+        /// Apply the approved changes
+        #[arg(long)]
+        apply: bool,
+
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage Nix store operations (optimization and deduplication)
     Store {
         #[command(subcommand)]
