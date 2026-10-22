@@ -34,12 +34,25 @@ pub async fn execute(
         None => TomlConfigStore::new(Path::new(flake), CliOverrides::default())?,
     };
 
+    // The fleet lives for the whole function so the resolved provider can be
+    // borrowed instead of cloned.
+    let fleet = match provider {
+        Some(_) => {
+            Some(crate::infrastructure::config::fleet::load(Path::new(flake), &store).await?)
+        }
+        None => None,
+    };
     let configured = match provider {
-        Some(name) => Some(store.provider(name).ok_or_else(|| {
-            NodError::config(format!(
-                "provider `{name}` is not declared in [providers.{name}]"
-            ))
-        })?),
+        Some(name) => Some(
+            fleet
+                .as_ref()
+                .and_then(|fleet| fleet.providers.get(name))
+                .ok_or_else(|| {
+                    NodError::config(format!(
+                        "provider `{name}` is not declared in the fleet declaration"
+                    ))
+                })?,
+        ),
         None => None,
     };
 

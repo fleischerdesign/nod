@@ -211,6 +211,7 @@ pub struct TomlRuntime {
 
 /// `[providers.<name>]` — one provider executable and its settings.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TomlProvider {
     /// Path to the provider executable.
     pub command: PathBuf,

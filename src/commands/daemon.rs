@@ -52,7 +52,7 @@ pub async fn execute(
     // The provider loop shares the process but not the schedule: each provider
     // has its own API and its own rate limits (ADR-030).
     let mut providers = if reconcile_providers {
-        load_providers(flake_path, config)?
+        load_providers(flake_path, config).await?
     } else {
         Vec::new()
     };
@@ -153,7 +153,7 @@ struct ProviderEntry {
 ///
 /// A provider without a `desired` file is not scheduled: the daemon has nothing
 /// to compare against, and guessing a declaration would be worse than skipping.
-fn load_providers(
+async fn load_providers(
     flake_path: &Path,
     config: Option<&Path>,
 ) -> Result<Vec<ProviderEntry>, NodError> {
@@ -161,10 +161,11 @@ fn load_providers(
         Some(path) => TomlConfigStore::from_file(path, CliOverrides::default())?,
         None => TomlConfigStore::new(flake_path, CliOverrides::default())?,
     };
+    let fleet = crate::infrastructure::config::fleet::load(flake_path, &store).await?;
     let now = Instant::now();
     let mut entries = Vec::new();
 
-    for (name, provider) in store.providers() {
+    for (name, provider) in &fleet.providers {
         let Some(desired_path) = &provider.desired else {
             tracing::warn!(
                 provider = %name,
