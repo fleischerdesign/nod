@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::application::use_cases::reconcile::{self, ReconcileOptions};
 use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
+use crate::domain::policy::Policy;
 use crate::domain::provider::RollbackPlan;
 use crate::domain::sync::now_secs;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
@@ -28,6 +29,8 @@ pub async fn execute(
     config: Option<&Path>,
     json: bool,
     flake: &str,
+    protect: &[String],
+    max_deletions: Option<usize>,
 ) -> Result<(), NodError> {
     let store = match config {
         Some(path) => TomlConfigStore::from_file(path, CliOverrides::default())?,
@@ -77,8 +80,16 @@ pub async fn execute(
         },
     };
 
+    // What this run may delete: the declaration, narrowed by the CLI. The CLI
+    // can only tighten a guard, never loosen it — a one-off flag must not be
+    // able to disarm what the declaration put in place.
+    let policy = configured
+        .and_then(|entry| entry.policy.clone())
+        .unwrap_or_default()
+        .narrowed(protect, max_deletions);
+
     if rollback {
-        return run_rollback(provider, command_path, &settings, state_dir, json).await;
+        return run_rollback(provider, command_path, &settings, state_dir, json, &policy).await;
     }
 
     let desired_path = match desired_path {
@@ -103,6 +114,7 @@ pub async fn execute(
         &settings,
         &desired,
         ReconcileOptions { apply },
+        &policy,
     )
     .await?;
 
@@ -171,6 +183,7 @@ async fn run_rollback(
     settings: &serde_json::Value,
     state_dir: &Path,
     json: bool,
+    policy: &Policy,
 ) -> Result<(), NodError> {
     let name = provider
         .ok_or_else(|| NodError::config("--rollback needs a provider name to find its plan"))?;
@@ -179,7 +192,7 @@ async fn run_rollback(
         .load(name)?
         .ok_or_else(|| NodError::config(format!("no recorded plan for provider `{name}`")))?;
 
-    let report = reconcile::rollback(command, settings, &plan).await?;
+    let report = reconcile::rollback(command, settings, &plan, policy).await?;
 
     if json {
         let text = serde_json::to_string_pretty(&serde_json::json!({

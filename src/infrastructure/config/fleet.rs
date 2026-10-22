@@ -202,6 +202,7 @@ mod tests {
             apply: None,
             interval_secs: None,
             order: None,
+            policy: None,
         }
     }
 

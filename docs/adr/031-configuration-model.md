@@ -72,9 +72,19 @@ apply = false
 [providers.cloudflare.settings]
 zone = "example.com"
 token_env = "CLOUDFLARE_API_TOKEN"
+
+[providers.cloudflare.policy]
+protect = ["*:example.com", "MX:*", "NS:*"]
+max_deletions = 0
 ```
 
 Relative paths resolve against the file's directory, never the process cwd.
+`policy` is optional; absent means `max_deletions = 0` and no protect patterns,
+so a provider that declares nothing deletes nothing. `--protect` and
+`--max-deletions` on `nod reconcile` **narrow** the declared values instead of
+replacing them: patterns are added and the cap can only be lowered. A guard is
+a declaration, and no one-off flag may disarm it — releasing a name or raising
+the cap is an edit with a diff, reviewed like any other.
 
 ### 4. Two fleet sources are an error, not a merge
 

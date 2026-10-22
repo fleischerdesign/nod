@@ -171,6 +171,7 @@ struct ProviderEntry {
     apply: bool,
     order: ProviderOrder,
     schedule: ProviderSchedule,
+    policy: crate::domain::policy::Policy,
 }
 
 /// Builds the provider loop from `[providers.<name>]` in the configuration.
@@ -218,6 +219,7 @@ async fn load_providers(
             desired,
             apply: provider.apply.unwrap_or(false),
             order: provider.order.unwrap_or_default(),
+            policy: provider.policy.clone().unwrap_or_default(),
             schedule: ProviderSchedule::new(
                 Duration::from_secs(provider.interval_secs.unwrap_or(300)),
                 now,
@@ -255,6 +257,7 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
             &entry.settings,
             &entry.desired,
             ReconcileOptions { apply: entry.apply },
+            &entry.policy,
         )
         .await;
 

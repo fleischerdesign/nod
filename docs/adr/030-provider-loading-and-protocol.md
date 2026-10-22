@@ -113,6 +113,8 @@ The provider describes the world; the core decides what happens to it.
 | What resources exist | provider |
 | What should change | provider (as a proposal) |
 | Whether an unowned resource may be deleted | **core** |
+| Whether a protected id may be deleted | **core** |
+| How many deletions one run may make | **core** |
 | Whether a destructive change runs at all | **core** |
 | Dry-run (never calls `apply`) | **core** |
 | Ownership mode (`marker`, `namespace`, `none`) | declared in config, enforced by core |
@@ -120,6 +122,26 @@ The provider describes the world; the core decides what happens to it.
 `settings` are opaque to the core: validated against the provider's schema and
 passed through. The core interprets none of them. The invariants are not
 settings.
+
+Two further guards sit in the core and are not reachable from a provider:
+
+```toml
+[providers.cloudflare.policy]
+protect = ["*:example.com", "MX:*"]   # never deleted, even when owned
+max_deletions = 1                      # per run; 0 forbids deletion entirely
+```
+
+- **`protect`** matches resource ids with `*` as the only wildcard. It applies to
+deletes, not to updates: a protected apex may still be repointed. It applies to
+rollbacks as well - a name that is never deleted is not deleted by an undo.
+- **`max_deletions`** defaults to `0`. A plan that would delete more than the cap
+is refused **as a whole**, including its creates and updates: a half-applied plan
+leaves a world that neither the declaration nor the observation describes, and
+the next run then has no explanation. Rollback is exempt from the cap because it
+is operator-initiated and reverts a recorded plan.
+
+A refusal is data, not an error: the report lists every reason and the run exits
+with the others unchanged.
 
 ### 6. Ownership
 
@@ -161,7 +183,13 @@ Protocol minor changes are additive; a major change is a new contract.
 nod provider list           resolved providers, source, version, protocol, status
 nod provider test NAME      conformance suite against a fake API
 nod provider schema NAME    print the settings schema
+
+nod reconcile NAME [--apply] [--protect GLOB]... [--max-deletions N]
 ```
+
+`--protect` and `--max-deletions` narrow the declared policy for one run: they
+add patterns and can only lower the cap. No flag can widen a guard; that is a
+declaration change.
 
 `list` answers the question plugins usually cannot: what is installed, where did
 it come from, and is it compatible.

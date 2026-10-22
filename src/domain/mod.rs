@@ -14,6 +14,7 @@ pub mod health;
 pub mod host;
 pub mod info;
 pub mod plan;
+pub mod policy;
 pub mod ports;
 pub mod provider;
 pub mod provision;

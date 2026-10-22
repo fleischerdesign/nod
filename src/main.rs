@@ -536,6 +536,8 @@ async fn run(cli: Cli) -> Result<()> {
             desired,
             apply,
             rollback,
+            protect,
+            max_deletions,
             state_dir,
             json,
             flake,
@@ -552,6 +554,8 @@ async fn run(cli: Cli) -> Result<()> {
                 config.as_deref(),
                 json,
                 &flake,
+                &protect,
+                max_deletions,
             )
             .await?;
         }

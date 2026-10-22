@@ -200,7 +200,16 @@ async fn write_conformance(
     let plan = provider
         .plan(settings, &sandbox.desired, &observed.resources)
         .await?;
-    let (approved, refused) = approve(handshake, &plan.changes);
+    let (approved, refused) = approve(
+        handshake,
+        &plan.changes,
+        // The sandbox owns exactly the resources it declared, and it removes
+        // exactly those. The cap is the fixture size, not a fleet policy.
+        &crate::domain::policy::Policy {
+            protect: Vec::new(),
+            max_deletions: sandbox.desired.len(),
+        },
+    );
     if !refused.is_empty() {
         return Err(NodError::provider(format!(
             "sandbox plan refused: {}",

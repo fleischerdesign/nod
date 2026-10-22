@@ -234,6 +234,12 @@ pub struct TomlProvider {
     /// Where the provider runs relative to the host sweep.
     #[serde(default)]
     pub order: Option<crate::domain::provider::ProviderOrder>,
+    /// What the core allows this provider's runs to delete (ADR-030).
+    ///
+    /// Absent means the strict default: nothing may be deleted. A provider
+    /// cannot widen this from its own side.
+    #[serde(default)]
+    pub policy: Option<crate::domain::policy::Policy>,
 }
 
 /// Fully merged SSH overrides for one host across the TOML and CLI tiers.
@@ -762,6 +768,40 @@ mod tests {
                 .and_then(|settings| settings.get("state"))
                 .and_then(|value| value.as_str()),
             Some("/tmp/state.json")
+        );
+    }
+
+    #[test]
+    fn a_provider_policy_is_parsed_and_defaults_to_no_deletions() {
+        let dir = tempdir().unwrap();
+        write_toml(
+            dir.path(),
+            "[providers.guarded]\ncommand = \"/bin/true\"\n\n\
+             [providers.guarded.policy]\nprotect = [\"*:example.com\"]\nmax_deletions = 2\n\n\
+             [providers.plain]\ncommand = \"/bin/true\"\n",
+        );
+
+        let config = store(dir.path(), CliOverrides::default());
+        let guarded = config.provider("guarded").expect("declared provider");
+        let policy = guarded.policy.as_ref().expect("declared policy");
+        assert!(policy.is_protected("A:example.com"));
+        assert_eq!(policy.max_deletions, 2);
+
+        let plain = config.provider("plain").expect("declared provider");
+        assert!(plain.policy.is_none(), "silence must not mean permission");
+    }
+
+    #[test]
+    fn an_unknown_policy_key_is_a_configuration_error() {
+        let dir = tempdir().unwrap();
+        write_toml(
+            dir.path(),
+            "[providers.example]\ncommand = \"/bin/true\"\n\n\
+             [providers.example.policy]\nmaxdeletions = 1\n",
+        );
+        assert!(
+            TomlConfigStore::new(dir.path(), CliOverrides::default()).is_err(),
+            "a typo in a guard must not silently disable it"
         );
     }
 

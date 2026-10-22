@@ -731,6 +731,15 @@ pub enum Commands {
         #[arg(long)]
         rollback: bool,
 
+        /// Glob pattern on resource ids that must never be deleted (repeatable;
+        /// adds to the declared list, never replaces it)
+        #[arg(long)]
+        protect: Vec<String>,
+
+        /// Maximum deletions in this run; can only lower the declared cap
+        #[arg(long)]
+        max_deletions: Option<usize>,
+
         /// Directory holding the reconciler state (plan records)
         #[arg(long, default_value = "/var/lib/nod")]
         state_dir: PathBuf,

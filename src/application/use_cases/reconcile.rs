@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::domain::errors::NodError;
+use crate::domain::policy::Policy;
 use crate::domain::provider::{
     Change, ChangeKind, DesiredResource, Handshake, InverseChange, ObservedResource,
 };
@@ -49,10 +50,17 @@ pub struct ReconcileReport {
 
 /// Decides which proposed changes may run.
 ///
-/// Two rules, both non-negotiable:
+/// The rules, in order:
 /// 1. A read-only provider changes nothing.
 /// 2. A destructive change on a resource the fleet does not own is refused.
-pub fn approve(handshake: &Handshake, changes: &[Change]) -> (Vec<Change>, Vec<String>) {
+/// 3. A delete of a protected id is refused even when owned.
+/// 4. A plan that would delete more than the cap is refused **as a whole**, so
+///    nothing half-applies.
+pub fn approve(
+    handshake: &Handshake,
+    changes: &[Change],
+    policy: &Policy,
+) -> (Vec<Change>, Vec<String>) {
     let mut approved = Vec::new();
     let mut refused = Vec::new();
 
@@ -71,8 +79,28 @@ pub fn approve(handshake: &Handshake, changes: &[Change]) -> (Vec<Change>, Vec<S
             refused.push(format!("{label}: unowned resource"));
             continue;
         }
+        if change.kind == ChangeKind::Delete && policy.is_protected(&change.resource.id) {
+            refused.push(format!("{label}: protected resource"));
+            continue;
+        }
 
         approved.push(change.clone());
+    }
+
+    let deletions = approved
+        .iter()
+        .filter(|change| change.kind == ChangeKind::Delete)
+        .count();
+    if deletions > policy.max_deletions {
+        let mut all_refused = refused;
+        all_refused.insert(
+            0,
+            format!(
+                "plan would delete {deletions} resources, the cap is {}; nothing was applied",
+                policy.max_deletions
+            ),
+        );
+        return (Vec::new(), all_refused);
     }
 
     (approved, refused)
@@ -84,6 +112,7 @@ pub async fn execute(
     settings: &serde_json::Value,
     desired: &[DesiredResource],
     options: ReconcileOptions,
+    policy: &Policy,
 ) -> Result<ReconcileReport, NodError> {
     let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
 
@@ -91,7 +120,7 @@ pub async fn execute(
     let plan = provider
         .plan(settings, desired, &observed.resources)
         .await?;
-    let (approved, refused) = approve(&handshake, &plan.changes);
+    let (approved, refused) = approve(&handshake, &plan.changes, policy);
 
     let mut applied = 0;
     let mut inverse = Vec::new();
@@ -143,6 +172,7 @@ pub async fn rollback(
     command: &Path,
     settings: &serde_json::Value,
     plan: &crate::domain::provider::RollbackPlan,
+    policy: &Policy,
 ) -> Result<RollbackReport, NodError> {
     use crate::domain::provider::matches_expected;
 
@@ -179,7 +209,14 @@ pub async fn rollback(
         .iter()
         .map(|entry| entry.change.clone())
         .collect();
-    let (approved, refused) = approve(&handshake, &changes);
+    // A rollback is operator-initiated and undoes a recorded plan, so the
+    // per-run deletion cap does not apply. The protect list still does: a name
+    // we never delete is not deleted by a rollback either.
+    let relaxed = Policy {
+        protect: policy.protect.clone(),
+        max_deletions: usize::MAX,
+    };
+    let (approved, refused) = approve(&handshake, &changes, &relaxed);
     if !refused.is_empty() {
         return Ok(RollbackReport {
             provider: handshake.provider.clone(),
@@ -262,15 +299,31 @@ mod tests {
     }
 
     fn change(kind: ChangeKind, owned: bool, destructive: bool) -> Change {
+        change_named(kind, "web1", owned, destructive)
+    }
+
+    fn change_named(kind: ChangeKind, id: &str, owned: bool, destructive: bool) -> Change {
         Change {
             kind,
             owned,
             destructive,
             resource: DesiredResource {
                 kind: "dns.record".to_string(),
-                id: "web1".to_string(),
+                id: id.to_string(),
                 attributes: serde_json::json!({}),
             },
+        }
+    }
+
+    /// Strict default: no pattern, no deletion allowed.
+    fn strict() -> Policy {
+        Policy::default()
+    }
+
+    fn allows(max_deletions: usize, protect: &[&str]) -> Policy {
+        Policy {
+            protect: protect.iter().map(|entry| entry.to_string()).collect(),
+            max_deletions,
         }
     }
 
@@ -279,6 +332,7 @@ mod tests {
         let (approved, refused) = approve(
             &handshake(OwnershipMode::None),
             &[change(ChangeKind::Create, true, false)],
+            &allows(1, &[]),
         );
         assert!(approved.is_empty());
         assert_eq!(refused.len(), 1);
@@ -289,6 +343,7 @@ mod tests {
         let (approved, refused) = approve(
             &handshake(OwnershipMode::Marker),
             &[change(ChangeKind::Delete, false, true)],
+            &allows(1, &[]),
         );
         assert!(approved.is_empty());
         assert!(refused[0].contains("unowned"));
@@ -299,6 +354,7 @@ mod tests {
         let (approved, refused) = approve(
             &handshake(OwnershipMode::Marker),
             &[change(ChangeKind::Delete, false, false)],
+            &allows(1, &[]),
         );
         assert!(approved.is_empty());
         assert_eq!(refused.len(), 1);
@@ -309,8 +365,98 @@ mod tests {
         let (approved, refused) = approve(
             &handshake(OwnershipMode::Marker),
             &[change(ChangeKind::Create, true, false)],
+            &strict(),
         );
         assert_eq!(approved.len(), 1);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn an_owned_delete_is_refused_by_default() {
+        let (approved, refused) = approve(
+            &handshake(OwnershipMode::Marker),
+            &[change(ChangeKind::Delete, true, true)],
+            &strict(),
+        );
+        assert!(approved.is_empty());
+        assert!(refused[0].contains("cap is 0"), "{}", refused[0]);
+    }
+
+    #[test]
+    fn an_owned_delete_within_the_cap_is_approved() {
+        let (approved, refused) = approve(
+            &handshake(OwnershipMode::Marker),
+            &[change(ChangeKind::Delete, true, true)],
+            &allows(1, &[]),
+        );
+        assert_eq!(approved.len(), 1);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn a_protected_owned_resource_is_never_deleted() {
+        let (approved, refused) = approve(
+            &handshake(OwnershipMode::Marker),
+            &[change_named(
+                ChangeKind::Delete,
+                "A:example.com",
+                true,
+                true,
+            )],
+            &allows(10, &["*:example.com"]),
+        );
+        assert!(approved.is_empty());
+        assert!(refused[0].contains("protected"), "{}", refused[0]);
+    }
+
+    #[test]
+    fn a_protected_resource_may_still_be_updated() {
+        let (approved, refused) = approve(
+            &handshake(OwnershipMode::Marker),
+            &[change_named(
+                ChangeKind::Update,
+                "A:example.com",
+                true,
+                false,
+            )],
+            &allows(0, &["*:example.com"]),
+        );
+        assert_eq!(approved.len(), 1);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn a_plan_over_the_cap_is_refused_as_a_whole() {
+        let changes: Vec<Change> = (0..3)
+            .map(|index| {
+                change_named(
+                    ChangeKind::Delete,
+                    &format!("TXT:old{index}.example.com"),
+                    true,
+                    true,
+                )
+            })
+            .chain(std::iter::once(change(ChangeKind::Create, true, false)))
+            .collect();
+
+        let (approved, refused) =
+            approve(&handshake(OwnershipMode::Marker), &changes, &allows(1, &[]));
+        assert!(approved.is_empty(), "a refused plan must apply nothing");
+        assert!(refused[0].contains("would delete 3"), "{}", refused[0]);
+        assert!(refused
+            .iter()
+            .any(|reason| reason.contains("nothing was applied")));
+    }
+
+    #[test]
+    fn a_plan_exactly_at_the_cap_passes() {
+        let changes = vec![
+            change_named(ChangeKind::Delete, "TXT:a.example.com", true, true),
+            change_named(ChangeKind::Delete, "TXT:b.example.com", true, true),
+        ];
+        let (approved, refused) =
+            approve(&handshake(OwnershipMode::Marker), &changes, &allows(2, &[]));
+        assert_eq!(approved.len(), 2);
         assert!(refused.is_empty());
     }
 
