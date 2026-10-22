@@ -82,12 +82,14 @@ pub async fn execute(
     let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
 
     let observed = provider.observe(settings).await?;
-    let plan = provider.plan(desired, &observed.resources).await?;
+    let plan = provider
+        .plan(settings, desired, &observed.resources)
+        .await?;
     let (approved, refused) = approve(&handshake, &plan.changes);
 
     let mut applied = 0;
     if options.apply && !approved.is_empty() {
-        let result = provider.apply(&approved).await?;
+        let result = provider.apply(settings, &approved).await?;
         applied = result.applied.iter().filter(|entry| entry.ok).count();
     }
 

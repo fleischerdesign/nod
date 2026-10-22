@@ -169,6 +169,8 @@ pub struct ObserveResponse {
 pub struct PlanRequest<'a> {
     /// Operation name.
     pub op: &'static str,
+    /// Provider settings, opaque to the core.
+    pub config: &'a serde_json::Value,
     /// What the declaration asks for.
     pub desired: &'a [DesiredResource],
     /// What the provider observed.
@@ -191,6 +193,8 @@ pub struct PlanResponse {
 pub struct ApplyRequest<'a> {
     /// Operation name.
     pub op: &'static str,
+    /// Provider settings, opaque to the core.
+    pub config: &'a serde_json::Value,
     /// Approved changes.
     pub changes: &'a [Change],
 }

@@ -58,7 +58,7 @@ pub async fn test(command: &Path) -> Result<(), NodError> {
     let observed = provider.observe(&config).await?;
     println!("observe     ok   {} resource(s)", observed.resources.len());
 
-    let plan = provider.plan(&[], &observed.resources).await?;
+    let plan = provider.plan(&config, &[], &observed.resources).await?;
     println!("plan        ok   {} change(s)", plan.changes.len());
 
     if let Some(change) = plan
@@ -72,7 +72,7 @@ pub async fn test(command: &Path) -> Result<(), NodError> {
         )));
     }
 
-    let applied = provider.apply(&[]).await?;
+    let applied = provider.apply(&config, &[]).await?;
     println!("apply       ok   {} applied", applied.applied.len());
 
     let verified = provider.observe(&config).await?;

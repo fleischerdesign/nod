@@ -130,12 +130,14 @@ impl ProcessProvider {
     /// Asks for a plan; the core decides what may be applied.
     pub async fn plan(
         &mut self,
+        config: &serde_json::Value,
         desired: &[DesiredResource],
         observed: &[ObservedResource],
     ) -> Result<PlanResponse, NodError> {
         self.exchange(
             &PlanRequest {
                 op: "plan",
+                config,
                 desired,
                 observed,
             },
@@ -147,11 +149,13 @@ impl ProcessProvider {
     /// Applies exactly the changes the core approved.
     pub async fn apply(
         &mut self,
+        config: &serde_json::Value,
         changes: &[crate::domain::provider::Change],
     ) -> Result<ApplyResponse, NodError> {
         self.exchange(
             &ApplyRequest {
                 op: "apply",
+                config,
                 changes,
             },
             self.timeout,
@@ -168,6 +172,9 @@ impl ProcessProvider {
         let mut line = serde_json::to_string(request)
             .map_err(|error| NodError::provider(format!("cannot serialise request: {error}")))?;
         line.push('\n');
+        if std::env::var_os("NOD_PROVIDER_TRACE").is_some() {
+            eprintln!("→ {}", line.trim_end());
+        }
         self.stdin
             .write_all(line.as_bytes())
             .await
@@ -186,6 +193,11 @@ impl ProcessProvider {
 
         let mut response = String::new();
         let read = tokio::time::timeout(timeout, self.stdout.read_line(&mut response)).await;
+        if let Ok(Ok(_)) = &read {
+            if std::env::var_os("NOD_PROVIDER_TRACE").is_some() {
+                eprintln!("← {}", response.trim_end());
+            }
+        }
         match read {
             Ok(Ok(0)) => Err(NodError::provider(format!(
                 "provider {} closed the connection",
