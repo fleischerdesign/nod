@@ -19,6 +19,7 @@ pub mod inspect_metadata;
 pub mod list_generations;
 pub mod list_inputs;
 pub mod optimize_store;
+pub mod provider_schedule;
 pub mod push_cache;
 pub mod reboot_fleet;
 pub mod reconcile;

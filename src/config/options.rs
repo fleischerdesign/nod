@@ -856,6 +856,10 @@ pub enum Commands {
 
         #[command(flatten)]
         sync: SyncArgs,
+
+        /// Also reconcile the providers declared in `[providers.<name>]`
+        #[arg(long)]
+        reconcile_providers: bool,
     },
 }
 

@@ -195,6 +195,16 @@ pub struct TomlProvider {
     /// Provider settings, opaque to nod and validated by the provider.
     #[serde(default)]
     pub settings: Option<toml::Value>,
+    /// Desired state file for the daemon; without it the provider is not
+    /// scheduled.
+    #[serde(default)]
+    pub desired: Option<PathBuf>,
+    /// Whether the daemon may apply changes (default: false, dry-run only).
+    #[serde(default)]
+    pub apply: Option<bool>,
+    /// Cadence in seconds for the daemon (default: 300).
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
 }
 
 /// Fully merged SSH overrides for one host across the TOML and CLI tiers.
@@ -275,6 +285,11 @@ impl TomlConfigStore {
     /// The `[providers.<name>]` entry, when the configuration declares one.
     pub fn provider(&self, name: &str) -> Option<&TomlProvider> {
         self.toml.providers.get(name)
+    }
+
+    /// Every declared provider, in name order.
+    pub fn providers(&self) -> impl Iterator<Item = (&String, &TomlProvider)> {
+        self.toml.providers.iter()
     }
 
     /// Returns the raw `[defaults].flake` value from the parsed config file,

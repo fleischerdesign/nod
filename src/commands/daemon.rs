@@ -16,16 +16,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
 
 use crate::application::context::AppContext;
+use crate::application::use_cases::provider_schedule::ProviderSchedule;
+use crate::application::use_cases::reconcile::{self, ReconcileOptions};
 use crate::commands::sync;
 use crate::commands::wiring;
+use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
+use crate::domain::provider::DesiredResource;
 use crate::domain::watch::SyncOptions;
+use crate::infrastructure::config::toml_config::TomlConfigStore;
 
 /// Runs reconciliation cycles until the process is stopped.
 pub async fn execute(
     ctx: AppContext,
     flake_path: &Path,
     options: SyncOptions,
+    reconcile_providers: bool,
 ) -> Result<(), NodError> {
     sync::validate(&options)?;
     let ctx = wiring::with_sync(ctx, &options.state_dir)?;
@@ -39,9 +45,25 @@ pub async fn execute(
     // pretending a push happened.
     let mut observed_head: Option<String> = None;
 
+    // The provider loop shares the process but not the schedule: each provider
+    // has its own API and its own rate limits (ADR-030).
+    let mut providers = if reconcile_providers {
+        load_providers(flake_path)?
+    } else {
+        Vec::new()
+    };
+
     loop {
-        let wake = next_gate.map_or(next_sweep, |gate| next_sweep.min(gate));
+        let mut wake = next_sweep;
+        if let Some(gate) = next_gate {
+            wake = wake.min(gate);
+        }
+        for entry in &providers {
+            wake = wake.min(entry.schedule.next_run());
+        }
         tokio::time::sleep_until(wake).await;
+
+        reconcile_due(&mut providers).await;
 
         if let Some(gate) = next_gate {
             if gate <= Instant::now() {
@@ -87,6 +109,125 @@ pub async fn execute(
             jittered(options.interval_secs, options.jitter_percent)
         };
         next_sweep = Instant::now() + Duration::from_secs(wait);
+    }
+}
+
+/// One declared provider and its cadence.
+struct ProviderEntry {
+    name: String,
+    command: std::path::PathBuf,
+    settings: serde_json::Value,
+    desired: Vec<DesiredResource>,
+    apply: bool,
+    schedule: ProviderSchedule,
+}
+
+/// Builds the provider loop from `[providers.<name>]` in the configuration.
+///
+/// A provider without a `desired` file is not scheduled: the daemon has nothing
+/// to compare against, and guessing a declaration would be worse than skipping.
+fn load_providers(flake_path: &Path) -> Result<Vec<ProviderEntry>, NodError> {
+    let store = TomlConfigStore::new(flake_path, CliOverrides::default())?;
+    let now = Instant::now();
+    let mut entries = Vec::new();
+
+    for (name, provider) in store.providers() {
+        let Some(desired_path) = &provider.desired else {
+            tracing::warn!(
+                provider = %name,
+                "no desired file declared; provider is not scheduled"
+            );
+            continue;
+        };
+
+        let raw = std::fs::read_to_string(desired_path).map_err(|error| {
+            NodError::config(format!(
+                "cannot read desired state {} for provider {name}: {error}",
+                desired_path.display()
+            ))
+        })?;
+        let desired = reconcile::parse_desired(&raw)?;
+
+        let settings = match &provider.settings {
+            Some(value) => serde_json::to_value(value).map_err(|error| {
+                NodError::config(format!(
+                    "cannot convert settings for provider {name}: {error}"
+                ))
+            })?,
+            None => serde_json::Value::Object(serde_json::Map::new()),
+        };
+
+        entries.push(ProviderEntry {
+            name: name.clone(),
+            command: provider.command.clone(),
+            settings,
+            desired,
+            apply: provider.apply.unwrap_or(false),
+            schedule: ProviderSchedule::new(
+                Duration::from_secs(provider.interval_secs.unwrap_or(300)),
+                now,
+            ),
+        });
+    }
+
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+/// Runs every provider that is due, one at a time.
+///
+async fn reconcile_due(entries: &mut [ProviderEntry]) {
+    let now = Instant::now();
+
+    for entry in entries.iter_mut() {
+        if !entry.schedule.due(now) {
+            continue;
+        }
+
+        let result = reconcile::execute(
+            &entry.command,
+            &entry.settings,
+            &entry.desired,
+            ReconcileOptions { apply: entry.apply },
+        )
+        .await;
+
+        match result {
+            Ok(report) => {
+                tracing::info!(
+                    provider = %entry.name,
+                    observed = report.observed,
+                    planned = report.planned,
+                    approved = report.approved.len(),
+                    refused = report.refused.len(),
+                    applied = report.applied,
+                    apply = entry.apply,
+                    "provider reconcile"
+                );
+                entry.schedule.succeeded(Instant::now());
+            }
+            Err(error) => {
+                let condition = match &error {
+                    NodError::Auth { .. } => Some("auth"),
+                    _ => None,
+                };
+                let (delay, changed) = entry.schedule.failed(Instant::now(), condition);
+                if changed {
+                    tracing::warn!(
+                        provider = %entry.name,
+                        %error,
+                        delay_secs = delay.as_secs(),
+                        "provider reconcile failed; backing off"
+                    );
+                } else {
+                    tracing::debug!(
+                        provider = %entry.name,
+                        %error,
+                        "provider reconcile failed again"
+                    );
+                }
+            }
+        }
     }
 }
 

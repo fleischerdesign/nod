@@ -773,12 +773,16 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Daemon { flake, sync } => {
+        Commands::Daemon {
+            flake,
+            sync,
+            reconcile_providers,
+        } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
             let mut options = sync_options(sync, false);
             options.verbose = cli.verbose;
-            nod::commands::daemon::execute(ctx, &flake_path, options).await?;
+            nod::commands::daemon::execute(ctx, &flake_path, options, reconcile_providers).await?;
         }
     }
 
