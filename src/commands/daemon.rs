@@ -274,6 +274,8 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
                     "refused"
                 } else if report.applied > 0 {
                     "applied"
+                } else if report.planned > 0 {
+                    "planned"
                 } else {
                     "unchanged"
                 };

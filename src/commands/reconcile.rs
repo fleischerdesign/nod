@@ -142,6 +142,8 @@ pub async fn execute(
         "refused"
     } else if report.applied > 0 {
         "applied"
+    } else if report.planned > 0 {
+        "planned"
     } else {
         "unchanged"
     };
