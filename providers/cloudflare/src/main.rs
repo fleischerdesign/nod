@@ -68,7 +68,7 @@ fn handshake() -> Value {
         "provider": "cloudflare",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
-        "capabilities": ["dns.record"],
+        "capabilities": ["dns.record", "zone.settings"],
         "operations": ["adopt"],
         "ownership": "marker",
         "settings_schema": {
@@ -125,7 +125,7 @@ fn api_error(error: &CfError) -> Value {
     error_message(error.condition_kind(), error.detail())
 }
 
-/// Observes every DNS record in the zone.
+/// Observes every DNS record and the zone's edge settings.
 fn observe(request: &Value) -> Value {
     let settings = match settings(request) {
         Ok(settings) => settings,
@@ -141,8 +141,12 @@ fn observe(request: &Value) -> Value {
         Ok(records) => records,
         Err(error) => return api_error(&error),
     };
+    let zone_settings = match client.zone_settings(&zone_id) {
+        Ok(settings) => settings,
+        Err(error) => return api_error(&error),
+    };
 
-    let resources: Vec<Value> = records
+    let mut resources: Vec<Value> = records
         .iter()
         .map(|record| {
             let (resource, owned) = model::to_resource(record);
@@ -154,6 +158,16 @@ fn observe(request: &Value) -> Value {
             })
         })
         .collect();
+
+    let singleton = model::settings_resource(&zone_settings);
+    resources.push(json!({
+        "kind": singleton.kind,
+        "id": singleton.id,
+        "attributes": singleton.attributes,
+        // A singleton is owned by the declaration: another tool cannot
+        // "create" a zone's settings, and absence means "do not change".
+        "owned": true,
+    }));
 
     json!({ "resources": resources, "conditions": [] })
 }
@@ -232,7 +246,13 @@ fn apply(request: &Value) -> Value {
 
         let result = match kind {
             "create" => create_record(&client, &zone_id, &attributes),
-            "update" => update_record(&client, &zone_id, &attributes),
+            "update" => {
+                if resource.get("kind").and_then(Value::as_str) == Some(model::SETTINGS_KIND) {
+                    update_zone_settings(&client, &zone_id, &attributes)
+                } else {
+                    update_record(&client, &zone_id, &attributes)
+                }
+            }
             "delete" => delete_record(&client, &zone_id, &attributes),
             other => Err(CfError::Transient(format!("unknown change kind: {other}"))),
         };
@@ -304,6 +324,37 @@ fn update_record(client: &Cloudflare, zone_id: &str, attributes: &Value) -> Resu
 
 fn delete_record(client: &Cloudflare, zone_id: &str, attributes: &Value) -> Result<(), CfError> {
     client.delete_record(zone_id, &field_str(attributes, "record_id"))
+}
+
+/// Sets the three edge settings, validating their shape first.
+fn update_zone_settings(
+    client: &Cloudflare,
+    zone_id: &str,
+    attributes: &Value,
+) -> Result<(), CfError> {
+    let ssl = field_str(attributes, "ssl");
+    if !matches!(ssl.as_str(), "off" | "flexible" | "full" | "strict") {
+        return Err(CfError::Config(format!("invalid ssl mode `{ssl}`")));
+    }
+
+    let always_use_https = field_str(attributes, "always_use_https");
+    if !matches!(always_use_https.as_str(), "on" | "off") {
+        return Err(CfError::Config(format!(
+            "invalid always_use_https value `{always_use_https}`"
+        )));
+    }
+
+    let min_tls_version = field_str(attributes, "min_tls_version");
+    if !matches!(min_tls_version.as_str(), "1.0" | "1.1" | "1.2" | "1.3") {
+        return Err(CfError::Config(format!(
+            "invalid min_tls_version `{min_tls_version}`"
+        )));
+    }
+
+    client.patch_setting(zone_id, "ssl", &ssl)?;
+    client.patch_setting(zone_id, "always_use_https", &always_use_https)?;
+    client.patch_setting(zone_id, "min_tls_version", &min_tls_version)?;
+    Ok(())
 }
 
 /// Stamps the ownership marker on existing records, changing nothing else.

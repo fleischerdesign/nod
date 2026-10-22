@@ -185,6 +185,10 @@ explicit operation (ADR-032): `nod provider adopt` stamps the marker on
 resources that already match the declaration, and a normal reconcile never
 does it.
 
+A kind may also be a **singleton**, such as `zone.settings`: it has one id, is
+always observed, is owned by construction and is only ever updated, never
+created or deleted (ADR-033).
+
 ### 7. Isolation
 
 - The provider inherits no environment beyond an explicit allowlist.

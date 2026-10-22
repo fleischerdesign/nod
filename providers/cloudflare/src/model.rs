@@ -37,7 +37,7 @@ pub struct DnsRecord {
 /// A nod resource, as the protocol defines it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resource {
-    /// Always `dns.record`.
+    /// Resource kind, e.g. `dns.record` or `zone.settings`.
     pub kind: String,
     /// `TYPE:name`, stable within the zone.
     pub id: String,
@@ -49,6 +49,39 @@ pub struct Resource {
 /// Resource id for a record.
 pub fn resource_id(record_type: &str, name: &str) -> String {
     format!("{record_type}:{name}")
+}
+
+/// Resource kind for a DNS record.
+pub const RECORD_KIND: &str = "dns.record";
+
+/// Resource kind for the zone's edge settings.
+pub const SETTINGS_KIND: &str = "zone.settings";
+
+/// The singleton id of the settings resource inside one provider instance.
+pub const SETTINGS_ID: &str = "zone.settings";
+
+/// Edge settings a declaration controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneSettings {
+    /// TLS mode: off, flexible, full or strict.
+    pub ssl: String,
+    /// `on` or `off`.
+    pub always_use_https: String,
+    /// Minimum TLS version, e.g. `1.2`.
+    pub min_tls_version: String,
+}
+
+/// Maps edge settings to the singleton resource.
+pub fn settings_resource(settings: &ZoneSettings) -> Resource {
+    Resource {
+        kind: SETTINGS_KIND.to_string(),
+        id: SETTINGS_ID.to_string(),
+        attributes: json!({
+            "ssl": settings.ssl,
+            "always_use_https": settings.always_use_https,
+            "min_tls_version": settings.min_tls_version,
+        }),
+    }
 }
 
 /// Whether a record carries our marker.
@@ -93,7 +126,7 @@ pub struct Change {
 /// What a desired entry asks for.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Desired {
-    /// Resource kind; only `dns.record` is accepted.
+    /// Resource kind: `dns.record` or `zone.settings`.
     pub kind: String,
     /// `TYPE:name`.
     pub id: String,
@@ -115,7 +148,7 @@ pub struct Desired {
 pub fn plan(desired: &[Desired], observed: &[(Resource, bool)]) -> Vec<Change> {
     let mut changes = Vec::new();
 
-    for want in desired {
+    for want in desired.iter().filter(|want| want.kind == RECORD_KIND) {
         let existing = observed.iter().find(|(resource, _)| resource.id == want.id);
 
         match existing {
@@ -147,7 +180,18 @@ pub fn plan(desired: &[Desired], observed: &[(Resource, bool)]) -> Vec<Change> {
         }
     }
 
-    for (resource, owned) in observed {
+    // A singleton is updated, never created or deleted. Absence from the
+    // declaration means "do not change", not "reset to defaults".
+    if let Some(want) = desired.iter().find(|want| want.kind == SETTINGS_KIND) {
+        if let Some(change) = plan_settings(want, observed) {
+            changes.push(change);
+        }
+    }
+
+    for (resource, owned) in observed
+        .iter()
+        .filter(|(resource, _)| resource.kind == RECORD_KIND)
+    {
         let wanted = desired.iter().any(|want| want.id == resource.id);
         if !wanted && *owned {
             changes.push(Change {
@@ -160,6 +204,49 @@ pub fn plan(desired: &[Desired], observed: &[(Resource, bool)]) -> Vec<Change> {
     }
 
     changes
+}
+
+/// The plan for the settings singleton.
+fn plan_settings(want: &Desired, observed: &[(Resource, bool)]) -> Option<Change> {
+    let current = observed
+        .iter()
+        .find(|(resource, _)| resource.kind == SETTINGS_KIND);
+
+    let Some((current, _)) = current else {
+        // The provider always observes the singleton; an absent one is a
+        // provider bug, and an update is how apply repairs it.
+        return Some(settings_update(want));
+    };
+
+    if settings_match(current, &want.attributes) {
+        None
+    } else {
+        Some(settings_update(want))
+    }
+}
+
+fn settings_update(want: &Desired) -> Change {
+    Change {
+        kind: "update",
+        owned: true,
+        destructive: false,
+        resource: Resource {
+            kind: want.kind.clone(),
+            id: want.id.clone(),
+            attributes: want.attributes.clone(),
+        },
+    }
+}
+
+/// Only the keys the declaration names are compared; an omitted key is left
+/// alone, not reset.
+fn settings_match(current: &Resource, desired: &Value) -> bool {
+    ["ssl", "always_use_https", "min_tls_version"]
+        .iter()
+        .all(|key| match desired.get(key) {
+            None => true,
+            Some(want) => current.attributes.get(key) == Some(want),
+        })
 }
 
 /// Whether the observed attributes already satisfy the desired ones.
@@ -252,5 +339,64 @@ mod tests {
     fn a_removed_foreign_record_is_not_proposed_at_all() {
         let observed = vec![to_resource(&record("old", "1.2.3.4", None))];
         assert!(plan(&[], &observed).is_empty());
+    }
+
+    fn settings(ssl: &str) -> Desired {
+        Desired {
+            kind: SETTINGS_KIND.to_string(),
+            id: SETTINGS_ID.to_string(),
+            attributes: json!({
+                "ssl": ssl,
+                "always_use_https": "on",
+                "min_tls_version": "1.2",
+            }),
+        }
+    }
+
+    fn observed_settings(ssl: &str) -> (Resource, bool) {
+        let resource = settings_resource(&ZoneSettings {
+            ssl: ssl.to_string(),
+            always_use_https: "on".to_string(),
+            min_tls_version: "1.2".to_string(),
+        });
+        (resource, true)
+    }
+
+    #[test]
+    fn settings_are_updated_when_they_differ() {
+        let changes = plan(&[settings("strict")], &[observed_settings("full")]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "update");
+        assert_eq!(changes[0].resource.kind, SETTINGS_KIND);
+        assert!(changes[0].owned);
+    }
+
+    #[test]
+    fn settings_are_unchanged_when_they_match() {
+        assert!(plan(&[settings("strict")], &[observed_settings("strict")]).is_empty());
+    }
+
+    #[test]
+    fn settings_are_never_deleted_when_absent_from_the_declaration() {
+        assert!(plan(&[], &[observed_settings("strict")]).is_empty());
+    }
+
+    #[test]
+    fn an_absent_settings_observation_is_repaired_not_created() {
+        let changes = plan(&[settings("strict")], &[]);
+        assert_eq!(
+            changes[0].kind, "update",
+            "a singleton is updated, never created"
+        );
+    }
+
+    #[test]
+    fn an_omitted_setting_is_left_alone() {
+        let want = Desired {
+            kind: SETTINGS_KIND.to_string(),
+            id: SETTINGS_ID.to_string(),
+            attributes: json!({ "ssl": "strict" }),
+        };
+        assert!(plan(&[want], &[observed_settings("strict")]).is_empty());
     }
 }

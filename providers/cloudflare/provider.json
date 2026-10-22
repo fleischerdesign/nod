@@ -2,8 +2,8 @@
   "name": "cloudflare",
   "version": "0.1.0",
   "protocol": 1,
-  "capabilities": ["dns.record"],
+  "capabilities": ["dns.record", "zone.settings"],
   "operations": ["adopt"],
   "ownership": "marker",
-  "description": "Cloudflare DNS records"
+  "description": "Cloudflare DNS records and edge settings"
 }

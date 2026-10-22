@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use crate::model::DnsRecord;
+use crate::model::{DnsRecord, ZoneSettings};
 
 /// API failures, mapped to the conditions the protocol defines.
 #[derive(Debug)]
@@ -224,6 +224,46 @@ impl Cloudflare {
             "PATCH",
             &format!("/zones/{zone_id}/dns_records/{record_id}"),
             Some(json!({ "comment": comment })),
+        )?;
+        Ok(())
+    }
+
+    /// Reads the three edge settings the provider manages.
+    pub fn zone_settings(&self, zone_id: &str) -> Result<ZoneSettings, CfError> {
+        let value = self.call("GET", &format!("/zones/{zone_id}/settings"), None)?;
+        let items = value
+            .get("result")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CfError::Transient("zone settings returned no list".to_string()))?;
+
+        let get = |id: &str| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+                .and_then(|item| item.get("value"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| CfError::Config(format!("zone setting `{id}` is missing")))
+        };
+
+        Ok(ZoneSettings {
+            ssl: get("ssl")?,
+            always_use_https: get("always_use_https")?,
+            min_tls_version: get("min_tls_version")?,
+        })
+    }
+
+    /// Sets one edge setting.
+    pub fn patch_setting(
+        &self,
+        zone_id: &str,
+        setting: &str,
+        value: &str,
+    ) -> Result<(), CfError> {
+        self.call(
+            "PATCH",
+            &format!("/zones/{zone_id}/settings/{setting}"),
+            Some(json!({ "value": value })),
         )?;
         Ok(())
     }
