@@ -182,6 +182,21 @@ whole namespace: a conformance run must not be able to empty a real zone.
 A provider that fails the suite is not compatible, however well it works
 against the real API.
 
+### 11. Ordering
+
+A provider that produces state a host consumes - an SSO provider, a DNS record
+a certificate needs - must run before the host sweep; one that depends on a host
+being up must run after it. The declaration says which:
+
+```toml
+[providers.authentik]
+order = "before-hosts"   # or "after-hosts"; default "independent"
+```
+
+Ordered providers run with the sweep, on the sweep's cadence, not on their own:
+their work is a prerequisite or a consequence of that sweep, and a separate
+clock would only add a race. Independent providers keep their own interval.
+
 ## Consequences
 
 - Providers are language-agnostic and independently versioned; the cost is a

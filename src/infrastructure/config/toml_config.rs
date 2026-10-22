@@ -205,6 +205,9 @@ pub struct TomlProvider {
     /// Cadence in seconds for the daemon (default: 300).
     #[serde(default)]
     pub interval_secs: Option<u64>,
+    /// Where the provider runs relative to the host sweep.
+    #[serde(default)]
+    pub order: Option<crate::domain::provider::ProviderOrder>,
 }
 
 /// Fully merged SSH overrides for one host across the TOML and CLI tiers.

@@ -55,6 +55,19 @@ impl OwnershipMode {
     }
 }
 
+/// Where a provider runs relative to the host sweep (ADR-030).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderOrder {
+    /// Runs whenever its own schedule is due.
+    #[default]
+    Independent,
+    /// Runs immediately before a host sweep, on the sweep's cadence.
+    BeforeHosts,
+    /// Runs immediately after a host sweep, on the sweep's cadence.
+    AfterHosts,
+}
+
 /// Static metadata shipped next to a provider binary.
 ///
 /// `nod provider list` reads this instead of executing the provider: listing
@@ -441,6 +454,15 @@ mod tests {
     fn read_only_ownership_forbids_writes() {
         assert!(!OwnershipMode::None.allows_writes());
         assert!(OwnershipMode::Marker.allows_writes());
+    }
+
+    #[test]
+    fn provider_order_defaults_to_independent_and_serialises_kebab_case() {
+        assert_eq!(ProviderOrder::default(), ProviderOrder::Independent);
+        assert_eq!(
+            serde_json::to_string(&ProviderOrder::BeforeHosts).unwrap(),
+            "\"before-hosts\""
+        );
     }
 
     #[test]

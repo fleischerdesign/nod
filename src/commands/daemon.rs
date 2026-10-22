@@ -22,7 +22,7 @@ use crate::commands::sync;
 use crate::commands::wiring;
 use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
-use crate::domain::provider::{DesiredResource, RollbackPlan};
+use crate::domain::provider::{DesiredResource, ProviderOrder, RollbackPlan};
 use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
@@ -66,7 +66,13 @@ pub async fn execute(
         }
         tokio::time::sleep_until(wake).await;
 
-        reconcile_due(&mut providers, &options.state_dir).await;
+        // Independent providers run on their own cadence, whenever the loop wakes.
+        reconcile_due(
+            &mut providers,
+            &options.state_dir,
+            ProviderOrder::Independent,
+        )
+        .await;
 
         if let Some(gate) = next_gate {
             if gate <= Instant::now() {
@@ -92,6 +98,15 @@ pub async fn execute(
             continue;
         }
 
+        // Ordered providers run with the sweep, not beside it: a provider that
+        // produces state a host needs must finish before the host is touched.
+        reconcile_due(
+            &mut providers,
+            &options.state_dir,
+            ProviderOrder::BeforeHosts,
+        )
+        .await;
+
         let report = match sync::cycle(&ctx, flake_path, &options).await {
             Ok(report) => report,
             Err(error) => {
@@ -105,6 +120,13 @@ pub async fn execute(
         };
         sync::emit(&report, &options);
         sync::record_audit(&ctx, &report).await;
+
+        reconcile_due(
+            &mut providers,
+            &options.state_dir,
+            ProviderOrder::AfterHosts,
+        )
+        .await;
 
         let wait = if report.backoff_secs > 0 {
             report.backoff_secs
@@ -122,6 +144,7 @@ struct ProviderEntry {
     settings: serde_json::Value,
     desired: Vec<DesiredResource>,
     apply: bool,
+    order: ProviderOrder,
     schedule: ProviderSchedule,
 }
 
@@ -166,6 +189,7 @@ fn load_providers(flake_path: &Path) -> Result<Vec<ProviderEntry>, NodError> {
             settings,
             desired,
             apply: provider.apply.unwrap_or(false),
+            order: provider.order.unwrap_or_default(),
             schedule: ProviderSchedule::new(
                 Duration::from_secs(provider.interval_secs.unwrap_or(300)),
                 now,
@@ -179,11 +203,11 @@ fn load_providers(flake_path: &Path) -> Result<Vec<ProviderEntry>, NodError> {
 
 /// Runs every provider that is due, one at a time.
 ///
-async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path) {
+async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: ProviderOrder) {
     let now = Instant::now();
 
     for entry in entries.iter_mut() {
-        if !entry.schedule.due(now) {
+        if entry.order != order || !entry.schedule.due(now) {
             continue;
         }
 
