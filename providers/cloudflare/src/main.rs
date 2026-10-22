@@ -40,6 +40,7 @@ fn main() {
             Some("observe") => observe(&request),
             Some("plan") => plan(&request),
             Some("apply") => apply(&request),
+            Some("adopt") => adopt(&request),
             Some(other) => {
                 eprintln!("unknown operation: {other}");
                 std::process::exit(1);
@@ -68,6 +69,7 @@ fn handshake() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
         "capabilities": ["dns.record"],
+        "operations": ["adopt"],
         "ownership": "marker",
         "settings_schema": {
             "type": "object",
@@ -302,4 +304,54 @@ fn update_record(client: &Cloudflare, zone_id: &str, attributes: &Value) -> Resu
 
 fn delete_record(client: &Cloudflare, zone_id: &str, attributes: &Value) -> Result<(), CfError> {
     client.delete_record(zone_id, &field_str(attributes, "record_id"))
+}
+
+/// Stamps the ownership marker on existing records, changing nothing else.
+fn adopt(request: &Value) -> Value {
+    let settings = match settings(request) {
+        Ok(settings) => settings,
+        Err(message) => return error_message("config", &message),
+    };
+    let client = Cloudflare::new(settings.token);
+    let zone_id = match client.zone_id(&settings.zone) {
+        Ok(zone_id) => zone_id,
+        Err(error) => return api_error(&error),
+    };
+
+    let empty = Vec::new();
+    let resources = request
+        .get("resources")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+
+    let mut adopted = Vec::new();
+    for resource in resources {
+        let id = resource
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let attributes = resource
+            .get("attributes")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        adopted.push(match stamp_record(&client, &zone_id, &attributes) {
+            Ok(()) => json!({ "id": id, "ok": true }),
+            Err(error) => json!({ "id": id, "ok": false, "message": error.detail() }),
+        });
+    }
+
+    json!({ "adopted": adopted, "conditions": [] })
+}
+
+/// Sets the marker without touching type, name, content, TTL or proxy state.
+fn stamp_record(client: &Cloudflare, zone_id: &str, attributes: &Value) -> Result<(), CfError> {
+    let record_id = field_str(attributes, "record_id");
+    if record_id.is_empty() {
+        return Err(CfError::Config(
+            "record_id is required to adopt a record".to_string(),
+        ));
+    }
+    client.patch_comment(zone_id, &record_id, MARKER_COMMENT)
 }

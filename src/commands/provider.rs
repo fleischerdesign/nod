@@ -114,6 +114,13 @@ pub async fn test(
                     manifest.protocol, handshake.protocol
                 )));
             }
+            for operation in &manifest.operations {
+                if !handshake.operations.contains(operation) {
+                    return Err(NodError::provider(format!(
+                        "manifest declares operation `{operation}` but the provider does not offer it"
+                    )));
+                }
+            }
             println!("manifest    ok   matches the handshake");
         }
         None => println!("manifest    --   none next to the binary"),
@@ -142,6 +149,24 @@ pub async fn test(
         &plan.changes,
     )?;
     println!("capabilities ok  stays inside the declaration");
+
+    // An optional operation that is declared must exist: an empty call proves
+    // the provider answers and writes nothing.
+    if handshake
+        .operations
+        .iter()
+        .any(|operation| operation == "adopt")
+    {
+        let adopted = provider.adopt(&settings, &[]).await?;
+        if !adopted.adopted.is_empty() {
+            return Err(NodError::provider(
+                "a provider adopted resources when asked to adopt none",
+            ));
+        }
+        println!("adopt       ok   answers an empty request");
+    } else {
+        println!("adopt       --   not offered");
+    }
 
     if let Some(change) = plan
         .changes

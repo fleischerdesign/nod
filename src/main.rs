@@ -520,6 +520,32 @@ async fn run(cli: Cli) -> Result<()> {
                 write,
                 env,
             } => nod::commands::provider::test(&command, settings.as_deref(), write, &env).await?,
+            nod::config::options::ProviderCommands::Adopt {
+                provider,
+                command,
+                settings,
+                desired,
+                force,
+                apply,
+                env,
+                json,
+                flake,
+                config,
+            } => {
+                nod::commands::adopt::execute(
+                    provider.as_deref(),
+                    command.as_deref(),
+                    settings.as_deref(),
+                    desired.as_deref(),
+                    &force,
+                    apply,
+                    &env,
+                    json,
+                    &flake,
+                    config.as_deref(),
+                )
+                .await?
+            }
         },
         Commands::Config {
             flake,

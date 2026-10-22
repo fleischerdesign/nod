@@ -32,6 +32,8 @@ pub struct ReconcileReport {
     pub version: String,
     /// Resources the provider reported.
     pub observed: usize,
+    /// Declared resources that exist and match but do not carry the marker.
+    pub unowned: usize,
     /// Resources the declaration asks for.
     pub desired: usize,
     /// Changes the provider proposed.
@@ -168,6 +170,7 @@ pub async fn execute(
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
         observed: observed.resources.len(),
+        unowned: crate::domain::adoption::unowned(&observed.resources, desired),
         desired: desired.len(),
         planned: plan.changes.len(),
         approved,
@@ -220,7 +223,7 @@ pub fn check_capabilities(
 }
 
 /// Renders one provider-reported failure with its classification when given.
-fn describe_failure(entry: &AppliedChange) -> String {
+pub(crate) fn describe_failure(entry: &AppliedChange) -> String {
     match &entry.error {
         Some(error) if !error.message.is_empty() => format!("{}: {}", error.kind, error.message),
         Some(error) => error.kind.clone(),
@@ -395,6 +398,7 @@ mod tests {
             version: "0.1.0".to_string(),
             protocol: 1,
             capabilities: Vec::new(),
+            operations: Vec::new(),
             ownership,
             settings_schema: serde_json::json!({}),
         }

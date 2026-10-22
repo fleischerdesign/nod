@@ -1012,6 +1012,38 @@ pub enum ProviderCommands {
         #[arg(long)]
         env: Vec<String>,
     },
+    /// Take ownership of resources that already match the declaration
+    Adopt {
+        /// Provider name declared in `.nod.toml` under `[providers.<name>]`
+        provider: Option<String>,
+        /// Provider executable (overrides the configured command)
+        #[arg(long)]
+        command: Option<PathBuf>,
+        /// JSON file with the provider settings (overrides the configured ones)
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        /// Desired state: an array or an object with a `resources` array
+        #[arg(long)]
+        desired: Option<PathBuf>,
+        /// Take over a conflicting resource by id (repeatable; only declared ids)
+        #[arg(long)]
+        force: Vec<String>,
+        /// Write the marker; without it the run only reports
+        #[arg(long)]
+        apply: bool,
+        /// Environment variable the provider inherits (repeatable)
+        #[arg(long)]
+        env: Vec<String>,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+        /// Configuration file to read instead of discovering `.nod.toml`
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

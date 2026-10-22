@@ -172,6 +172,7 @@ pub async fn execute(
             "provider": report.provider,
             "version": report.version,
             "observed": report.observed,
+            "unowned": report.unowned,
             "desired": report.desired,
             "planned": report.planned,
             "approved": report.approved.len(),
@@ -188,6 +189,7 @@ pub async fn execute(
 
     println!("provider  {} {}", report.provider, report.version);
     println!("observed  {}", report.observed);
+    println!("unowned   {}", report.unowned);
     println!("planned   {}", report.planned);
     println!("approved  {}", report.approved.len());
     println!("refused   {}", report.refused.len());

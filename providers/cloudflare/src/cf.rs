@@ -14,6 +14,8 @@ pub enum CfError {
     Auth(String),
     /// The API asked us to slow down.
     RateLimited(String),
+    /// The request itself was wrong (missing attribute, bad id).
+    Config(String),
     /// Anything transient: 5xx, transport, parsing.
     Transient(String),
 }
@@ -24,6 +26,7 @@ impl CfError {
         match self {
             CfError::Auth(_) => "auth",
             CfError::RateLimited(_) => "rate-limited",
+            CfError::Config(_) => "config",
             CfError::Transient(_) => "transient",
         }
     }
@@ -203,6 +206,23 @@ impl Cloudflare {
             "DELETE",
             &format!("/zones/{zone_id}/dns_records/{record_id}"),
             None,
+        )?;
+        Ok(())
+    }
+
+    /// Replaces a record's comment, leaving its content untouched.
+    ///
+    /// Adoption changes exactly one field: the ownership marker.
+    pub fn patch_comment(
+        &self,
+        zone_id: &str,
+        record_id: &str,
+        comment: &str,
+    ) -> Result<(), CfError> {
+        self.call(
+            "PATCH",
+            &format!("/zones/{zone_id}/dns_records/{record_id}"),
+            Some(json!({ "comment": comment })),
         )?;
         Ok(())
     }

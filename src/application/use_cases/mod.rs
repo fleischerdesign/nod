@@ -1,6 +1,7 @@
 //! Application use cases: policy-level operations composed over the ports
 //! (ADR-001). These drive the pipeline; they never import Infrastructure.
 
+pub mod adopt;
 pub mod audit_log;
 pub mod bootstrap_host;
 pub mod check_secrets;

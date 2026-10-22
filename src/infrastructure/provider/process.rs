@@ -14,8 +14,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::domain::errors::NodError;
 use crate::domain::provider::{
-    ApplyRequest, ApplyResponse, DesiredResource, Handshake, HandshakeRequest, ObserveRequest,
-    ObserveResponse, ObservedResource, PlanRequest, PlanResponse, PROTOCOL_VERSION,
+    AdoptRequest, AdoptResponse, ApplyRequest, ApplyResponse, DesiredResource, Handshake,
+    HandshakeRequest, ObserveRequest, ObserveResponse, ObservedResource, PlanRequest, PlanResponse,
+    PROTOCOL_VERSION,
 };
 
 /// Time the handshake may take before the provider counts as broken.
@@ -180,6 +181,26 @@ impl ProcessProvider {
                 op: "apply",
                 config,
                 changes,
+            },
+            self.timeout,
+        )
+        .await
+    }
+
+    /// Stamps the provider's ownership marker on existing resources.
+    ///
+    /// Only providers that declare the `adopt` operation implement it; the
+    /// core checks that before calling.
+    pub async fn adopt(
+        &mut self,
+        config: &serde_json::Value,
+        resources: &[ObservedResource],
+    ) -> Result<AdoptResponse, NodError> {
+        self.exchange(
+            &AdoptRequest {
+                op: "adopt",
+                config,
+                resources,
             },
             self.timeout,
         )

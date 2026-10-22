@@ -29,6 +29,13 @@ pub struct Handshake {
     /// What the provider can do; the core uses it to scope credentials.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Optional operations beyond observe/plan/apply, e.g. `adopt`.
+    ///
+    /// Additive by design: an old core ignores the field, an old provider omits
+    /// it, and no protocol major changes. A core that needs `adopt` refuses a
+    /// provider that does not declare it.
+    #[serde(default)]
+    pub operations: Vec<String>,
     /// How the provider marks ownership.
     pub ownership: OwnershipMode,
     /// JSON Schema of the provider's `settings`.
@@ -84,6 +91,9 @@ pub struct Manifest {
     /// Declared capabilities.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Declared optional operations (`adopt`).
+    #[serde(default)]
+    pub operations: Vec<String>,
     /// Declared ownership mode.
     pub ownership: OwnershipMode,
     /// What the provider manages, in one sentence.
@@ -455,6 +465,33 @@ pub struct ApplyResponse {
     /// Per-change results.
     #[serde(default)]
     pub applied: Vec<AppliedChange>,
+    /// Conditions reported by the provider.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+/// `adopt` request: stamp the provider's ownership marker on existing
+/// resources that already belong to the declaration.
+///
+/// Attributes are the **observed** ones, so a provider can address the record
+/// it must stamp. The core decides which resources are eligible; the provider
+/// only writes its own marker and changes nothing else.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdoptRequest<'a> {
+    /// Operation name.
+    pub op: &'static str,
+    /// Provider settings, opaque to the core.
+    pub config: &'a serde_json::Value,
+    /// Resources to mark as owned.
+    pub resources: &'a [ObservedResource],
+}
+
+/// `adopt` response.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AdoptResponse {
+    /// Per-resource results; `ok` means the marker is now present.
+    #[serde(default)]
+    pub adopted: Vec<AppliedChange>,
     /// Conditions reported by the provider.
     #[serde(default)]
     pub conditions: Vec<Condition>,

@@ -3,6 +3,7 @@
 //! Domain must never import from Application, Infrastructure or
 //! Presentation (ADR-001).
 
+pub mod adoption;
 pub mod audit;
 pub mod cache;
 pub mod config;

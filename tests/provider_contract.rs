@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nod::application::use_cases::adopt::{execute as adopt, AdoptOptions};
 use nod::application::use_cases::reconcile::{execute, rollback, ReconcileOptions};
 use nod::domain::policy::Policy;
 use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, RollbackPlan};
@@ -18,10 +19,10 @@ use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, 
 /// store path is immutable — so the harness serialises instead of retrying.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn script(body: &str) -> (tempfile::TempDir, PathBuf) {
+fn script(body: impl AsRef<str>) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fake-provider.sh");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\n{}", body.as_ref())).unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&path, permissions).unwrap();
@@ -195,6 +196,167 @@ done
         "{:?}",
         report.failed
     );
+}
+
+#[tokio::test]
+async fn adoption_is_a_dry_run_until_asked_and_stamps_only_eligible_resources() {
+    let _guard = SERIAL.lock().await;
+    let marker = tempfile::tempdir().unwrap();
+    let marker_path = marker.path().join("stamped");
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"operations":["adopt"],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[{"kind":"dns.record","id":"a","attributes":{"content":"1","record_id":"cf-1"},"owned":false}],"conditions":[]}'
+      ;;
+    *'"op":"adopt"'*)
+      touch @MARKER@
+      echo '{"adopted":[{"id":"a","ok":true}],"conditions":[]}'
+      ;;
+  esac
+done
+"#
+        .replace("@MARKER@", marker_path.to_str().unwrap()),
+    );
+
+    let desired = vec![DesiredResource {
+        kind: "dns.record".to_string(),
+        id: "a".to_string(),
+        attributes: serde_json::json!({ "content": "1" }),
+    }];
+
+    let dry = adopt(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired,
+        AdoptOptions::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dry.unowned, 1);
+    assert_eq!(dry.eligible, 1);
+    assert_eq!(dry.adopted, 0);
+    assert!(
+        !marker_path.exists(),
+        "a dry run must not call the provider's adopt"
+    );
+
+    let applied = adopt(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired,
+        AdoptOptions {
+            apply: true,
+            force: Vec::new(),
+        },
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.adopted, 1);
+    assert!(marker_path.exists());
+}
+
+#[tokio::test]
+async fn a_conflict_needs_an_explicit_force_naming_the_resource() {
+    let _guard = SERIAL.lock().await;
+    let marker = tempfile::tempdir().unwrap();
+    let marker_path = marker.path().join("stamped");
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"operations":["adopt"],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[{"kind":"dns.record","id":"a","attributes":{"content":"2","record_id":"cf-1"},"owned":false}],"conditions":[]}'
+      ;;
+    *'"op":"adopt"'*)
+      touch @MARKER@
+      echo '{"adopted":[{"id":"a","ok":true}],"conditions":[]}'
+      ;;
+  esac
+done
+"#
+        .replace("@MARKER@", marker_path.to_str().unwrap()),
+    );
+
+    let desired = vec![DesiredResource {
+        kind: "dns.record".to_string(),
+        id: "a".to_string(),
+        attributes: serde_json::json!({ "content": "1" }),
+    }];
+
+    let plain = adopt(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired,
+        AdoptOptions {
+            apply: true,
+            force: Vec::new(),
+        },
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plain.eligible, 0);
+    assert_eq!(plain.conflicts.len(), 1);
+    assert_eq!(plain.adopted, 0);
+    assert!(!marker_path.exists());
+
+    let forced = adopt(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired,
+        AdoptOptions {
+            apply: true,
+            force: vec!["a".to_string()],
+        },
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(forced.eligible, 1);
+    assert_eq!(forced.adopted, 1);
+    assert!(marker_path.exists());
+}
+
+#[tokio::test]
+async fn a_provider_without_the_adopt_operation_is_refused() {
+    let _guard = SERIAL.lock().await;
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"ownership":"marker","settings_schema":{}}'
+      ;;
+  esac
+done
+"#,
+    );
+
+    let error = adopt(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &[],
+        AdoptOptions::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("a provider without adopt must be refused");
+    assert!(error.to_string().contains("adopt"), "{error}");
 }
 
 #[tokio::test]

@@ -180,7 +180,10 @@ entirely, so nothing half-applies.
 - `none`: read-only provider; it may never propose a change.
 
 Without a marker, a resource is foreign. Foreign resources are reported, never
-deleted, never modified.
+deleted, never modified. Taking ownership of an existing world is a separate,
+explicit operation (ADR-032): `nod provider adopt` stamps the marker on
+resources that already match the declaration, and a normal reconcile never
+does it.
 
 ### 7. Isolation
 
