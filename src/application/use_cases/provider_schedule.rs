@@ -55,6 +55,14 @@ impl ProviderSchedule {
         self.next_run = now + self.interval;
     }
 
+    /// Defers the next run by one interval without touching the failure count.
+    ///
+    /// Used when another process holds the provider's lock: the work is being
+    /// done, so this is neither a success nor a failure.
+    pub fn deferred(&mut self, now: Instant) {
+        self.next_run = now + self.interval;
+    }
+
     /// Records a failure and returns the delay plus whether the condition
     /// changed since the previous failure.
     ///
@@ -154,6 +162,17 @@ mod tests {
         let mut schedule = schedule();
         schedule.failed(Instant::now(), Some("auth"), None);
         schedule.succeeded(Instant::now());
+        assert_eq!(schedule.condition(), None);
+    }
+
+    #[test]
+    fn a_deferral_keeps_the_failure_count() {
+        let mut schedule = schedule();
+        let now = Instant::now();
+        schedule.failed(now, None, None);
+        schedule.deferred(now);
+        assert!(!schedule.due(now));
+        assert!(schedule.due(now + Duration::from_secs(60)));
         assert_eq!(schedule.condition(), None);
     }
 

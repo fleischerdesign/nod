@@ -8,6 +8,7 @@ use crate::domain::errors::NodError;
 use crate::domain::provider::RollbackPlan;
 use crate::domain::sync::now_secs;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
+use crate::infrastructure::state::provider_lock::ProviderLock;
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs one reconcile cycle or one rollback, and renders the result.
@@ -43,6 +44,13 @@ pub async fn execute(
         .ok_or_else(|| {
             NodError::config("pass a provider name declared in the config, or --command <path>")
         })?;
+
+    // One reconciliation per provider at a time, across processes. An ad-hoc
+    // run without a name has no namespace to lock and stays unlocked.
+    let _lock = match provider {
+        Some(name) => Some(ProviderLock::acquire(state_dir, name)?),
+        None => None,
+    };
 
     let settings = match settings_path {
         Some(path) => read_json(path)?,
@@ -115,6 +123,15 @@ pub async fn execute(
         println!("rollback  recorded ({} operation(s))", report.inverse.len());
     }
 
+    let outcome = if !report.refused.is_empty() {
+        "refused"
+    } else if report.applied > 0 {
+        "applied"
+    } else {
+        "unchanged"
+    };
+    record_audit(&report.provider, outcome).await;
+
     if !apply {
         println!("\ndry run: pass --apply to execute the approved changes");
     }
@@ -159,7 +176,27 @@ async fn run_rollback(
     if report.refused.is_empty() {
         plans.clear(name)?;
     }
+    record_audit(
+        &report.provider,
+        if report.refused.is_empty() {
+            "rolled-back"
+        } else {
+            "rollback-refused"
+        },
+    )
+    .await;
     Ok(())
+}
+
+/// Records a provider run in the audit trail.
+///
+pub(crate) async fn record_audit(provider: &str, outcome: &str) {
+    use crate::domain::ports::audit_store::AuditStorePort;
+
+    let store = crate::infrastructure::storage::json_audit_store::JsonAuditStore::from_env();
+    if let Err(error) = store.record(&format!("provider:{provider}"), outcome).await {
+        tracing::warn!(provider, %error, "cannot record the provider run in the audit trail");
+    }
 }
 
 /// Reads a JSON file, mapping failures to configuration errors.

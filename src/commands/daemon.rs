@@ -26,6 +26,7 @@ use crate::domain::provider::{DesiredResource, RollbackPlan};
 use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
+use crate::infrastructure::state::provider_lock::ProviderLock;
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs reconciliation cycles until the process is stopped.
@@ -186,6 +187,17 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path) {
             continue;
         }
 
+        // A one-shot run or another daemon may hold the lock; that is not a
+        // failure, it is someone else doing the work.
+        let Ok(_lock) = ProviderLock::acquire(state_dir, &entry.name) else {
+            tracing::debug!(
+                provider = %entry.name,
+                "another run holds the provider lock; deferring"
+            );
+            entry.schedule.deferred(Instant::now());
+            continue;
+        };
+
         let result = reconcile::execute(
             &entry.command,
             &entry.settings,
@@ -206,6 +218,14 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path) {
                     apply = entry.apply,
                     "provider reconcile"
                 );
+                let outcome = if !report.refused.is_empty() {
+                    "refused"
+                } else if report.applied > 0 {
+                    "applied"
+                } else {
+                    "unchanged"
+                };
+                crate::commands::reconcile::record_audit(&entry.name, outcome).await;
                 entry.schedule.succeeded(Instant::now());
 
                 // Record the inverse only for runs that actually changed the
@@ -227,6 +247,7 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path) {
                 }
             }
             Err(error) => {
+                crate::commands::reconcile::record_audit(&entry.name, "failed").await;
                 let (condition, retry_after) = match &error {
                     NodError::Auth { .. } => (Some("auth"), None),
                     NodError::RateLimited {
