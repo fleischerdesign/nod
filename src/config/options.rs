@@ -677,6 +677,12 @@ pub enum Commands {
         command: SecretCommands,
     },
 
+    /// Inspect and test provider executables (ADR-030)
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
+
     /// Manage Nix store operations (optimization and deduplication)
     Store {
         #[command(subcommand)]
@@ -884,6 +890,25 @@ pub enum CacheCommands {
         /// Emit cache push report as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProviderCommands {
+    /// Print the provider's handshake
+    Inspect {
+        /// Path to the provider executable
+        command: PathBuf,
+    },
+    /// Print the provider's settings schema
+    Schema {
+        /// Path to the provider executable
+        command: PathBuf,
+    },
+    /// Run the protocol conformance checks
+    Test {
+        /// Path to the provider executable
+        command: PathBuf,
     },
 }
 

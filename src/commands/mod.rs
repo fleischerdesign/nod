@@ -22,6 +22,7 @@ pub mod iso;
 pub mod lifecycle;
 pub mod metadata;
 pub mod plan;
+pub mod provider;
 pub mod reboot;
 pub mod repl;
 pub mod rollback;

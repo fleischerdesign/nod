@@ -36,9 +36,19 @@ pub enum NodError {
     /// Invariant / programming errors that should never surface in practice.
     #[error("internal error: {detail}")]
     Internal { detail: String },
+    /// Provider protocol or execution failures (ADR-030).
+    #[error("provider error: {detail}")]
+    Provider { detail: String },
 }
 
 impl NodError {
+    /// Raised when a provider cannot be started, breaks the protocol or fails.
+    pub fn provider(detail: impl Into<String>) -> Self {
+        NodError::Provider {
+            detail: detail.into(),
+        }
+    }
+
     /// Raised when a host answers but rejects our credentials.
     pub fn auth(detail: impl Into<String>) -> Self {
         NodError::Auth {

@@ -504,6 +504,17 @@ async fn run(cli: Cli) -> Result<()> {
             nod::commands::reboot::execute(ctx, &flake_path, &target_args, options, cli.verbose)
                 .await?;
         }
+        Commands::Provider { command } => match command {
+            nod::config::options::ProviderCommands::Inspect { command } => {
+                nod::commands::provider::inspect(&command).await?
+            }
+            nod::config::options::ProviderCommands::Schema { command } => {
+                nod::commands::provider::schema(&command).await?
+            }
+            nod::config::options::ProviderCommands::Test { command } => {
+                nod::commands::provider::test(&command).await?
+            }
+        },
         Commands::Secrets { command } => match command {
             nod::config::options::SecretCommands::Check {
                 target_args,

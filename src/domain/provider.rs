@@ -1,0 +1,228 @@
+//! Provider protocol types (ADR-030).
+//!
+//! A provider is a process the core talks to in JSON Lines. These types are the
+//! wire contract: the core owns them, providers implement them. Nothing here
+//! may depend on a concrete provider.
+
+use serde::{Deserialize, Serialize};
+
+/// Wire protocol major version. A provider with another major is rejected before
+/// it is started.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// First message: the core announces the protocol it speaks.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandshakeRequest {
+    /// Protocol major version.
+    pub protocol: u32,
+}
+
+/// Answer to [`HandshakeRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Handshake {
+    /// Provider name, e.g. `cloudflare`.
+    pub provider: String,
+    /// Provider implementation version, for support and `nod provider list`.
+    pub version: String,
+    /// Protocol major version the provider speaks.
+    pub protocol: u32,
+    /// What the provider can do; the core uses it to scope credentials.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// How the provider marks ownership.
+    pub ownership: OwnershipMode,
+    /// JSON Schema of the provider's `settings`.
+    #[serde(default)]
+    pub settings_schema: serde_json::Value,
+}
+
+/// How resources are attributed to the fleet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OwnershipMode {
+    /// Every resource carries a marker.
+    Marker,
+    /// The whole namespace belongs to the fleet; an explicit opt-in.
+    Namespace,
+    /// Read-only: the provider may never propose a change.
+    None,
+}
+
+impl OwnershipMode {
+    /// Whether this mode permits any write at all.
+    pub fn allows_writes(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// A resource as the provider sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObservedResource {
+    /// Resource kind, e.g. `dns.record`.
+    pub kind: String,
+    /// Provider-scoped identifier.
+    pub id: String,
+    /// Provider-specific attributes.
+    #[serde(default)]
+    pub attributes: serde_json::Value,
+    /// Whether the fleet owns it. Absent means `false`: unowned is the safe
+    /// default, and the core never deletes what it does not own.
+    #[serde(default)]
+    pub owned: bool,
+}
+
+/// A resource the declaration asks for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DesiredResource {
+    /// Resource kind.
+    pub kind: String,
+    /// Provider-scoped identifier.
+    pub id: String,
+    /// Provider-specific attributes.
+    #[serde(default)]
+    pub attributes: serde_json::Value,
+}
+
+/// What a change does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChangeKind {
+    /// Create a resource that does not exist.
+    Create,
+    /// Update an existing resource.
+    Update,
+    /// Delete a resource.
+    Delete,
+}
+
+/// One proposed change. `owned` and `destructive` are mandatory: a response
+/// without them is a protocol violation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Change {
+    /// What the change does.
+    pub kind: ChangeKind,
+    /// Whether the fleet owns the affected resource.
+    pub owned: bool,
+    /// Whether applying it removes or replaces state.
+    pub destructive: bool,
+    /// The resource the change affects.
+    pub resource: DesiredResource,
+}
+
+/// A condition the provider reports instead of failing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Condition {
+    /// Condition kind: `auth`, `rate-limited`, `transient`, `conflict`, …
+    pub kind: String,
+    /// Human-readable detail.
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Result of one applied change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppliedChange {
+    /// Resource identifier.
+    pub id: String,
+    /// Whether it was applied.
+    pub ok: bool,
+    /// Optional detail.
+    #[serde(default)]
+    pub message: String,
+}
+
+/// `observe` request.
+#[derive(Debug, Clone, Serialize)]
+pub struct ObserveRequest<'a> {
+    /// Operation name.
+    pub op: &'static str,
+    /// Provider settings, opaque to the core.
+    pub config: &'a serde_json::Value,
+}
+
+/// `observe` response.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ObserveResponse {
+    /// Observed resources.
+    #[serde(default)]
+    pub resources: Vec<ObservedResource>,
+    /// Conditions reported by the provider.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+/// `plan` request.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanRequest<'a> {
+    /// Operation name.
+    pub op: &'static str,
+    /// What the declaration asks for.
+    pub desired: &'a [DesiredResource],
+    /// What the provider observed.
+    pub observed: &'a [ObservedResource],
+}
+
+/// `plan` response.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlanResponse {
+    /// Proposed changes.
+    #[serde(default)]
+    pub changes: Vec<Change>,
+    /// Conditions reported by the provider.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+/// `apply` request: only changes the core approved.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyRequest<'a> {
+    /// Operation name.
+    pub op: &'static str,
+    /// Approved changes.
+    pub changes: &'a [Change],
+}
+
+/// `apply` response.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApplyResponse {
+    /// Per-change results.
+    #[serde(default)]
+    pub applied: Vec<AppliedChange>,
+    /// Conditions reported by the provider.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_absent_owned_flag_means_unowned() {
+        let resource: ObservedResource =
+            serde_json::from_str(r#"{"kind":"dns.record","id":"web1"}"#).unwrap();
+        assert!(!resource.owned);
+    }
+
+    #[test]
+    fn ownership_serialises_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&OwnershipMode::Namespace).unwrap(),
+            "\"namespace\""
+        );
+    }
+
+    #[test]
+    fn a_change_without_destructive_is_invalid() {
+        let parsed: Result<Change, _> = serde_json::from_str(
+            r#"{"kind":"delete","owned":true,"resource":{"kind":"dns.record","id":"x"}}"#,
+        );
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn read_only_ownership_forbids_writes() {
+        assert!(!OwnershipMode::None.allows_writes());
+        assert!(OwnershipMode::Marker.allows_writes());
+    }
+}

@@ -5,6 +5,7 @@ pub mod deployment;
 pub mod git;
 pub mod health;
 pub mod nix;
+pub mod provider;
 pub mod provision;
 pub mod quality_gate;
 pub mod secret;
