@@ -295,20 +295,22 @@ impl DeployerPort for LocalDeployer {
             host = %host.name,
             "Rolling back local host to previous generation..."
         );
-        // Re-invoke the prior generation's profile or ask nixos-rebuild to
-        // switch back to the previous known-good configuration (ADR-003).
-        let status = Command::new("nixos-rebuild")
-            .args(["--rollback", "switch"])
+        // Re-invoke the previous generation's switch directly. Asking
+        // `nixos-rebuild --rollback` resolves `/etc/nixos` first and fails
+        // before it rolls anything back (see `rollback::ROLLBACK_SCRIPT`).
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(crate::infrastructure::deployment::rollback::ROLLBACK_SCRIPT)
             .status()
             .await;
         if status.is_err() {
             return Err(NodError::rollback_failure(
-                "failed to launch `nixos-rebuild --rollback`",
+                "failed to launch the rollback script",
             ));
         }
         if !status.unwrap().success() {
             return Err(NodError::rollback_failure(
-                "nixos-rebuild --rollback reported failure",
+                "the rollback script reported failure",
             ));
         }
         Ok(())

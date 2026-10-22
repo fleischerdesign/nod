@@ -240,8 +240,10 @@ impl DeployerPort for SshCliDeployer {
             )));
         }
 
-        // Roll back by switching to the previous known-good configuration.
-        let remote_cmd = "nixos-rebuild --rollback switch".to_string();
+        // Roll back by switching the previous generation directly. A flake
+        // reference here would make the rollback depend on `/etc/nixos`
+        // existing, which is exactly what fails when it is needed.
+        let remote_cmd = crate::infrastructure::deployment::rollback::ROLLBACK_SCRIPT.to_string();
         let rollback_args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
         let rollback_status = run_ssh_inherited("ssh", &rollback_args, || {
             NodError::rollback_failure(format!("failed to launch ssh rollback for {}", host.name))
