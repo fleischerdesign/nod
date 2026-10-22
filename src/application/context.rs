@@ -231,6 +231,7 @@ impl AppContext {
 mod tests {
     use super::*;
     use crate::domain::config::{FleetDefaults, HostOverrides};
+    use crate::domain::health::DeploymentReport;
     use crate::domain::host::{BuilderHost, SshProfile};
     use async_trait::async_trait;
     use mockall::mock;
@@ -251,7 +252,7 @@ mod tests {
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
             async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<DeploymentReport, NodError>;
             async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }

@@ -9,7 +9,7 @@ use std::time::Instant;
 use tokio::process::Command;
 
 use crate::domain::errors::NodError;
-use crate::domain::health::HealthSnapshot;
+use crate::domain::health::{DeploymentReport, HealthSnapshot, HealthVerdict};
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::deployer::DeployerPort;
 
@@ -92,40 +92,28 @@ fn sanitize_unit_name(name: &str) -> String {
         .collect()
 }
 
-/// Verifies the freshly activated local system.
+/// Verifies the freshly activated local system against its baseline.
+///
+/// Returns the verdict; an `Err` means the probe itself could not run, which
+/// the caller reports as `Unverified` rather than as a failed deployment.
 async fn verify_local_health(
     host: &HostEntity,
     baseline: Option<&HealthSnapshot>,
-) -> Result<(), NodError> {
+) -> Result<HealthVerdict, NodError> {
     use crate::domain::health::verdict_against;
-    use crate::domain::health::HealthVerdict;
     use crate::infrastructure::health::probe;
-
-    if !probe::enabled(host) {
-        return Ok(());
-    }
 
     let failed =
         run_local_probe(host, "systemctl", &["--failed", "--no-legend", "--plain"]).await?;
     let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND]).await?;
     let current = probe::snapshot(host, &failed, &restarting);
 
-    match verdict_against(baseline, &current) {
-        HealthVerdict::Degraded { units } => Err(NodError::health_check(format!(
-            "host {} degraded after activation: {}",
-            host.name,
-            units.join(", ")
-        ))),
-        HealthVerdict::DegradedPreExisting { units } => {
-            tracing::warn!(
-                host = %host.name,
-                units = %units.join(", "),
-                "health problems predate this deployment; not rolling back"
-            );
-            Ok(())
-        }
-        HealthVerdict::Healthy => Ok(()),
-    }
+    Ok(verdict_against(baseline, &current))
+}
+
+/// Whether the running system asks for a reboot to complete the change.
+fn reboot_required() -> bool {
+    Path::new("/run/reboot-required").exists()
 }
 
 /// Observes the local host's health inputs, tolerating probe failures.
@@ -221,7 +209,8 @@ impl DeployerPort for LocalDeployer {
         closure: &Path,
         action: &str,
         verbose: bool,
-    ) -> Result<(), NodError> {
+    ) -> Result<DeploymentReport, NodError> {
+        use crate::infrastructure::health::probe;
         let start = Instant::now();
         tracing::info!(host = %host.name, "Activating configuration...");
 
@@ -276,7 +265,20 @@ impl DeployerPort for LocalDeployer {
             ));
         }
 
-        verify_local_health(host, baseline.as_ref()).await?;
+        let health = if !probe::enabled(host) {
+            HealthVerdict::Unverified {
+                reason: "health checks are disabled for this host".to_string(),
+            }
+        } else if reboot_required() {
+            HealthVerdict::PendingReboot
+        } else {
+            match verify_local_health(host, baseline.as_ref()).await {
+                Ok(verdict) => verdict,
+                Err(error) => HealthVerdict::Unverified {
+                    reason: error.to_string(),
+                },
+            }
+        };
 
         if verbose {
             tracing::debug!(
@@ -285,7 +287,7 @@ impl DeployerPort for LocalDeployer {
                 "Activation finished"
             );
         }
-        Ok(())
+        Ok(DeploymentReport { health })
     }
 
     async fn rollback(&self, host: &HostEntity, _profile: &SshProfile) -> Result<(), NodError> {

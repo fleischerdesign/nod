@@ -41,6 +41,9 @@ pub struct HostOutcome {
     /// passed, `Some(false)` = checker present and failed, `None` = no
     /// checker was bound (verification never ran).
     pub health_verified: Option<bool>,
+    /// The verdict the deployment itself reached (ADR-029). `None` for
+    /// outcomes that never activated (dry run, build failure).
+    pub health_verdict: Option<crate::domain::health::HealthVerdict>,
 }
 
 impl HostOutcome {
@@ -56,6 +59,7 @@ impl HostOutcome {
             rolled_back: state == DeploymentState::RolledBack,
             failure: None,
             health_verified: None,
+            health_verdict: None,
         }
     }
 }
@@ -324,7 +328,7 @@ async fn run_host(
             .await
         }
     };
-    let activation = deployer
+    let report = match deployer
         .deploy_and_activate(
             &host,
             &profile,
@@ -332,48 +336,81 @@ async fn run_host(
             &activation_action,
             options.verbose,
         )
-        .await;
-    if activation.is_err() {
-        return end_host(
-            &mut machine,
-            DeploymentEvent::SwitchFail,
-            &host,
-            &options,
-            &ctx,
-        )
-        .await;
-    }
+        .await
+    {
+        Ok(report) => report,
+        Err(_) => {
+            return end_host(
+                &mut machine,
+                DeploymentEvent::SwitchFail,
+                &host,
+                &options,
+                &ctx,
+            )
+            .await
+        }
+    };
 
     machine
         .tick(DeploymentEvent::SwitchOk)
         .expect("Switching accepts SwitchOk -> Verifying");
 
-    if let Some(health) = ctx.health_checker_opt() {
-        let verified = health.verify_health(&host).await;
-        if verified.is_err() || !verified.unwrap() {
-            let mut outcome = end_host(
-                &mut machine,
-                DeploymentEvent::VerifyFail,
-                &host,
-                &options,
-                &ctx,
-            )
-            .await;
-            outcome.health_verified = Some(false);
-            return outcome;
-        }
-        machine
-            .tick(DeploymentEvent::VerifyOk)
-            .expect("Verifying accepts VerifyOk -> Completed");
-        let mut outcome = HostOutcome::new(host.name, machine.state());
-        outcome.health_verified = Some(true);
+    use crate::domain::health::HealthVerdict;
+
+    // Only a regression is the deployment's own damage; everything else is
+    // reported, not punished (ADR-029).
+    if let HealthVerdict::Degraded { units } = &report.health {
+        tracing::error!(
+            host = %host.name,
+            units = %units.join(", "),
+            "deployment degraded the host"
+        );
+        let mut outcome = end_host(
+            &mut machine,
+            DeploymentEvent::VerifyFail,
+            &host,
+            &options,
+            &ctx,
+        )
+        .await;
+        outcome.health_verified = Some(false);
+        outcome.health_verdict = Some(report.health);
         return outcome;
+    }
+
+    match &report.health {
+        HealthVerdict::DegradedPreExisting { units } => tracing::warn!(
+            host = %host.name,
+            units = %units.join(", "),
+            "health problems predate this deployment; not rolling back"
+        ),
+        HealthVerdict::Unverified { reason } => tracing::warn!(
+            host = %host.name,
+            reason = %reason,
+            "deployment could not be verified"
+        ),
+        HealthVerdict::PendingReboot => tracing::warn!(
+            host = %host.name,
+            "activation requires a reboot before it takes effect"
+        ),
+        _ => {}
     }
 
     machine
         .tick(DeploymentEvent::VerifyOk)
         .expect("Verifying accepts VerifyOk -> Completed");
-    HostOutcome::new(host.name, machine.state())
+
+    let mut outcome = HostOutcome::new(host.name, machine.state());
+    // `health_verified` keeps its historical shape: `Some(true)` when the host
+    // was observed healthy, `Some(false)` never reaches this line (Degraded
+    // returns above), and `None` when there was nothing to observe.
+    outcome.health_verified = match report.health {
+        HealthVerdict::Healthy | HealthVerdict::DegradedPreExisting { .. } => Some(true),
+        HealthVerdict::Unverified { .. } | HealthVerdict::PendingReboot => None,
+        HealthVerdict::Degraded { .. } => Some(false),
+    };
+    outcome.health_verdict = Some(report.health);
+    outcome
 }
 
 /// Bounded concurrent collector (ADR-005): runs `tasks` under a shared
@@ -436,10 +473,10 @@ async fn end_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::health::DeploymentReport;
     use crate::domain::host::{BuilderHost, SshProfile};
     use crate::domain::ports::deployer::DeployerPort;
     use crate::domain::ports::evaluator::EvaluatorPort;
-    use crate::domain::ports::health_checker::HealthCheckerPort;
     use async_trait::async_trait;
     use mockall::mock;
     use std::path::PathBuf;
@@ -450,7 +487,7 @@ mod tests {
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
             async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<DeploymentReport, NodError>;
             async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }
@@ -461,14 +498,6 @@ mod tests {
         impl EvaluatorPort for FakeEvaluator {
             async fn discover_hosts(&self, flake_path: &Path, verbose: bool) -> Result<Vec<HostEntity>, NodError>;
             async fn build_toplevel<'a>(&self, flake_path: &Path, host_name: &str, _closure_attr: Option<String>, builder: Option<&'a BuilderHost>, verbose: bool) -> Result<PathBuf, NodError>;
-        }
-    }
-
-    mock! {
-        FakeHealthChecker {}
-        #[async_trait]
-        impl HealthCheckerPort for FakeHealthChecker {
-            async fn verify_health(&self, host: &HostEntity) -> Result<bool, NodError>;
         }
     }
 
@@ -483,20 +512,6 @@ mod tests {
             Arc::new(local),
             Arc::new(ssh),
         ))
-    }
-
-    /// `ctx_with` plus a bound health checker.
-    fn ctx_with_checker(
-        eval: MockFakeEvaluator,
-        local: MockFakeDeployer,
-        checker: MockFakeHealthChecker,
-    ) -> Arc<AppContext> {
-        let inner = AppContext::new(
-            Arc::new(eval),
-            Arc::new(local),
-            Arc::new(MockFakeDeployer::new()),
-        );
-        Arc::new(inner.with_health_checker(Arc::new(checker)))
     }
 
     fn options_with(action: DeploymentAction) -> DeploymentOptions {
@@ -520,7 +535,7 @@ mod tests {
             .expect_deploy_and_activate()
             .times(1)
             .withf(|_, _, _, action, _| action == "test")
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(DeploymentReport::healthy()));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -553,7 +568,7 @@ mod tests {
             .expect_deploy_and_activate()
             .times(1)
             .withf(|_, _, _, action, _| action == "boot")
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(DeploymentReport::healthy()));
 
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
@@ -700,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deploy_without_checker_reports_health_unverified_ok() {
+    async fn deployer_reporting_unverified_keeps_health_verified_none() {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
@@ -710,9 +725,8 @@ mod tests {
         local
             .expect_deploy_and_activate()
             .times(1)
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(DeploymentReport::unverified("probe failed")));
 
-        // `ctx_with` binds no health checker: verification never runs.
         let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DeployFleetUseCase::new(ctx);
@@ -730,10 +744,14 @@ mod tests {
         assert_eq!(outcome.state, DeploymentState::Completed);
         assert!(outcome.ok);
         assert_eq!(outcome.health_verified, None);
+        assert!(matches!(
+            outcome.health_verdict,
+            Some(crate::domain::health::HealthVerdict::Unverified { .. })
+        ));
     }
 
     #[tokio::test]
-    async fn failing_health_checker_marks_host_failed_health_false() {
+    async fn deployer_reporting_degraded_fails_the_host() {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
@@ -743,15 +761,15 @@ mod tests {
         local
             .expect_deploy_and_activate()
             .times(1)
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| {
+                Ok(DeploymentReport {
+                    health: crate::domain::health::HealthVerdict::Degraded {
+                        units: vec!["crowdsec.service".to_string()],
+                    },
+                })
+            });
 
-        let mut checker = MockFakeHealthChecker::new();
-        checker
-            .expect_verify_health()
-            .times(1)
-            .returning(|_| Ok(false));
-
-        let ctx = ctx_with_checker(eval, local, checker);
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DeployFleetUseCase::new(ctx);
 
@@ -769,10 +787,14 @@ mod tests {
         assert_eq!(outcome.state, DeploymentState::Failed);
         assert!(!outcome.ok);
         assert_eq!(outcome.health_verified, Some(false));
+        assert!(matches!(
+            outcome.health_verdict,
+            Some(crate::domain::health::HealthVerdict::Degraded { .. })
+        ));
     }
 
     #[tokio::test]
-    async fn passing_health_checker_marks_host_health_verified_true() {
+    async fn deployer_reporting_healthy_marks_health_verified_true() {
         let mut eval = MockFakeEvaluator::new();
         eval.expect_build_toplevel()
             .times(1)
@@ -782,20 +804,12 @@ mod tests {
         local
             .expect_deploy_and_activate()
             .times(1)
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(DeploymentReport::healthy()));
 
-        let mut checker = MockFakeHealthChecker::new();
-        checker
-            .expect_verify_health()
-            .times(1)
-            .returning(|_| Ok(true));
-
-        let ctx = ctx_with_checker(eval, local, checker);
+        let ctx = ctx_with(eval, local, MockFakeDeployer::new());
         let host = HostEntity::new("jello", "jello-machine", true);
         let use_case = DeployFleetUseCase::new(ctx);
 
-        // auto_rollback is false, so VerifyOk lands in `Completed` and the
-        // passing checker must be recorded as Some(true) health_verified.
         let summary = use_case
             .execute(
                 vec![host],
@@ -809,6 +823,10 @@ mod tests {
         assert_eq!(outcome.state, DeploymentState::Completed);
         assert!(outcome.ok);
         assert_eq!(outcome.health_verified, Some(true));
+        assert_eq!(
+            outcome.health_verdict,
+            Some(crate::domain::health::HealthVerdict::Healthy)
+        );
     }
 
     #[tokio::test]

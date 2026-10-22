@@ -61,6 +61,14 @@ pub enum HealthVerdict {
         /// Units that were already degraded, ordered.
         units: Vec<String>,
     },
+    /// The deployment could not be observed: checks are disabled, or the probe
+    /// itself failed. Never reported as healthy, never rolled back.
+    Unverified {
+        /// Why no observation was possible.
+        reason: String,
+    },
+    /// The new configuration needs a reboot before it takes effect.
+    PendingReboot,
 }
 
 impl HealthVerdict {
@@ -76,8 +84,46 @@ impl HealthVerdict {
     /// The units this verdict names, ordered.
     pub fn units(&self) -> &[String] {
         match self {
-            Self::Healthy => &[],
+            Self::Healthy | Self::PendingReboot | Self::Unverified { .. } => &[],
             Self::Degraded { units } | Self::DegradedPreExisting { units } => units,
+        }
+    }
+
+    /// Whether the fleet may treat this host as converged.
+    ///
+    /// Only `Healthy` counts. `PendingReboot` still owes a reboot and
+    /// `Unverified` was never observed; calling either converged is the
+    /// confusion this taxonomy exists to remove.
+    pub fn is_converged(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
+/// What one host's deployment produced, beyond "it did not error".
+///
+/// Activation errors stay errors; this is the verdict about the state the
+/// activation left behind, which the caller needs in order to decide whether to
+/// roll back, keep going, or report an unobserved host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentReport {
+    /// What verification concluded.
+    pub health: HealthVerdict,
+}
+
+impl DeploymentReport {
+    /// A report that could not observe the host.
+    pub fn unverified(reason: impl Into<String>) -> Self {
+        Self {
+            health: HealthVerdict::Unverified {
+                reason: reason.into(),
+            },
+        }
+    }
+
+    /// A report that observed the host and found it healthy.
+    pub fn healthy() -> Self {
+        Self {
+            health: HealthVerdict::Healthy,
         }
     }
 }

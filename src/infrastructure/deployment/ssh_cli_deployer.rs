@@ -9,7 +9,7 @@ use std::time::Instant;
 use tokio::process::Command;
 
 use crate::domain::errors::NodError;
-use crate::domain::health::HealthSnapshot;
+use crate::domain::health::{DeploymentReport, HealthSnapshot, HealthVerdict};
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::plan::DeploymentAction;
 use crate::domain::ports::deployer::DeployerPort;
@@ -127,7 +127,8 @@ impl DeployerPort for SshCliDeployer {
         closure: &Path,
         action: &str,
         verbose: bool,
-    ) -> Result<(), NodError> {
+    ) -> Result<DeploymentReport, NodError> {
+        use crate::infrastructure::health::probe;
         let start = Instant::now();
 
         // AC3: validate the action against the deployment allow-list and quote
@@ -185,7 +186,21 @@ impl DeployerPort for SshCliDeployer {
             return Err(NodError::remote_activate(host.name.clone()));
         }
 
-        verify_remote_health(host, profile, baseline.as_ref()).await?;
+        let health = if !probe::enabled(host) {
+            HealthVerdict::Unverified {
+                reason: "health checks are disabled for this host".to_string(),
+            }
+        } else {
+            match run_remote_probe(host, profile, probe::REBOOT_REQUIRED_COMMAND).await {
+                Ok(output) if probe::reboot_required(&output) => HealthVerdict::PendingReboot,
+                _ => match verify_remote_health(host, profile, baseline.as_ref()).await {
+                    Ok(verdict) => verdict,
+                    Err(error) => HealthVerdict::Unverified {
+                        reason: error.to_string(),
+                    },
+                },
+            }
+        };
 
         if verbose {
             tracing::debug!(
@@ -195,7 +210,7 @@ impl DeployerPort for SshCliDeployer {
             );
         }
 
-        Ok(())
+        Ok(DeploymentReport { health })
     }
 
     async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
@@ -454,35 +469,15 @@ async fn verify_remote_health(
     host: &HostEntity,
     profile: &SshProfile,
     baseline: Option<&HealthSnapshot>,
-) -> Result<(), NodError> {
+) -> Result<HealthVerdict, NodError> {
     use crate::domain::health::verdict_against;
-    use crate::domain::health::HealthVerdict;
     use crate::infrastructure::health::probe;
-
-    if !probe::enabled(host) {
-        return Ok(());
-    }
 
     let failed = run_remote_probe(host, profile, probe::FAILED_UNITS_COMMAND).await?;
     let restarting = run_remote_probe(host, profile, probe::RESTARTING_UNITS_COMMAND).await?;
     let current = probe::snapshot(host, &failed, &restarting);
 
-    match verdict_against(baseline, &current) {
-        HealthVerdict::Degraded { units } => Err(NodError::health_check(format!(
-            "host {} degraded after activation: {}",
-            host.name,
-            units.join(", ")
-        ))),
-        HealthVerdict::DegradedPreExisting { units } => {
-            tracing::warn!(
-                host = %host.name,
-                units = %units.join(", "),
-                "health problems predate this deployment; not rolling back"
-            );
-            Ok(())
-        }
-        HealthVerdict::Healthy => Ok(()),
-    }
+    Ok(verdict_against(baseline, &current))
 }
 
 /// Observes the remote host's health inputs, tolerating probe failures.

@@ -124,6 +124,7 @@ pub async fn execute_lifecycle(
 mod tests {
     use super::*;
     use crate::domain::config::{FleetDefaults, HostOverrides};
+    use crate::domain::health::DeploymentReport;
     use crate::domain::host::SshProfile;
     use crate::domain::ports::config_store::ConfigStorePort;
     use crate::domain::ports::deployer::DeployerPort;
@@ -138,7 +139,7 @@ mod tests {
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
             async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<DeploymentReport, NodError>;
             async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }
@@ -269,7 +270,7 @@ mod tests {
         local.expect_check_reachability().returning(|_| Ok(true));
         local
             .expect_deploy_and_activate()
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(DeploymentReport::healthy()));
 
         let mut store = MockFakeConfigStore::new();
         store.expect_apply_to().returning(Ok);
@@ -297,7 +298,7 @@ mod tests {
         local.expect_check_reachability().returning(|_| Ok(true));
         local
             .expect_deploy_and_activate()
-            .returning(|_, _, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(DeploymentReport::healthy()));
 
         let mut store = MockFakeConfigStore::new();
         store.expect_apply_to().returning(Ok);

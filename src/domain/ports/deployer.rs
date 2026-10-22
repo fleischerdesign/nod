@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
 use crate::domain::errors::NodError;
+use crate::domain::health::DeploymentReport;
 use crate::domain::host::{HostEntity, SshProfile};
 
 /// Deploys (and when requested, rolls back) a host configuration.
@@ -31,7 +32,8 @@ pub trait DeployerPort: Send + Sync {
 
     /// Transfers the closure and activates the new system configuration.
     /// `action` is the switch-to-configuration subcommand: `switch`, `test`
-    /// or `boot`.
+    /// or `boot`. The returned report carries what verification concluded;
+    /// activation failures stay errors.
     async fn deploy_and_activate(
         &self,
         host: &HostEntity,
@@ -39,7 +41,7 @@ pub trait DeployerPort: Send + Sync {
         closure: &Path,
         action: &str,
         verbose: bool,
-    ) -> Result<(), NodError>;
+    ) -> Result<DeploymentReport, NodError>;
 
     /// Reverts a host to its previously known-good generation profile.
     async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;

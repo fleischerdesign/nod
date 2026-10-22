@@ -62,6 +62,19 @@ pub fn checks_restart_loops(host: &HostEntity) -> bool {
         .unwrap_or(true)
 }
 
+/// Command that reports whether the host asks for a reboot.
+///
+/// `switch-to-configuration` writes `/run/reboot-required` when the new
+/// generation cannot take effect without one; the answer is printed rather
+/// than signalled so a missing marker is a clean exit, not a failed probe.
+pub const REBOOT_REQUIRED_COMMAND: &str =
+    "if [ -e /run/reboot-required ]; then echo yes; else echo no; fi";
+
+/// Whether the reboot marker was reported.
+pub fn reboot_required(output: &str) -> bool {
+    output.trim() == "yes"
+}
+
 /// Unit names from the restarting-units probe, one per line.
 pub fn restarting_units(output: &str) -> Vec<String> {
     output

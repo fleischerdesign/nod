@@ -137,6 +137,7 @@ mod tests {
     use crate::domain::generation::{
         CopyOptions, CopyReport, GcOptions, GcReport, SystemGeneration,
     };
+    use crate::domain::health::DeploymentReport;
     use crate::domain::host::{HostEntity, SshProfile};
     use crate::domain::ports::deployer::DeployerPort;
     use crate::domain::ports::evaluator::EvaluatorPort;
@@ -161,7 +162,7 @@ mod tests {
         impl DeployerPort for FakeDeployer {
             async fn check_reachability(&self, host: &HostEntity) -> Result<bool, NodError>;
             async fn current_closure(&self, host: &HostEntity, profile: &SshProfile) -> Result<Option<PathBuf>, NodError>;
-            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<(), NodError>;
+            async fn deploy_and_activate(&self, host: &HostEntity, profile: &SshProfile, closure: &Path, action: &str, verbose: bool) -> Result<DeploymentReport, NodError>;
             async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
         }
     }
