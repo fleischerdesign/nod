@@ -34,9 +34,10 @@ impl CfError {
     /// Human-readable detail.
     pub fn detail(&self) -> &str {
         match self {
-            CfError::Auth(detail) | CfError::RateLimited(detail) | CfError::Transient(detail) => {
-                detail
-            }
+            CfError::Auth(detail)
+            | CfError::RateLimited(detail)
+            | CfError::Config(detail)
+            | CfError::Transient(detail) => detail,
         }
     }
 }
