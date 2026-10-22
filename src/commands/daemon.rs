@@ -57,6 +57,12 @@ pub async fn execute(
         Vec::new()
     };
 
+    // SIGHUP reloads the configuration file and the fleet declaration. Flags
+    // and the environment are read at start; a running process cannot change
+    // its environment.
+    let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|error| NodError::config(format!("cannot watch SIGHUP: {error}")))?;
+
     loop {
         let mut wake = next_sweep;
         if let Some(gate) = next_gate {
@@ -65,7 +71,25 @@ pub async fn execute(
         for entry in &providers {
             wake = wake.min(entry.schedule.next_run());
         }
-        tokio::time::sleep_until(wake).await;
+        tokio::select! {
+            _ = tokio::time::sleep_until(wake) => {}
+            _ = reload.recv() => {
+                match load_providers(flake_path, config).await {
+                    Ok(entries) => {
+                        providers = entries;
+                        tracing::info!(
+                            providers = providers.len(),
+                            "SIGHUP: fleet declaration reloaded"
+                        );
+                    }
+                    Err(error) => tracing::error!(
+                        %error,
+                        "SIGHUP: reload failed; keeping the previous declaration"
+                    ),
+                }
+                continue;
+            }
+        }
 
         // Independent providers run on their own cadence, whenever the loop wakes.
         reconcile_due(

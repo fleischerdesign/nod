@@ -139,6 +139,8 @@ once. A value whose origin is unknown does not exist.
   operational flags (interval, targets), which are per-process by nature.
 - Non-Nix users get the same model through one file; nothing in the core assumes
   a flake is present.
+- A running daemon reloads the file and the fleet on SIGHUP; environment
+  variables and flags are start-time inputs.
 - The file parser must reject unknown keys: a typo is an error, not a default.
 
 ## Rejected alternatives
@@ -157,8 +159,10 @@ once. A value whose origin is unknown does not exist.
 2. The `nod` flake output: schema, validation, `nix eval` reader.
 3. Strict TOML parsing (`deny_unknown_fields`) and path resolution relative to
    the file.
-4. Environment mapping for the five operational keys.
-5. SIGHUP reload for file and environment; flags stay immutable per process.
+4. Environment mapping for the five operational keys. The environment is read
+   once at start: a running process cannot change it.
+5. SIGHUP reloads the configuration file and the fleet declaration; flags stay
+   immutable per process.
 
 ## Open questions
 
