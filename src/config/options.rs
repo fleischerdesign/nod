@@ -918,6 +918,12 @@ pub enum CacheCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum ProviderCommands {
+    /// List providers by their manifests without executing them
+    List {
+        /// Directory whose subdirectories contain a provider.json
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Print the provider's handshake
     Inspect {
         /// Path to the provider executable

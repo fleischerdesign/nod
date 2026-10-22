@@ -55,6 +55,47 @@ impl OwnershipMode {
     }
 }
 
+/// Static metadata shipped next to a provider binary.
+///
+/// `nod provider list` reads this instead of executing the provider: listing
+/// what is installed must not require running it. The handshake remains the
+/// runtime truth, and `nod provider test` compares the two.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    /// Provider name; must match the handshake.
+    pub name: String,
+    /// Implementation version.
+    pub version: String,
+    /// Protocol major version.
+    pub protocol: u32,
+    /// Declared capabilities.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Declared ownership mode.
+    pub ownership: OwnershipMode,
+    /// What the provider manages, in one sentence.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl Manifest {
+    /// Reads a manifest from `path`.
+    pub fn read(path: &std::path::Path) -> Result<Self, crate::domain::errors::NodError> {
+        let raw = std::fs::read_to_string(path).map_err(|error| {
+            crate::domain::errors::NodError::config(format!(
+                "cannot read manifest {}: {error}",
+                path.display()
+            ))
+        })?;
+        serde_json::from_str(&raw).map_err(|error| {
+            crate::domain::errors::NodError::config(format!(
+                "invalid manifest {}: {error}",
+                path.display()
+            ))
+        })
+    }
+}
+
 /// A resource as the provider sees it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ObservedResource {
@@ -241,5 +282,21 @@ mod tests {
     fn read_only_ownership_forbids_writes() {
         assert!(!OwnershipMode::None.allows_writes());
         assert!(OwnershipMode::Marker.allows_writes());
+    }
+
+    #[test]
+    fn a_manifest_declares_protocol_and_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.json");
+        std::fs::write(
+            &path,
+            r#"{"name":"example","version":"0.1.0","protocol":1,"ownership":"marker"}"#,
+        )
+        .unwrap();
+
+        let manifest = Manifest::read(&path).unwrap();
+        assert_eq!(manifest.name, "example");
+        assert_eq!(manifest.ownership, OwnershipMode::Marker);
+        assert!(manifest.capabilities.is_empty());
     }
 }

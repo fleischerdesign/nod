@@ -1,0 +1,8 @@
+{
+  "name": "example",
+  "version": "0.1.0",
+  "protocol": 1,
+  "capabilities": ["example.record"],
+  "ownership": "marker",
+  "description": "A minimal provider over a JSON file, for learning the protocol"
+}

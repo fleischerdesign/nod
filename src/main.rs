@@ -505,6 +505,9 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
         }
         Commands::Provider { command } => match command {
+            nod::config::options::ProviderCommands::List { dir } => {
+                nod::commands::provider::list(&dir).await?
+            }
             nod::config::options::ProviderCommands::Inspect { command } => {
                 nod::commands::provider::inspect(&command).await?
             }

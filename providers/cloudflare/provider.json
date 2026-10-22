@@ -1,0 +1,8 @@
+{
+  "name": "cloudflare",
+  "version": "0.1.0",
+  "protocol": 1,
+  "capabilities": ["dns.record"],
+  "ownership": "marker",
+  "description": "Cloudflare DNS records"
+}
