@@ -54,7 +54,8 @@ pub struct ReconcileReport {
 ///
 /// The rules, in order:
 /// 1. A read-only provider changes nothing.
-/// 2. A destructive change on a resource the fleet does not own is refused.
+/// 2. A change to a resource the fleet does not own is refused — create,
+///    update and delete alike. A foreign record is reported, never modified.
 /// 3. A delete of a protected id is refused even when owned.
 /// 4. A plan that would delete more than the cap is refused **as a whole**, so
 ///    nothing half-applies.
@@ -73,11 +74,7 @@ pub fn approve(
             refused.push(format!("{label}: provider is read-only"));
             continue;
         }
-        if change.destructive && !change.owned {
-            refused.push(format!("{label}: unowned resource"));
-            continue;
-        }
-        if change.kind == ChangeKind::Delete && !change.owned {
+        if !change.owned {
             refused.push(format!("{label}: unowned resource"));
             continue;
         }
@@ -432,6 +429,17 @@ mod tests {
         );
         assert!(approved.is_empty());
         assert!(refused[0].contains("unowned"));
+    }
+
+    #[test]
+    fn an_update_of_an_unowned_resource_is_refused() {
+        let (approved, refused) = approve(
+            &handshake(OwnershipMode::Marker),
+            &[change(ChangeKind::Update, false, false)],
+            &allows(0, &[]),
+        );
+        assert!(approved.is_empty());
+        assert!(refused[0].contains("unowned"), "{}", refused[0]);
     }
 
     #[test]
