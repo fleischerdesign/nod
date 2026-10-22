@@ -82,9 +82,6 @@
           pkg-config
           openssl
           lix
-          # The example provider is Python: the protocol is language-agnostic, and
-          # its integration test runs the example as a real provider would run.
-          python3
         ];
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
       };
