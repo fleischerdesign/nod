@@ -19,14 +19,14 @@ pub const FAILED_UNITS_COMMAND: &str = "systemctl --failed --no-legend --plain";
 /// that keeps dying is `activating`/`auto-restart`, not `failed`, so a restart
 /// loop is invisible to the failed-unit probe (ADR-029).
 ///
-/// The trailing `true` is load-bearing: without it the pipeline exits with the
-/// status of the last test, so a host with nothing restarting would report a
-/// failed probe instead of a clean one.
+/// The substate is read from the `--plain` table's fourth column rather than
+/// from one `systemctl show` per unit: a per-unit call can block while a unit
+/// is still activating, and a probe that hangs is worse than one that misses.
+///
+/// The trailing `true` keeps the exit status clean when nothing matches.
 pub const RESTARTING_UNITS_COMMAND: &str = concat!(
-    "systemctl list-units --all --plain --no-legend --state=activating --no-pager | ",
-    "while read -r unit _; do ",
-    "[ \"$(systemctl show -p SubState --value \"$unit\")\" = auto-restart ] && echo \"$unit\"; ",
-    "done; true"
+    "systemctl list-units --all --plain --no-legend --state=activating --no-pager ",
+    "| awk '$4 == \"auto-restart\" { print $1 }'; true"
 );
 
 /// Parses `systemctl --failed --no-legend --plain` output into unit names.
@@ -203,6 +203,16 @@ mod tests {
             vec!["crowdsec.service".to_string(), "foo.service".to_string()]
         );
         assert!(restarting_units("").is_empty());
+    }
+
+    #[test]
+    fn the_restart_probe_reads_the_table_instead_of_calling_per_unit() {
+        // A per-unit `systemctl show` can block while a unit is activating,
+        // and a probe that hangs costs the whole verification (measured on
+        // remote hosts that timed out at 60 s).
+        assert!(!RESTARTING_UNITS_COMMAND.contains("while read"));
+        assert!(!RESTARTING_UNITS_COMMAND.contains("systemctl show"));
+        assert!(RESTARTING_UNITS_COMMAND.contains("awk"));
     }
 
     #[test]
