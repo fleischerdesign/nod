@@ -35,6 +35,7 @@ pub async fn execute(
     flake_path: &Path,
     options: SyncOptions,
     reconcile_providers: bool,
+    config: Option<&Path>,
 ) -> Result<(), NodError> {
     sync::validate(&options)?;
     let ctx = wiring::with_sync(ctx, &options.state_dir)?;
@@ -51,7 +52,7 @@ pub async fn execute(
     // The provider loop shares the process but not the schedule: each provider
     // has its own API and its own rate limits (ADR-030).
     let mut providers = if reconcile_providers {
-        load_providers(flake_path)?
+        load_providers(flake_path, config)?
     } else {
         Vec::new()
     };
@@ -152,8 +153,14 @@ struct ProviderEntry {
 ///
 /// A provider without a `desired` file is not scheduled: the daemon has nothing
 /// to compare against, and guessing a declaration would be worse than skipping.
-fn load_providers(flake_path: &Path) -> Result<Vec<ProviderEntry>, NodError> {
-    let store = TomlConfigStore::new(flake_path, CliOverrides::default())?;
+fn load_providers(
+    flake_path: &Path,
+    config: Option<&Path>,
+) -> Result<Vec<ProviderEntry>, NodError> {
+    let store = match config {
+        Some(path) => TomlConfigStore::from_file(path, CliOverrides::default())?,
+        None => TomlConfigStore::new(flake_path, CliOverrides::default())?,
+    };
     let now = Instant::now();
     let mut entries = Vec::new();
 

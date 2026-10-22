@@ -719,6 +719,10 @@ pub enum Commands {
         /// Custom path to flake root directory
         #[arg(long, default_value = ".")]
         flake: String,
+
+        /// Configuration file to read instead of discovering `.nod.toml`
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 
     /// Manage Nix store operations (optimization and deduplication)
@@ -868,6 +872,10 @@ pub enum Commands {
         /// Also reconcile the providers declared in `[providers.<name>]`
         #[arg(long)]
         reconcile_providers: bool,
+
+        /// Configuration file to read instead of discovering `.nod.toml`
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 

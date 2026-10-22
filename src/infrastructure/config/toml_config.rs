@@ -285,6 +285,15 @@ impl TomlConfigStore {
         Ok(Self { cli, toml })
     }
 
+    /// Builds the store from an explicit file, skipping discovery.
+    ///
+    /// This is the seam for a configuration rendered by Nix: the file lives in
+    /// the store, and the daemon must read exactly it (ADR-004, ADR-030).
+    pub fn from_file(path: &Path, cli: CliOverrides) -> Result<Self, NodError> {
+        let toml = Self::parse(path)?;
+        Ok(Self { cli, toml })
+    }
+
     /// The `[providers.<name>]` entry, when the configuration declares one.
     pub fn provider(&self, name: &str) -> Option<&TomlProvider> {
         self.toml.providers.get(name)

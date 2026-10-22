@@ -25,10 +25,14 @@ pub async fn execute(
     apply: bool,
     rollback: bool,
     state_dir: &Path,
+    config: Option<&Path>,
     json: bool,
     flake: &str,
 ) -> Result<(), NodError> {
-    let store = TomlConfigStore::new(Path::new(flake), CliOverrides::default())?;
+    let store = match config {
+        Some(path) => TomlConfigStore::from_file(path, CliOverrides::default())?,
+        None => TomlConfigStore::new(Path::new(flake), CliOverrides::default())?,
+    };
 
     let configured = match provider {
         Some(name) => Some(store.provider(name).ok_or_else(|| {

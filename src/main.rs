@@ -530,6 +530,7 @@ async fn run(cli: Cli) -> Result<()> {
             state_dir,
             json,
             flake,
+            config,
         } => {
             nod::commands::reconcile::execute(
                 provider.as_deref(),
@@ -539,6 +540,7 @@ async fn run(cli: Cli) -> Result<()> {
                 apply,
                 rollback,
                 &state_dir,
+                config.as_deref(),
                 json,
                 &flake,
             )
@@ -781,12 +783,20 @@ async fn run(cli: Cli) -> Result<()> {
             flake,
             sync,
             reconcile_providers,
+            config,
         } => {
             let flake_path = effective_flake(Path::new(&flake), Path::new("."))?;
             let ctx = nod::commands::wiring::production(&flake_path, CliOverrides::default())?;
             let mut options = sync_options(sync, false);
             options.verbose = cli.verbose;
-            nod::commands::daemon::execute(ctx, &flake_path, options, reconcile_providers).await?;
+            nod::commands::daemon::execute(
+                ctx,
+                &flake_path,
+                options,
+                reconcile_providers,
+                config.as_deref(),
+            )
+            .await?;
         }
     }
 
