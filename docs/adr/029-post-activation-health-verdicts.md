@@ -160,9 +160,14 @@ healthy fleet.
 
 ### 8. Reporting
 
-`nod sync --json` and `nod status` expose the verdict per host, plus the reason
-when not healthy: unit name, state, and whether it was failing before. A verdict
-without a reason cannot be acted on.
+`nod sync status` and `nod sync status --json` expose the verdict per host,
+plus the reason when not healthy: unit name, state, and whether it was failing
+before. They also print `deployed` and `verified` as separate revisions, so a
+fleet at the remote revision with an unreachable host is not reported as
+verified. A verdict without a reason cannot be acted on.
+
+`nod status` stays the live reachability matrix: it probes now and does not read
+stored state, so it cannot answer what the last deployment concluded.
 
 ## Consequences
 
