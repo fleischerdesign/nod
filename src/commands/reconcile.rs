@@ -59,9 +59,7 @@ pub async fn execute(
     let settings = match settings_path {
         Some(path) => read_json(path)?,
         None => match configured.and_then(|entry| entry.settings.as_ref()) {
-            Some(value) => serde_json::to_value(value).map_err(|error| {
-                NodError::config(format!("cannot convert provider settings: {error}"))
-            })?,
+            Some(value) => value.clone(),
             None => serde_json::Value::Object(serde_json::Map::new()),
         },
     };

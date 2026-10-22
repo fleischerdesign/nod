@@ -193,8 +193,11 @@ pub struct TomlProvider {
     /// Path to the provider executable.
     pub command: PathBuf,
     /// Provider settings, opaque to nod and validated by the provider.
+    ///
+    /// Kept as JSON so a TOML file and a JSON file rendered by Nix carry the
+    /// same value without a conversion step.
     #[serde(default)]
-    pub settings: Option<toml::Value>,
+    pub settings: Option<serde_json::Value>,
     /// Desired state file for the daemon; without it the provider is not
     /// scheduled.
     #[serde(default)]
@@ -290,7 +293,26 @@ impl TomlConfigStore {
     /// This is the seam for a configuration rendered by Nix: the file lives in
     /// the store, and the daemon must read exactly it (ADR-004, ADR-030).
     pub fn from_file(path: &Path, cli: CliOverrides) -> Result<Self, NodError> {
-        let toml = Self::parse(path)?;
+        let raw = std::fs::read_to_string(path).map_err(|error| {
+            NodError::config_parse(format!("cannot read {}: {error}", path.display()))
+        })?;
+
+        // A file rendered by Nix is JSON (builtins.toJSON); a hand-written one
+        // is TOML. Both carry the same structure, so the extension decides the
+        // parser and nothing else changes.
+        let toml = if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            serde_json::from_str::<TomlConfig>(&raw).map_err(|error| {
+                NodError::config_parse(format!("invalid {}: {error}", path.display()))
+            })?
+        } else {
+            toml::from_str::<TomlConfig>(&raw).map_err(|error| {
+                NodError::config_parse(format!("invalid {}: {error}", path.display()))
+            })?
+        };
+
         Ok(Self { cli, toml })
     }
 

@@ -182,11 +182,7 @@ fn load_providers(
         let desired = reconcile::parse_desired(&raw)?;
 
         let settings = match &provider.settings {
-            Some(value) => serde_json::to_value(value).map_err(|error| {
-                NodError::config(format!(
-                    "cannot convert settings for provider {name}: {error}"
-                ))
-            })?,
+            Some(value) => value.clone(),
             None => serde_json::Value::Object(serde_json::Map::new()),
         };
 
