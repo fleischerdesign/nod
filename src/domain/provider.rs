@@ -215,22 +215,40 @@ pub struct InverseChange {
 /// - a deleted resource is created with the attributes it had;
 /// - an updated resource is updated back to its previous attributes.
 ///
-pub fn invert(applied: &[Change], observed: &[ObservedResource]) -> Vec<InverseChange> {
+pub fn invert(
+    applied: &[Change],
+    before: &[ObservedResource],
+    after: &[ObservedResource],
+) -> Vec<InverseChange> {
     let mut inverse = Vec::new();
 
     for change in applied {
         match change.kind {
-            ChangeKind::Create => inverse.push(InverseChange {
-                change: Change {
-                    kind: ChangeKind::Delete,
-                    owned: change.owned,
-                    destructive: true,
-                    resource: change.resource.clone(),
-                },
-                expected: Some(change.resource.clone()),
-            }),
+            ChangeKind::Create => {
+                // The undo needs the resource as the provider now reports it:
+                // only the post-apply observation carries the provider's own
+                // id, and without it the delete cannot name its target.
+                let created = after
+                    .iter()
+                    .find(|resource| resource.id == change.resource.id)
+                    .map(|resource| DesiredResource {
+                        kind: resource.kind.clone(),
+                        id: resource.id.clone(),
+                        attributes: resource.attributes.clone(),
+                    })
+                    .unwrap_or_else(|| change.resource.clone());
+                inverse.push(InverseChange {
+                    change: Change {
+                        kind: ChangeKind::Delete,
+                        owned: change.owned,
+                        destructive: true,
+                        resource: created.clone(),
+                    },
+                    expected: Some(created),
+                });
+            }
             ChangeKind::Update => {
-                let Some(previous) = observed
+                let Some(previous) = before
                     .iter()
                     .find(|resource| resource.id == change.resource.id)
                 else {
@@ -302,15 +320,30 @@ mod rollback_tests {
     }
 
     #[test]
-    fn a_create_is_undone_by_a_delete() {
-        let inverse = invert(&[change(ChangeKind::Create, "one", "v1")], &[]);
+    fn a_create_is_undone_by_a_delete_that_names_the_provider_record() {
+        let after = vec![ObservedResource {
+            kind: "dns.record".to_string(),
+            id: "one".to_string(),
+            attributes: json!({ "content": "v1", "record_id": "cf-123" }),
+            owned: true,
+        }];
+
+        let inverse = invert(&[change(ChangeKind::Create, "one", "v1")], &[], &after);
         assert_eq!(inverse[0].change.kind, ChangeKind::Delete);
+        assert_eq!(inverse[0].change.resource.attributes["record_id"], "cf-123");
         assert_eq!(inverse[0].expected.as_ref().unwrap().id, "one");
     }
 
     #[test]
+    fn a_create_without_a_post_apply_observation_still_has_an_undo() {
+        let inverse = invert(&[change(ChangeKind::Create, "one", "v1")], &[], &[]);
+        assert_eq!(inverse[0].change.kind, ChangeKind::Delete);
+        assert_eq!(inverse[0].change.resource.id, "one");
+    }
+
+    #[test]
     fn a_delete_is_undone_by_recreating_the_old_attributes() {
-        let inverse = invert(&[change(ChangeKind::Delete, "one", "old")], &[]);
+        let inverse = invert(&[change(ChangeKind::Delete, "one", "old")], &[], &[]);
         assert_eq!(inverse[0].change.kind, ChangeKind::Create);
         assert_eq!(inverse[0].change.resource.attributes["content"], "old");
         assert!(inverse[0].expected.is_none());
@@ -324,7 +357,7 @@ mod rollback_tests {
             attributes: json!({ "content": "old" }),
             owned: true,
         }];
-        let inverse = invert(&[change(ChangeKind::Update, "one", "new")], &observed);
+        let inverse = invert(&[change(ChangeKind::Update, "one", "new")], &observed, &[]);
         assert_eq!(inverse[0].change.kind, ChangeKind::Update);
         assert_eq!(inverse[0].change.resource.attributes["content"], "old");
         assert_eq!(

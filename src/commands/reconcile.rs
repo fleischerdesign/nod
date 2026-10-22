@@ -250,6 +250,7 @@ async fn run_rollback(
             "version": report.version,
             "restored": report.restored,
             "refused": report.refused,
+            "failed": report.failed,
         }))
         .map_err(|error| NodError::provider(format!("cannot render report: {error}")))?;
         println!("{text}");
@@ -260,17 +261,28 @@ async fn run_rollback(
         for reason in &report.refused {
             println!("          {reason}");
         }
+        println!("failed    {}", report.failed.len());
+        for reason in &report.failed {
+            println!("          {reason}");
+        }
     }
 
-    if report.refused.is_empty() {
+    // The plan is the only record of what still needs undoing; it survives a
+    // refusal or a provider failure.
+    let complete = report.refused.is_empty()
+        && report.failed.is_empty()
+        && report.restored == plan.changes.len();
+    if complete {
         plans.clear(name)?;
     }
     record_audit(
         &report.provider,
-        if report.refused.is_empty() {
+        if complete {
             "rolled-back"
-        } else {
+        } else if !report.refused.is_empty() {
             "rollback-refused"
+        } else {
+            "rollback-failed"
         },
     )
     .await;

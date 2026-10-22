@@ -127,13 +127,12 @@ pub async fn execute(
 
     let mut applied = 0;
     let mut failed = Vec::new();
-    let mut inverse = Vec::new();
+    let mut succeeded: Vec<Change> = Vec::new();
     if options.apply && !approved.is_empty() {
         let result = provider.apply(settings, &approved).await?;
 
         // A change counts as applied only when the provider reports it as ok.
         // A change with no result at all is unproven, and unproven is not done.
-        let mut succeeded: Vec<Change> = Vec::new();
         for change in &approved {
             let id = &change.resource.id;
             match result.applied.iter().find(|entry| &entry.id == id) {
@@ -142,17 +141,19 @@ pub async fn execute(
                 None => failed.push(format!("{id}: the provider reported no result")),
             }
         }
-
         applied = succeeded.len();
-        if !succeeded.is_empty() {
-            // Undo only what actually happened, computed from the observation
-            // taken before the apply.
-            inverse = crate::domain::provider::invert(&succeeded, &observed.resources);
-        }
     }
 
-    // Verification is a second observation, never "the API said 200".
+    // Verification is a second observation, never "the API said 200". It is
+    // also the only place that sees the provider's own id for a created
+    // resource, which the recorded undo needs.
     let after = provider.observe(settings).await?;
+    let inverse = if succeeded.is_empty() {
+        Vec::new()
+    } else {
+        crate::domain::provider::invert(&succeeded, &observed.resources, &after.resources)
+    };
+
     let verified = desired
         .iter()
         .filter(|want| {
@@ -239,6 +240,8 @@ pub struct RollbackReport {
     pub restored: usize,
     /// Refusals, when the world moved since the apply.
     pub refused: Vec<String>,
+    /// Changes the provider could not restore, classified when it said why.
+    pub failed: Vec<String>,
 }
 
 /// Applies the inverse of a recorded plan.
@@ -281,6 +284,7 @@ pub async fn rollback(
             version: handshake.version.clone(),
             restored: 0,
             refused,
+            failed: Vec::new(),
         });
     }
 
@@ -303,15 +307,31 @@ pub async fn rollback(
             version: handshake.version.clone(),
             restored: 0,
             refused,
+            failed: Vec::new(),
         });
     }
 
     let applied = provider.apply(settings, &approved).await?;
+
+    // An undo that did not happen must never look like one that did: the plan
+    // stays on disk until every recorded change is restored.
+    let mut restored = 0;
+    let mut failed = Vec::new();
+    for change in &approved {
+        let id = &change.resource.id;
+        match applied.applied.iter().find(|entry| &entry.id == id) {
+            Some(entry) if entry.ok => restored += 1,
+            Some(entry) => failed.push(format!("{id}: {}", describe_failure(entry))),
+            None => failed.push(format!("{id}: the provider reported no result")),
+        }
+    }
+
     Ok(RollbackReport {
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
-        restored: applied.applied.iter().filter(|entry| entry.ok).count(),
+        restored,
         refused: Vec::new(),
+        failed,
     })
 }
 

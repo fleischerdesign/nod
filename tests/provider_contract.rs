@@ -8,9 +8,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nod::application::use_cases::reconcile::{execute, ReconcileOptions};
+use nod::application::use_cases::reconcile::{execute, rollback, ReconcileOptions};
 use nod::domain::policy::Policy;
-use nod::domain::provider::DesiredResource;
+use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, RollbackPlan};
 
 /// These tests write an executable and spawn it. Run in parallel, one test's
 /// `fork` can inherit another's still-open write descriptor and make the
@@ -135,6 +135,66 @@ done
         report.failed
     );
     assert!(report.inverse.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_undo_is_reported_and_never_counted_as_restored() {
+    let _guard = SERIAL.lock().await;
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[{"kind":"dns.record","id":"a","attributes":{"content":"1"},"owned":true}],"conditions":[]}'
+      ;;
+    *'"op":"apply"'*)
+      echo '{"applied":[{"id":"a","ok":false,"error":{"kind":"auth","message":"token expired"}}],"conditions":[]}'
+      ;;
+  esac
+done
+"#,
+    );
+
+    let resource = DesiredResource {
+        kind: "dns.record".to_string(),
+        id: "a".to_string(),
+        attributes: serde_json::json!({ "content": "1" }),
+    };
+    let plan = RollbackPlan {
+        provider: "fake".to_string(),
+        applied_at: 1,
+        changes: vec![InverseChange {
+            change: Change {
+                kind: ChangeKind::Delete,
+                owned: true,
+                destructive: true,
+                resource: resource.clone(),
+            },
+            expected: Some(resource),
+        }],
+    };
+
+    let report = rollback(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &plan,
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.restored, 0);
+    assert_eq!(report.failed.len(), 1);
+    assert!(
+        report.failed[0].contains("auth: token expired"),
+        "{:?}",
+        report.failed
+    );
 }
 
 #[tokio::test]
