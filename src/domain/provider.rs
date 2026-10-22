@@ -185,6 +185,9 @@ pub struct ProviderError {
     pub kind: String,
     /// Human-readable detail.
     pub message: String,
+    /// Seconds to wait, when the provider knows (ADR-030).
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
 }
 
 /// Result of one applied change.

@@ -93,9 +93,10 @@ Rules that make the conversation safe:
 - Every change carries `owned` and `destructive`. A response without both is
   invalid.
 - An operation may fail, and a failure is its own answer:
-  `{"error": {"kind": "auth", "message": "…"}}`. It is never an empty result.
-  `resources: []` would read as an empty world, and an unobserved world is not
-  a healthy one — the same distinction ADR-029 draws for hosts.
+  `{"error": {"kind": "auth", "message": "…"}}`, with an optional
+  `retry_after_secs` when the provider knows how long to wait. It is never an
+  empty result. `resources: []` would read as an empty world, and an unobserved
+  world is not a healthy one — the same distinction ADR-029 draws for hosts.
 - `apply` receives **only** the changes the core approved. A provider cannot
   smuggle a deletion the core did not see.
 - `verify` is not an operation. The core calls `observe` again and compares;
@@ -137,9 +138,10 @@ deleted, never modified.
 - Working directory is a temporary directory, not the flake.
 - Timeout per operation; then `SIGKILL`. A hanging provider costs one cycle, not
   the reconciler.
-- Per-provider concurrency defaults to 1; a token bucket and `Retry-After`
-  handling live in the core, because rate limits are a property of the
-  conversation, not of one provider implementation.
+- Per-provider concurrency is 1. A rate limit is a typed condition: the
+  provider reports `retry_after_secs`, and the core honours it (bounded by an
+  hour) instead of guessing. Because a provider is never called concurrently, a
+  token bucket would add state without changing the outcome.
 
 ### 8. Versioning
 

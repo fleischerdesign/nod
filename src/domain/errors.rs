@@ -39,6 +39,14 @@ pub enum NodError {
     /// Provider protocol or execution failures (ADR-030).
     #[error("provider error: {detail}")]
     Provider { detail: String },
+    /// The provider asked us to slow down (ADR-030).
+    #[error("rate limited: {detail}")]
+    RateLimited {
+        /// Human-readable detail.
+        detail: String,
+        /// Seconds the provider asked us to wait, when it said so.
+        retry_after_secs: Option<u64>,
+    },
 }
 
 impl NodError {
@@ -46,6 +54,14 @@ impl NodError {
     pub fn provider(detail: impl Into<String>) -> Self {
         NodError::Provider {
             detail: detail.into(),
+        }
+    }
+
+    /// Raised when a provider reported a rate limit, with its hint when given.
+    pub fn rate_limited(detail: impl Into<String>, retry_after_secs: Option<u64>) -> Self {
+        NodError::RateLimited {
+            detail: detail.into(),
+            retry_after_secs,
         }
     }
 

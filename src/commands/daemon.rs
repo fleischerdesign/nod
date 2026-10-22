@@ -207,11 +207,20 @@ async fn reconcile_due(entries: &mut [ProviderEntry]) {
                 entry.schedule.succeeded(Instant::now());
             }
             Err(error) => {
-                let condition = match &error {
-                    NodError::Auth { .. } => Some("auth"),
-                    _ => None,
+                let (condition, retry_after) = match &error {
+                    NodError::Auth { .. } => (Some("auth"), None),
+                    NodError::RateLimited {
+                        retry_after_secs, ..
+                    } => (
+                        Some("rate-limited"),
+                        retry_after_secs.map(Duration::from_secs),
+                    ),
+                    _ => (None, None),
                 };
-                let (delay, changed) = entry.schedule.failed(Instant::now(), condition);
+                let (delay, changed) =
+                    entry
+                        .schedule
+                        .failed(Instant::now(), condition, retry_after);
                 if changed {
                     tracing::warn!(
                         provider = %entry.name,

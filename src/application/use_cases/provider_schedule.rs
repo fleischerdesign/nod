@@ -58,16 +58,25 @@ impl ProviderSchedule {
     /// Records a failure and returns the delay plus whether the condition
     /// changed since the previous failure.
     ///
+    /// A provider that reports a rate limit knows better than we do when it is
+    /// ready: its `retry_after` wins over the doubling, bounded by the cap.
     /// Doubling keeps a flapping provider from hammering an API; an auth
     /// failure goes straight to the cap, because waiting will not fix a token
     /// and retrying every interval only fills the log.
-    pub fn failed(&mut self, now: Instant, condition: Option<&str>) -> (Duration, bool) {
+    pub fn failed(
+        &mut self,
+        now: Instant,
+        condition: Option<&str>,
+        retry_after: Option<Duration>,
+    ) -> (Duration, bool) {
         self.failures = self.failures.saturating_add(1);
         let changed = self.condition.as_deref() != condition;
         self.condition = condition.map(str::to_string);
 
         let delay = if condition == Some("auth") {
             self.max_backoff
+        } else if let Some(hint) = retry_after {
+            hint.min(self.max_backoff)
         } else {
             let factor = 1u32 << self.failures.min(6);
             self.interval.saturating_mul(factor).min(self.max_backoff)
@@ -106,9 +115,9 @@ mod tests {
         let mut schedule = schedule();
         let now = Instant::now();
 
-        let (first, _) = schedule.failed(now, None);
-        let (second, _) = schedule.failed(now, None);
-        let (third, _) = schedule.failed(now, None);
+        let (first, _) = schedule.failed(now, None, None);
+        let (second, _) = schedule.failed(now, None, None);
+        let (third, _) = schedule.failed(now, None, None);
 
         assert_eq!(first, Duration::from_secs(120));
         assert_eq!(second, Duration::from_secs(240));
@@ -121,7 +130,7 @@ mod tests {
         let now = Instant::now();
         let mut last = Duration::ZERO;
         for _ in 0..12 {
-            last = schedule.failed(now, None).0;
+            last = schedule.failed(now, None, None).0;
         }
         assert_eq!(last, MAX_BACKOFF);
     }
@@ -131,11 +140,11 @@ mod tests {
         let mut schedule = schedule();
         let now = Instant::now();
 
-        let (delay, changed) = schedule.failed(now, Some("auth"));
+        let (delay, changed) = schedule.failed(now, Some("auth"), None);
         assert_eq!(delay, MAX_BACKOFF);
         assert!(changed);
 
-        let (_, changed_again) = schedule.failed(now, Some("auth"));
+        let (_, changed_again) = schedule.failed(now, Some("auth"), None);
         assert!(!changed_again, "the same condition must be logged once");
         assert_eq!(schedule.condition(), Some("auth"));
     }
@@ -143,8 +152,30 @@ mod tests {
     #[test]
     fn a_success_clears_the_condition() {
         let mut schedule = schedule();
-        schedule.failed(Instant::now(), Some("auth"));
+        schedule.failed(Instant::now(), Some("auth"), None);
         schedule.succeeded(Instant::now());
         assert_eq!(schedule.condition(), None);
+    }
+
+    #[test]
+    fn a_rate_limit_hint_wins_over_the_doubling() {
+        let mut schedule = schedule();
+        let (delay, _) = schedule.failed(
+            Instant::now(),
+            Some("rate-limited"),
+            Some(Duration::from_secs(90)),
+        );
+        assert_eq!(delay, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn a_rate_limit_hint_is_still_bounded_by_the_cap() {
+        let mut schedule = schedule();
+        let (delay, _) = schedule.failed(
+            Instant::now(),
+            Some("rate-limited"),
+            Some(Duration::from_secs(99_999)),
+        );
+        assert_eq!(delay, MAX_BACKOFF);
     }
 }

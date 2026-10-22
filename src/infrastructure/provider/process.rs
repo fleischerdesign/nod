@@ -227,6 +227,12 @@ impl ProcessProvider {
                     return Err(match kind {
                         "auth" => NodError::auth(message),
                         "config" => NodError::config(message),
+                        "rate-limited" => NodError::rate_limited(
+                            message,
+                            error
+                                .get("retry_after_secs")
+                                .and_then(serde_json::Value::as_u64),
+                        ),
                         _ => NodError::provider(format!("{kind}: {message}")),
                     });
                 }
