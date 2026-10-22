@@ -22,9 +22,11 @@ use crate::commands::sync;
 use crate::commands::wiring;
 use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
-use crate::domain::provider::DesiredResource;
+use crate::domain::provider::{DesiredResource, RollbackPlan};
+use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
+use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs reconciliation cycles until the process is stopped.
 pub async fn execute(
@@ -63,7 +65,7 @@ pub async fn execute(
         }
         tokio::time::sleep_until(wake).await;
 
-        reconcile_due(&mut providers).await;
+        reconcile_due(&mut providers, &options.state_dir).await;
 
         if let Some(gate) = next_gate {
             if gate <= Instant::now() {
@@ -176,7 +178,7 @@ fn load_providers(flake_path: &Path) -> Result<Vec<ProviderEntry>, NodError> {
 
 /// Runs every provider that is due, one at a time.
 ///
-async fn reconcile_due(entries: &mut [ProviderEntry]) {
+async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path) {
     let now = Instant::now();
 
     for entry in entries.iter_mut() {
@@ -205,6 +207,24 @@ async fn reconcile_due(entries: &mut [ProviderEntry]) {
                     "provider reconcile"
                 );
                 entry.schedule.succeeded(Instant::now());
+
+                // Record the inverse only for runs that actually changed the
+                // world; a dry run has nothing to undo.
+                if entry.apply && !report.inverse.is_empty() {
+                    let plans = ProviderPlanStore::new(state_dir);
+                    let plan = RollbackPlan {
+                        provider: report.provider.clone(),
+                        applied_at: now_secs(),
+                        changes: report.inverse.clone(),
+                    };
+                    if let Err(error) = plans.save(&plan) {
+                        tracing::warn!(
+                            provider = %entry.name,
+                            %error,
+                            "cannot record the rollback plan"
+                        );
+                    }
+                }
             }
             Err(error) => {
                 let (condition, retry_after) = match &error {

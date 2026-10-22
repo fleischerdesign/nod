@@ -174,11 +174,153 @@ pub struct Condition {
     pub message: String,
 }
 
-/// A failed operation.
+/// A recorded plan that can be undone (ADR-030).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackPlan {
+    /// Provider the plan belongs to.
+    pub provider: String,
+    /// Unix time the plan was applied.
+    pub applied_at: u64,
+    /// Inverse operations, newest last.
+    pub changes: Vec<InverseChange>,
+}
+
+/// One inverse operation and the state it expects to find.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InverseChange {
+    /// The operation that undoes the applied change.
+    pub change: Change,
+    /// State expected before the rollback. `None` means the resource must be
+    /// absent; anything else means it must exist with these attributes.
+    #[serde(default)]
+    pub expected: Option<DesiredResource>,
+}
+
+/// Builds the inverse of an applied plan.
 ///
-/// An error is not an empty answer: a provider that cannot authenticate must
-/// say so, because `resources: []` would read as "the zone is empty" and turn
-/// an unobserved world into a healthy one.
+/// - a created resource is deleted again;
+/// - a deleted resource is created with the attributes it had;
+/// - an updated resource is updated back to its previous attributes.
+///
+pub fn invert(applied: &[Change], observed: &[ObservedResource]) -> Vec<InverseChange> {
+    let mut inverse = Vec::new();
+
+    for change in applied {
+        match change.kind {
+            ChangeKind::Create => inverse.push(InverseChange {
+                change: Change {
+                    kind: ChangeKind::Delete,
+                    owned: change.owned,
+                    destructive: true,
+                    resource: change.resource.clone(),
+                },
+                expected: Some(change.resource.clone()),
+            }),
+            ChangeKind::Update => {
+                let Some(previous) = observed
+                    .iter()
+                    .find(|resource| resource.id == change.resource.id)
+                else {
+                    continue;
+                };
+                inverse.push(InverseChange {
+                    change: Change {
+                        kind: ChangeKind::Update,
+                        owned: change.owned,
+                        destructive: false,
+                        resource: DesiredResource {
+                            kind: previous.kind.clone(),
+                            id: previous.id.clone(),
+                            attributes: previous.attributes.clone(),
+                        },
+                    },
+                    expected: Some(change.resource.clone()),
+                });
+            }
+            ChangeKind::Delete => inverse.push(InverseChange {
+                change: Change {
+                    kind: ChangeKind::Create,
+                    owned: change.owned,
+                    destructive: false,
+                    resource: change.resource.clone(),
+                },
+                expected: None,
+            }),
+        }
+    }
+
+    inverse
+}
+
+/// Whether an observed resource still matches the state a plan expects.
+///
+/// Only the attributes the expected resource names are compared: providers add
+/// bookkeeping fields (record ids, markers) that are not desired state.
+pub fn matches_expected(current: &ObservedResource, expected: &DesiredResource) -> bool {
+    let Some(want) = expected.attributes.as_object() else {
+        return true;
+    };
+    let Some(have) = current.attributes.as_object() else {
+        return false;
+    };
+    want.iter().all(|(key, value)| have.get(key) == Some(value))
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn resource(id: &str, value: &str) -> DesiredResource {
+        DesiredResource {
+            kind: "dns.record".to_string(),
+            id: id.to_string(),
+            attributes: json!({ "content": value }),
+        }
+    }
+
+    fn change(kind: ChangeKind, id: &str, value: &str) -> Change {
+        Change {
+            kind,
+            owned: true,
+            destructive: matches!(kind, ChangeKind::Delete),
+            resource: resource(id, value),
+        }
+    }
+
+    #[test]
+    fn a_create_is_undone_by_a_delete() {
+        let inverse = invert(&[change(ChangeKind::Create, "one", "v1")], &[]);
+        assert_eq!(inverse[0].change.kind, ChangeKind::Delete);
+        assert_eq!(inverse[0].expected.as_ref().unwrap().id, "one");
+    }
+
+    #[test]
+    fn a_delete_is_undone_by_recreating_the_old_attributes() {
+        let inverse = invert(&[change(ChangeKind::Delete, "one", "old")], &[]);
+        assert_eq!(inverse[0].change.kind, ChangeKind::Create);
+        assert_eq!(inverse[0].change.resource.attributes["content"], "old");
+        assert!(inverse[0].expected.is_none());
+    }
+
+    #[test]
+    fn an_update_is_undone_with_the_previous_attributes() {
+        let observed = vec![ObservedResource {
+            kind: "dns.record".to_string(),
+            id: "one".to_string(),
+            attributes: json!({ "content": "old" }),
+            owned: true,
+        }];
+        let inverse = invert(&[change(ChangeKind::Update, "one", "new")], &observed);
+        assert_eq!(inverse[0].change.kind, ChangeKind::Update);
+        assert_eq!(inverse[0].change.resource.attributes["content"], "old");
+        assert_eq!(
+            inverse[0].expected.as_ref().unwrap().attributes["content"],
+            "new"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderError {
     /// Error kind: `auth`, `rate-limited`, `transient`, `config`, `protocol`.

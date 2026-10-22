@@ -526,6 +526,8 @@ async fn run(cli: Cli) -> Result<()> {
             settings,
             desired,
             apply,
+            rollback,
+            state_dir,
             json,
             flake,
         } => {
@@ -535,6 +537,8 @@ async fn run(cli: Cli) -> Result<()> {
                 settings.as_deref(),
                 &desired,
                 apply,
+                rollback,
+                &state_dir,
                 json,
                 &flake,
             )

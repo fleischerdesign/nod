@@ -9,7 +9,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::domain::errors::NodError;
-use crate::domain::provider::{Change, ChangeKind, DesiredResource, Handshake, ObservedResource};
+use crate::domain::provider::{
+    Change, ChangeKind, DesiredResource, Handshake, InverseChange, ObservedResource,
+};
 use crate::infrastructure::provider::process::ProcessProvider;
 
 /// Timeout for one provider operation.
@@ -25,8 +27,10 @@ pub struct ReconcileOptions {
 /// What one reconcile run produced.
 #[derive(Debug, Clone)]
 pub struct ReconcileReport {
-    /// Provider name and version.
+    /// Provider name.
     pub provider: String,
+    /// Provider implementation version.
+    pub version: String,
     /// Resources the provider reported.
     pub observed: usize,
     /// Changes the provider proposed.
@@ -39,6 +43,8 @@ pub struct ReconcileReport {
     pub applied: usize,
     /// Resources observed after applying (or after the dry run).
     pub verified: usize,
+    /// Inverse of what was applied, for `nod reconcile --rollback`.
+    pub inverse: Vec<InverseChange>,
 }
 
 /// Decides which proposed changes may run.
@@ -88,22 +94,107 @@ pub async fn execute(
     let (approved, refused) = approve(&handshake, &plan.changes);
 
     let mut applied = 0;
+    let mut inverse = Vec::new();
     if options.apply && !approved.is_empty() {
         let result = provider.apply(settings, &approved).await?;
         applied = result.applied.iter().filter(|entry| entry.ok).count();
+        if applied > 0 {
+            // Record what would undo this run, computed from the observation
+            // taken before the apply.
+            inverse = crate::domain::provider::invert(&approved, &observed.resources);
+        }
     }
 
     // Verification is a second observation, never "the API said 200".
     let verified = provider.observe(settings).await?;
 
     Ok(ReconcileReport {
-        provider: format!("{} {}", handshake.provider, handshake.version),
+        provider: handshake.provider.clone(),
+        version: handshake.version.clone(),
         observed: observed.resources.len(),
         planned: plan.changes.len(),
         approved,
         refused,
         applied,
         verified: verified.resources.len(),
+        inverse,
+    })
+}
+
+/// What a rollback run produced.
+#[derive(Debug, Clone)]
+pub struct RollbackReport {
+    /// Provider name.
+    pub provider: String,
+    /// Provider implementation version.
+    pub version: String,
+    /// Changes restored.
+    pub restored: usize,
+    /// Refusals, when the world moved since the apply.
+    pub refused: Vec<String>,
+}
+
+/// Applies the inverse of a recorded plan.
+///
+/// A rollback refuses rather than overwrites: if a resource changed, vanished
+/// or reappeared since the apply, undoing blindly would destroy someone else's
+/// work. The refusal names the resource, so an operator can decide.
+pub async fn rollback(
+    command: &Path,
+    settings: &serde_json::Value,
+    plan: &crate::domain::provider::RollbackPlan,
+) -> Result<RollbackReport, NodError> {
+    use crate::domain::provider::matches_expected;
+
+    let (mut provider, handshake) = ProcessProvider::open(command, OP_TIMEOUT).await?;
+    let observed = provider.observe(settings).await?;
+
+    let mut refused = Vec::new();
+    for entry in &plan.changes {
+        let id = &entry.change.resource.id;
+        let current = observed
+            .resources
+            .iter()
+            .find(|resource| &resource.id == id);
+        match (&entry.expected, current) {
+            (Some(expected), Some(current)) if matches_expected(current, expected) => {}
+            (Some(_), Some(_)) => refused.push(format!("{id}: changed since the apply")),
+            (Some(_), None) => refused.push(format!("{id}: gone since the apply")),
+            (None, Some(_)) => refused.push(format!("{id}: exists again since the apply")),
+            (None, None) => {}
+        }
+    }
+
+    if !refused.is_empty() {
+        return Ok(RollbackReport {
+            provider: handshake.provider.clone(),
+            version: handshake.version.clone(),
+            restored: 0,
+            refused,
+        });
+    }
+
+    let changes: Vec<Change> = plan
+        .changes
+        .iter()
+        .map(|entry| entry.change.clone())
+        .collect();
+    let (approved, refused) = approve(&handshake, &changes);
+    if !refused.is_empty() {
+        return Ok(RollbackReport {
+            provider: handshake.provider.clone(),
+            version: handshake.version.clone(),
+            restored: 0,
+            refused,
+        });
+    }
+
+    let applied = provider.apply(settings, &approved).await?;
+    Ok(RollbackReport {
+        provider: handshake.provider.clone(),
+        version: handshake.version.clone(),
+        restored: applied.applied.iter().filter(|entry| entry.ok).count(),
+        refused: Vec::new(),
     })
 }
 

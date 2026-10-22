@@ -704,6 +704,14 @@ pub enum Commands {
         #[arg(long)]
         apply: bool,
 
+        /// Undo the last recorded plan instead of reconciling
+        #[arg(long)]
+        rollback: bool,
+
+        /// Directory holding the reconciler state (plan records)
+        #[arg(long, default_value = "/var/lib/nod")]
+        state_dir: PathBuf,
+
         /// Print the report as JSON
         #[arg(long)]
         json: bool,
