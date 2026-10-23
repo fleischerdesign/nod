@@ -466,8 +466,11 @@ impl SyncReconcilerUseCase {
 
             state.last_attempt_rev = Some(head.clone());
             state.record_deployed(head.clone());
-            let verified = settled
-                && state.mark_verified_when_all_healthy(&head, &hosts, now, retry.gone_after_secs);
+            // The marker has its own rule: every host that is not gone must be
+            // reachable and freshly healthy. `settled` counts a gone host as
+            // unreachable and would veto the marker forever.
+            let verified =
+                state.mark_verified_when_all_healthy(&head, &hosts, now, retry.gone_after_secs);
             if verified {
                 state.record_success(head.clone());
             }
