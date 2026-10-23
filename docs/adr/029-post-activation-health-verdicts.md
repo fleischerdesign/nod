@@ -183,7 +183,10 @@ baseline after a restart; an existing problem is reported as the host's state
 
 A fleet-wide `last_verified_rev` is set only when every discovered host is
 reachable and its last recorded verdict is `healthy` — an aggregation of
-stored observations, not a claim that a missing observation is healthy.
+stored observations, not a claim that a missing observation is healthy. Each
+verdict carries `health_at`; only verdicts within `HEALTH_FRESHNESS_SECS`
+(30 minutes) count, because a `healthy` from hours ago is not evidence for the
+present.
 
 ## Consequences
 

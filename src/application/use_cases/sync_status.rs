@@ -91,6 +91,10 @@ impl SyncStatusUseCase {
                         .hosts
                         .get(&inspection.host.name)
                         .and_then(|memory| memory.health.clone()),
+                    health_at: state
+                        .hosts
+                        .get(&inspection.host.name)
+                        .and_then(|memory| memory.health_at),
                 })
                 .collect();
         }
@@ -130,6 +134,7 @@ impl SyncStatusUseCase {
             remote_revision,
             applied_revision: state.last_applied_rev,
             verified_revision: state.last_verified_rev,
+            verified_at: state.verified_at,
             behind,
             backoff_secs,
             observed_at: state.saved_at,

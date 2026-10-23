@@ -22,6 +22,14 @@ use crate::domain::watch::SyncOptions;
 /// and costs one sweep, not correctness.
 pub const STATE_VERSION: u32 = 2;
 
+/// How old a stored health verdict may be and still count as evidence for the
+/// fleet-wide verified marker.
+///
+/// A deployment's verdicts are fresh by construction; a startup self-check
+/// only aggregates verdicts from the recent cycle. A verdict from hours ago is
+/// not evidence that the host is healthy now.
+pub const HEALTH_FRESHNESS_SECS: u64 = 1800;
+
 /// First backoff step after a failed cycle, in seconds.
 const BACKOFF_BASE_SECS: u64 = 30;
 
@@ -56,6 +64,9 @@ pub struct SyncState {
     /// not be observed keeps this behind while `last_applied_rev` advances.
     #[serde(default)]
     pub last_verified_rev: Option<String>,
+    /// Unix time the verified revision was recorded, when it was.
+    #[serde(default)]
+    pub verified_at: Option<u64>,
     /// Consecutive failed cycles; drives the backoff.
     pub consecutive_failures: u32,
     /// Unix time before which no new cycle starts.
@@ -194,6 +205,9 @@ pub struct HostMemory {
     /// and so an unreachable host cannot silently keep a stale "healthy".
     #[serde(default)]
     pub health: Option<crate::domain::health::HealthVerdict>,
+    /// Unix time the verdict was recorded, when it was.
+    #[serde(default)]
+    pub health_at: Option<u64>,
 }
 
 /// The hosts a sweep may probe now, and why the rest wait.
@@ -238,6 +252,7 @@ impl SyncState {
             last_attempt_rev: None,
             last_applied_rev: None,
             last_verified_rev: None,
+            verified_at: None,
             consecutive_failures: 0,
             backoff_until: None,
             backoff_rev: None,
@@ -287,6 +302,7 @@ impl SyncState {
                     .hosts
                     .get(host)
                     .and_then(|memory| memory.health.clone()),
+                health_at: self.hosts.get(host).and_then(|memory| memory.health_at),
             },
         );
     }
@@ -319,6 +335,7 @@ impl SyncState {
                 // An unreachable host has no current health, whatever it had
                 // before: its last verdict is not evidence about this cycle.
                 health: None,
+                health_at: None,
             },
         );
         delay
@@ -340,6 +357,7 @@ impl SyncState {
                 },
                 last_seen: now,
                 health: None,
+                health_at: None,
             },
         );
     }
@@ -359,8 +377,10 @@ impl SyncState {
             condition: HostCondition::Reachable,
             last_seen: now,
             health: None,
+            health_at: None,
         });
         memory.health = Some(verdict);
+        memory.health_at = Some(now);
         memory.last_seen = now;
     }
 
@@ -412,6 +432,7 @@ impl SyncState {
         let rev = rev.into();
         self.last_applied_rev = Some(rev.clone());
         self.last_verified_rev = Some(rev);
+        self.verified_at = Some(now_secs());
         self.consecutive_failures = 0;
         self.backoff_until = None;
         self.backoff_rev = None;
@@ -575,6 +596,9 @@ pub struct SyncHostStatus {
     /// What the last deployment concluded about this host's health.
     #[serde(default)]
     pub health: Option<crate::domain::health::HealthVerdict>,
+    /// When that verdict was recorded.
+    #[serde(default)]
+    pub health_at: Option<u64>,
 }
 
 /// One host's remembered condition, for status output.
@@ -606,6 +630,9 @@ pub struct SyncStatus {
     /// `None` says no cycle has proven the fleet healthy at a revision yet.
     #[serde(default)]
     pub verified_revision: Option<String>,
+    /// When the verified revision was recorded.
+    #[serde(default)]
+    pub verified_at: Option<u64>,
     /// Whether the applied revision differs from the remote one; `None` when
     /// the remote could not be read.
     pub behind: Option<bool>,

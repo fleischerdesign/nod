@@ -43,8 +43,9 @@ pub async fn execute(
         return Ok(Some(verdict));
     };
 
-    state.record_health(&local.name, verdict.clone(), now_secs());
-    mark_verified_when_all_healthy(&mut state, &hosts);
+    let now = now_secs();
+    state.record_health(&local.name, verdict.clone(), now);
+    mark_verified_when_all_healthy(&mut state, &hosts, now);
     store.save(&state).await?;
 
     Ok(Some(verdict))
@@ -97,7 +98,7 @@ async fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, 
 /// This is an aggregation of stored observations, not a new probe of each
 /// host: the local one was just observed, the others were observed when they
 /// were deployed.
-fn mark_verified_when_all_healthy(state: &mut SyncState, hosts: &[HostEntity]) {
+fn mark_verified_when_all_healthy(state: &mut SyncState, hosts: &[HostEntity], now: u64) {
     let Some(applied) = state.last_applied_rev.clone() else {
         return;
     };
@@ -106,11 +107,15 @@ fn mark_verified_when_all_healthy(state: &mut SyncState, hosts: &[HostEntity]) {
         state.hosts.get(&host.name).is_some_and(|memory| {
             matches!(memory.condition, HostCondition::Reachable)
                 && matches!(memory.health, Some(HealthVerdict::Healthy))
+                && memory.health_at.is_some_and(|at| {
+                    now.saturating_sub(at) <= crate::domain::sync::HEALTH_FRESHNESS_SECS
+                })
         })
     });
 
     if all_healthy {
         state.last_verified_rev = Some(applied);
+        state.verified_at = Some(now);
     }
 }
 
@@ -137,8 +142,23 @@ mod tests {
         let hosts = vec![host("a", false), host("b", true)];
         let mut state = state_with(&[("a", HealthVerdict::Healthy), ("b", HealthVerdict::Healthy)]);
 
-        mark_verified_when_all_healthy(&mut state, &hosts);
+        mark_verified_when_all_healthy(&mut state, &hosts, 1);
         assert_eq!(state.last_verified_rev.as_deref(), Some("abc"));
+        assert_eq!(state.verified_at, Some(1));
+    }
+
+    #[test]
+    fn a_stale_verdict_does_not_mark_the_revision_verified() {
+        let hosts = vec![host("a", false), host("b", true)];
+        let mut state = state_with(&[("a", HealthVerdict::Healthy), ("b", HealthVerdict::Healthy)]);
+
+        mark_verified_when_all_healthy(
+            &mut state,
+            &hosts,
+            1 + crate::domain::sync::HEALTH_FRESHNESS_SECS + 1,
+        );
+        assert_eq!(state.last_verified_rev, None);
+        assert_eq!(state.verified_at, None);
     }
 
     #[test]
@@ -154,7 +174,7 @@ mod tests {
             ),
         ]);
 
-        mark_verified_when_all_healthy(&mut state, &hosts);
+        mark_verified_when_all_healthy(&mut state, &hosts, 1);
         assert_eq!(state.last_verified_rev, None);
     }
 
@@ -169,7 +189,7 @@ mod tests {
         };
         state.observe_offline("b", 2, &policy);
 
-        mark_verified_when_all_healthy(&mut state, &hosts);
+        mark_verified_when_all_healthy(&mut state, &hosts, 1);
         assert_eq!(state.last_verified_rev, None);
     }
 
@@ -178,7 +198,7 @@ mod tests {
         let hosts = vec![host("a", true), host("b", false)];
         let mut state = state_with(&[("a", HealthVerdict::Healthy)]);
 
-        mark_verified_when_all_healthy(&mut state, &hosts);
+        mark_verified_when_all_healthy(&mut state, &hosts, 1);
         assert_eq!(state.last_verified_rev, None);
     }
 
@@ -189,7 +209,7 @@ mod tests {
         state.observe_reachable("a", 1);
         state.record_health("a", HealthVerdict::Healthy, 1);
 
-        mark_verified_when_all_healthy(&mut state, &hosts);
+        mark_verified_when_all_healthy(&mut state, &hosts, 1);
         assert_eq!(state.last_verified_rev, None);
     }
 }

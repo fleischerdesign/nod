@@ -65,7 +65,14 @@ fn render(status: &SyncStatus, json: bool) {
     }
     match &status.verified_revision {
         Some(verified) if Some(verified.as_str()) == status.applied_revision.as_deref() => {
-            println!("  verified  {}", short(verified).green())
+            match status.verified_at {
+                Some(at) => println!(
+                    "  verified  {} {}",
+                    short(verified).green(),
+                    format!("({} ago)", age(now, Some(at))).dimmed()
+                ),
+                None => println!("  verified  {}", short(verified).green()),
+            }
         }
         Some(verified) => println!(
             "  verified  {} {}",
