@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nod::application::use_cases::adopt::{execute as adopt, AdoptOptions};
-use nod::application::use_cases::reconcile::{execute, rollback, ReconcileOptions};
+use nod::application::use_cases::reconcile::{execute, rollback, Desired, ReconcileOptions};
 use nod::domain::policy::Policy;
 use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, RollbackPlan};
 
@@ -29,14 +29,18 @@ fn script(body: impl AsRef<str>) -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
-fn desired(ids: &[&str]) -> Vec<DesiredResource> {
-    ids.iter()
-        .map(|id| DesiredResource {
-            kind: "dns.record".to_string(),
-            id: (*id).to_string(),
-            attributes: serde_json::json!({ "content": "192.0.2.1" }),
-        })
-        .collect()
+fn desired(ids: &[&str]) -> Desired {
+    Desired {
+        resources: ids
+            .iter()
+            .map(|id| DesiredResource {
+                kind: "dns.record".to_string(),
+                id: (*id).to_string(),
+                attributes: serde_json::json!({ "content": "192.0.2.1" }),
+            })
+            .collect(),
+        absent: Vec::new(),
+    }
 }
 
 /// A provider that plans two creates and reports only one as applied.

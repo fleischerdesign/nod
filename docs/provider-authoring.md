@@ -117,6 +117,28 @@ A manifest that names an operation the handshake does not offer is an error.
 - `owned` is the provider's answer to "did this fleet create this?". When in
   doubt, `false`: foreign is the safe default.
 
+### What must not exist
+
+A declaration may also say what must be gone:
+
+```json
+{
+  "resources": [
+    {"kind": "dns.record", "id": "A:www.example.com", "attributes": {}}
+  ],
+  "absent": [
+    {"kind": "dns.record", "id": "A:old.example.com"}
+  ]
+}
+```
+
+The provider never sees `absent`. It plans from `resources` alone and proposes
+a delete for an owned resource outside that list; the core reclassifies that
+delete as **declared** and does not count it against `max_deletions`. A delete
+the declaration did not name stays **implicit** and is what the cap guards
+against. `protect` wins over both, and an `absent` entry naming a resource the
+fleet does not own is a configuration error rather than a silent no-op.
+
 ## Ownership
 
 | Mode | Meaning | Adoption |

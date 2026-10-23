@@ -22,7 +22,7 @@ use crate::commands::sync;
 use crate::commands::wiring;
 use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
-use crate::domain::provider::{DesiredResource, ProviderOrder, RollbackPlan};
+use crate::domain::provider::{ProviderOrder, RollbackPlan};
 use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
@@ -183,7 +183,7 @@ struct ProviderEntry {
     name: String,
     command: std::path::PathBuf,
     settings: serde_json::Value,
-    desired: Vec<DesiredResource>,
+    desired: crate::application::use_cases::reconcile::Desired,
     apply: bool,
     order: ProviderOrder,
     schedule: ProviderSchedule,
@@ -457,7 +457,7 @@ protect = ["demo"]
         let entry = &entries[0];
         assert_eq!(entry.name, "example");
         assert_eq!(entry.command, std::path::PathBuf::from("/bin/true"));
-        assert_eq!(entry.desired.len(), 1);
+        assert_eq!(entry.desired.resources.len(), 1);
         assert!(entry.apply);
         assert_eq!(entry.env, vec!["NOD_TEST_TOKEN".to_string()]);
         assert_eq!(entry.timeout, Duration::from_secs(90));

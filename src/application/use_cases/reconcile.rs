@@ -48,6 +48,10 @@ pub struct ReconcileReport {
     pub failed: Vec<String>,
     /// Desired resources that match the declaration after the run.
     pub verified: usize,
+    /// Deletions the declaration authorized.
+    pub declared_deletions: usize,
+    /// Deletions the plan proposed without a declaration.
+    pub implicit_deletions: usize,
     /// Conditions the provider reported, deduplicated across observe and apply.
     ///
     /// A condition is not an error: the provider can still observe and plan,
@@ -73,12 +77,28 @@ fn merge_conditions(into: &mut Vec<Condition>, from: &[Condition]) {
 /// 2. A change to a resource the fleet does not own is refused — create,
 ///    update and delete alike. A foreign record is reported, never modified.
 /// 3. A delete of a protected id is refused even when owned.
-/// 4. A plan that would delete more than the cap is refused **as a whole**, so
-///    nothing half-applies.
+/// 4. A plan that would delete more **undeclared** resources than the cap is
+///    refused as a whole, so nothing half-applies. A deletion the declaration
+///    names in `absent` is authorized by that declaration and does not consume
+///    the cap; the cap exists to bound a declaration bug, not an intention.
 pub fn approve(
     handshake: &Handshake,
     changes: &[Change],
     policy: &Policy,
+) -> (Vec<Change>, Vec<String>) {
+    approve_declared(handshake, changes, policy, &Declared::default())
+}
+
+/// Decides which proposed changes may run, knowing which deletions the
+/// declaration authorizes.
+///
+/// The forward path calls this; `approve` is the same decision without a
+/// declaration context, which is what rollback and the policy tests need.
+pub fn approve_declared(
+    handshake: &Handshake,
+    changes: &[Change],
+    policy: &Policy,
+    declared: &Declared,
 ) -> (Vec<Change>, Vec<String>) {
     let mut approved = Vec::new();
     let mut refused = Vec::new();
@@ -102,16 +122,26 @@ pub fn approve(
         approved.push(change.clone());
     }
 
-    let deletions = approved
+    let implicit = approved
         .iter()
-        .filter(|change| change.kind == ChangeKind::Delete)
+        .filter(|change| {
+            change.kind == ChangeKind::Delete
+                && !declared.contains(&change.resource.kind, &change.resource.id)
+        })
         .count();
-    if deletions > policy.max_deletions {
+    let explicit = approved
+        .iter()
+        .filter(|change| {
+            change.kind == ChangeKind::Delete
+                && declared.contains(&change.resource.kind, &change.resource.id)
+        })
+        .count();
+    if implicit > policy.max_deletions {
         let mut all_refused = refused;
         all_refused.insert(
             0,
             format!(
-                "plan would delete {deletions} resources, the cap is {}; nothing was applied",
+                "plan would delete {implicit} undeclared resources ({explicit} declared), the cap is {}; nothing was applied",
                 policy.max_deletions
             ),
         );
@@ -121,11 +151,50 @@ pub fn approve(
     (approved, refused)
 }
 
+/// Verifies that every declared absence is satisfiable.
+///
+/// A foreign resource cannot be deleted by this fleet, and a provider that
+/// plans no deletion cannot carry the declaration out; both are configuration
+/// errors that must fail before anything is applied. An entry whose resource is
+/// already gone is satisfied and needs no change.
+fn check_absent(
+    absent: &[DesiredResource],
+    observed: &[ObservedResource],
+    changes: &[Change],
+) -> Result<(), NodError> {
+    for entry in absent {
+        let Some(resource) = observed
+            .iter()
+            .find(|resource| resource.kind == entry.kind && resource.id == entry.id)
+        else {
+            continue;
+        };
+        if !resource.owned {
+            return Err(NodError::config(format!(
+                "declaration marks {} {} absent, but the fleet does not own it; refusing to delete a foreign resource",
+                entry.kind, entry.id
+            )));
+        }
+        let planned = changes.iter().any(|change| {
+            change.kind == ChangeKind::Delete
+                && change.resource.kind == entry.kind
+                && change.resource.id == entry.id
+        });
+        if !planned {
+            return Err(NodError::config(format!(
+                "declaration marks {} {} absent, but the provider planned no deletion for it",
+                entry.kind, entry.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Runs one reconcile cycle against one provider.
 pub async fn execute(
     command: &Path,
     settings: &serde_json::Value,
-    desired: &[DesiredResource],
+    desired: &Desired,
     options: ReconcileOptions,
     policy: &Policy,
     env: &[String],
@@ -138,11 +207,14 @@ pub async fn execute(
     let mut conditions = Vec::new();
     merge_conditions(&mut conditions, &observed.conditions);
     let plan = provider
-        .plan(settings, desired, &observed.resources)
+        .plan(settings, &desired.resources, &observed.resources)
         .await?;
     check_capabilities(&handshake, &[], &plan.changes)?;
     merge_conditions(&mut conditions, &plan.conditions);
-    let (approved, refused) = approve(&handshake, &plan.changes, policy);
+
+    let declared = desired.declared();
+    check_absent(&desired.absent, &observed.resources, &plan.changes)?;
+    let (approved, refused) = approve_declared(&handshake, &plan.changes, policy, &declared);
 
     let mut applied = 0;
     let mut failed = Vec::new();
@@ -176,6 +248,7 @@ pub async fn execute(
     };
 
     let verified = desired
+        .resources
         .iter()
         .filter(|want| {
             after
@@ -185,18 +258,37 @@ pub async fn execute(
         })
         .count();
 
+    let declared_deletions = plan
+        .changes
+        .iter()
+        .filter(|change| {
+            change.kind == ChangeKind::Delete
+                && declared.contains(&change.resource.kind, &change.resource.id)
+        })
+        .count();
+    let implicit_deletions = plan
+        .changes
+        .iter()
+        .filter(|change| {
+            change.kind == ChangeKind::Delete
+                && !declared.contains(&change.resource.kind, &change.resource.id)
+        })
+        .count();
+
     Ok(ReconcileReport {
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
         observed: observed.resources.len(),
-        unowned: crate::domain::adoption::unowned(&observed.resources, desired),
-        desired: desired.len(),
+        unowned: crate::domain::adoption::unowned(&observed.resources, &desired.resources),
+        desired: desired.resources.len(),
         planned: plan.changes.len(),
         approved,
         refused,
         applied,
         failed,
         verified,
+        declared_deletions,
+        implicit_deletions,
         conditions,
         inverse,
     })
@@ -359,28 +451,82 @@ pub async fn rollback(
 }
 
 /// Parses a desired-state document: either a bare array or `{ "resources": [...] }`.
-pub fn parse_desired(raw: &str) -> Result<Vec<DesiredResource>, NodError> {
+/// A parsed declaration: what must exist and what must not.
+#[derive(Debug, Clone, Default)]
+pub struct Desired {
+    /// Resources the provider must create or keep in shape.
+    pub resources: Vec<DesiredResource>,
+    /// Resources the declaration says must not exist.
+    ///
+    /// The provider never sees this list: it plans from `resources` alone, and
+    /// the delete it proposes for an owned resource outside that list is
+    /// reclassified by the core. A separate list keeps an old provider from
+    /// mistaking a tombstone for something to create.
+    pub absent: Vec<DesiredResource>,
+}
+
+impl Desired {
+    /// The deletions this declaration authorizes.
+    fn declared(&self) -> Declared {
+        Declared {
+            entries: self.absent.clone(),
+        }
+    }
+}
+
+/// The deletions a declaration authorizes.
+#[derive(Debug, Clone, Default)]
+pub struct Declared {
+    entries: Vec<DesiredResource>,
+}
+
+impl Declared {
+    /// Whether `kind`/`id` is an authorized deletion.
+    pub fn contains(&self, kind: &str, id: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.kind == kind && entry.id == id)
+    }
+}
+
+/// Parses a declaration from the desired-state file.
+pub fn parse_desired(raw: &str) -> Result<Desired, NodError> {
     let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|error| NodError::config(format!("cannot parse desired state: {error}")))?;
 
-    let array = match value {
-        serde_json::Value::Array(items) => items,
-        serde_json::Value::Object(mut map) => match map.remove("resources") {
-            Some(serde_json::Value::Array(items)) => items,
-            _ => {
-                return Err(NodError::config(
-                    "desired state object must contain a `resources` array",
-                ))
-            }
-        },
-        _ => {
-            return Err(NodError::config(
-                "desired state must be an array or an object with `resources`",
-            ))
+    match value {
+        serde_json::Value::Array(items) => Ok(Desired {
+            resources: parse_resources(items)?,
+            absent: Vec::new(),
+        }),
+        serde_json::Value::Object(mut map) => {
+            let resources = match map.remove("resources") {
+                Some(serde_json::Value::Array(items)) => items,
+                _ => {
+                    return Err(NodError::config(
+                        "desired state object must contain a `resources` array",
+                    ))
+                }
+            };
+            let absent = match map.remove("absent") {
+                Some(serde_json::Value::Array(items)) => parse_resources(items)?,
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(_) => return Err(NodError::config("desired state `absent` must be an array")),
+            };
+            Ok(Desired {
+                resources: parse_resources(resources)?,
+                absent,
+            })
         }
-    };
+        _ => Err(NodError::config(
+            "desired state must be an array or an object with `resources`",
+        )),
+    }
+}
 
-    array
+/// Parses a list of desired resources.
+fn parse_resources(items: Vec<serde_json::Value>) -> Result<Vec<DesiredResource>, NodError> {
+    items
         .into_iter()
         .map(|item| {
             serde_json::from_value(item)
@@ -598,6 +744,113 @@ mod tests {
         assert!(refused.is_empty());
     }
 
+    fn declared(entries: &[(&str, &str)]) -> Declared {
+        Declared {
+            entries: entries
+                .iter()
+                .map(|(kind, id)| DesiredResource {
+                    kind: (*kind).to_string(),
+                    id: (*id).to_string(),
+                    attributes: serde_json::json!({}),
+                })
+                .collect(),
+        }
+    }
+
+    fn observed_owned(id: &str) -> ObservedResource {
+        ObservedResource {
+            kind: "dns.record".to_string(),
+            id: id.to_string(),
+            attributes: serde_json::json!({}),
+            owned: true,
+        }
+    }
+
+    #[test]
+    fn a_declared_deletion_does_not_consume_the_cap() {
+        let changes = vec![change_named(ChangeKind::Delete, "old", true, true)];
+        let (approved, refused) = approve_declared(
+            &handshake(OwnershipMode::Marker),
+            &changes,
+            &allows(0, &[]),
+            &declared(&[("dns.record", "old")]),
+        );
+        assert_eq!(approved.len(), 1);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn an_implicit_deletion_over_the_cap_refuses_the_whole_plan() {
+        let changes = vec![
+            change_named(ChangeKind::Delete, "old", true, true),
+            change_named(ChangeKind::Delete, "retired", true, true),
+            change(ChangeKind::Create, true, false),
+        ];
+        let (approved, refused) = approve_declared(
+            &handshake(OwnershipMode::Marker),
+            &changes,
+            &allows(0, &[]),
+            &declared(&[("dns.record", "retired")]),
+        );
+        assert!(approved.is_empty(), "a refused plan must apply nothing");
+        assert!(refused[0].contains("1 undeclared"), "{}", refused[0]);
+        assert!(refused[0].contains("1 declared"), "{}", refused[0]);
+    }
+
+    #[test]
+    fn a_declared_deletion_of_a_protected_resource_is_still_refused() {
+        let changes = vec![change_named(
+            ChangeKind::Delete,
+            "TXT:a.example.com",
+            true,
+            true,
+        )];
+        let (approved, refused) = approve_declared(
+            &handshake(OwnershipMode::Marker),
+            &changes,
+            &allows(0, &["TXT:a.example.com"]),
+            &declared(&[("dns.record", "TXT:a.example.com")]),
+        );
+        assert!(approved.is_empty());
+        assert!(refused[0].contains("protected"), "{}", refused[0]);
+    }
+
+    #[test]
+    fn an_absent_entry_for_a_foreign_resource_is_an_error() {
+        let mut foreign = observed_owned("old");
+        foreign.owned = false;
+        let error = check_absent(&declared(&[("dns.record", "old")]).entries, &[foreign], &[])
+            .expect_err("a foreign resource cannot be declared absent");
+        assert!(error.to_string().contains("does not own"), "{error}");
+    }
+
+    #[test]
+    fn an_absent_entry_without_a_planned_deletion_is_an_error() {
+        let error = check_absent(
+            &declared(&[("dns.record", "old")]).entries,
+            &[observed_owned("old")],
+            &[],
+        )
+        .expect_err("a declaration the provider cannot carry out must fail");
+        assert!(error.to_string().contains("planned no deletion"), "{error}");
+    }
+
+    #[test]
+    fn an_absent_entry_that_is_already_gone_is_satisfied() {
+        assert!(check_absent(&declared(&[("dns.record", "old")]).entries, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn a_declared_deletion_the_provider_planned_is_accepted() {
+        let changes = vec![change_named(ChangeKind::Delete, "old", true, true)];
+        assert!(check_absent(
+            &declared(&[("dns.record", "old")]).entries,
+            &[observed_owned("old")],
+            &changes,
+        )
+        .is_ok());
+    }
+
     #[test]
     fn a_provider_that_reports_outside_its_capabilities_is_rejected() {
         let mut handshake = handshake(OwnershipMode::Marker);
@@ -677,8 +930,18 @@ mod tests {
     fn desired_state_accepts_a_bare_array_and_an_object() {
         let array = r#"[{"kind":"dns.record","id":"a"}]"#;
         let object = r#"{"resources":[{"kind":"dns.record","id":"a"}]}"#;
-        assert_eq!(parse_desired(array).unwrap().len(), 1);
-        assert_eq!(parse_desired(object).unwrap().len(), 1);
+        assert_eq!(parse_desired(array).unwrap().resources.len(), 1);
+        assert_eq!(parse_desired(object).unwrap().resources.len(), 1);
         assert!(parse_desired("{}").is_err());
+    }
+
+    #[test]
+    fn desired_state_carries_the_absent_list() {
+        let raw = r#"{"resources":[{"kind":"dns.record","id":"a"}],"absent":[{"kind":"dns.record","id":"old"}]}"#;
+        let desired = parse_desired(raw).unwrap();
+        assert_eq!(desired.resources.len(), 1);
+        assert_eq!(desired.absent.len(), 1);
+        assert_eq!(desired.absent[0].id, "old");
+        assert!(parse_desired(r#"{"resources":[],"absent":{}}"#).is_err());
     }
 }

@@ -101,7 +101,7 @@ pub async fn execute(
     let report = adopt::execute(
         command_path,
         &settings,
-        &desired,
+        &desired.resources,
         AdoptOptions {
             apply,
             force: force.to_vec(),
