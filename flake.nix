@@ -48,6 +48,26 @@
             ];
           };
           cargoLock.lockFile = ./providers/cloudflare/Cargo.lock;
+          postInstall = ''
+            install -Dm644 ${./providers/cloudflare/provider.json} $out/bin/provider.json
+          '';
+        };
+
+        nod-provider-authentik = pkgs.rustPlatform.buildRustPackage {
+          pname = "nod-provider-authentik";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ./providers/authentik;
+            fileset = pkgs.lib.fileset.unions [
+              ./providers/authentik/Cargo.toml
+              ./providers/authentik/Cargo.lock
+              ./providers/authentik/src
+            ];
+          };
+          cargoLock.lockFile = ./providers/authentik/Cargo.lock;
+          postInstall = ''
+            install -Dm644 ${./providers/authentik/provider.json} $out/bin/provider.json
+          '';
         };
 
         nod-provider-example = pkgs.writeShellApplication {
@@ -63,6 +83,9 @@
       # build is not a provider.
       checks.${system}.providers = pkgs.runCommand "nod-providers-check" { } ''
         test -x ${self.packages.${system}.nod-provider-cloudflare}/bin/nod-provider-cloudflare
+        test -f ${self.packages.${system}.nod-provider-cloudflare}/bin/provider.json
+        test -x ${self.packages.${system}.nod-provider-authentik}/bin/nod-provider-authentik
+        test -f ${self.packages.${system}.nod-provider-authentik}/bin/provider.json
         test -x ${self.packages.${system}.nod-provider-example}/bin/nod-provider-example
         touch $out
       '';

@@ -1,0 +1,9 @@
+{
+  "name": "authentik",
+  "version": "0.1.0",
+  "protocol": 1,
+  "capabilities": ["authentik.group"],
+  "operations": [],
+  "ownership": "marker",
+  "description": "Authentik groups: observe and plan; apply is not enabled in this read-only build"
+}

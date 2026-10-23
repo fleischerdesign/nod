@@ -287,3 +287,5 @@ gain an HTTP client because one provider needs one.
 - `providers/example` — a minimal Python provider with a JSON file as its world.
 - `providers/cloudflare` — a real API adapter: marker ownership, `adopt`, and a
   `zone.settings` singleton.
+- `providers/authentik` — a read-only Authentik groups adapter: marker in
+  `attributes`, pagination, plan-only; `apply` refuses a non-empty change set.
