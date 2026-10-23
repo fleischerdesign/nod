@@ -534,23 +534,33 @@ async fn snapshot_remote(host: &HostEntity, profile: &SshProfile) -> Option<Heal
 }
 
 /// Runs one probe command on `host` over SSH, returning its stdout.
+///
+/// The script is piped to `sh -s`: the remote login shell may be fish (this
+/// fleet's is), and a POSIX probe script must not be parsed by it. `sh -s`
+/// reads the script from stdin, so no quoting layer is involved either.
 async fn run_remote_probe(
     host: &HostEntity,
     profile: &SshProfile,
     command: &str,
 ) -> Result<String, NodError> {
     use crate::infrastructure::health::probe;
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
 
-    let args = crate::domain::ssh_args::build_ssh_probe_args(profile, &host.target_host, command);
-    let probe_run = tokio::time::timeout(
-        probe::timeout(host),
-        run_ssh("ssh", &args, || {
-            NodError::health_check(format!(
-                "failed to launch the health probe for {}",
-                host.name
-            ))
-        }),
-    )
+    let args = crate::domain::ssh_args::build_ssh_probe_args(profile, &host.target_host, "sh -s");
+    let probe_run = tokio::time::timeout(probe::timeout(host), async {
+        let mut child = Command::new("ssh")
+            .args(&args)
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(command.as_bytes()).await?;
+        }
+        child.wait_with_output().await
+    })
     .await;
 
     match probe_run {
@@ -570,7 +580,10 @@ async fn run_remote_probe(
             }
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         }
-        Ok(Err(error)) => Err(error),
+        Ok(Err(error)) => Err(NodError::health_check(format!(
+            "failed to run the health probe for {}: {error}",
+            host.name
+        ))),
         Err(_) => Err(NodError::health_check(format!(
             "health probe on {} timed out",
             host.name
