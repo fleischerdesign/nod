@@ -36,6 +36,13 @@ pub struct Handshake {
     /// provider that does not declare it.
     #[serde(default)]
     pub operations: Vec<String>,
+    /// Permissions the provider needs from its credential, in the provider's
+    /// own vocabulary (e.g. `authentik_core.view_group`).
+    ///
+    /// Additive like `operations`: an old core ignores the field, an old
+    /// provider omits it, and the manifest must agree with it.
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
     /// How the provider marks ownership.
     pub ownership: OwnershipMode,
     /// JSON Schema of the provider's `settings`.
@@ -94,6 +101,11 @@ pub struct Manifest {
     /// Declared optional operations (`adopt`).
     #[serde(default)]
     pub operations: Vec<String>,
+    /// Permissions the provider needs from its credential, in the provider's
+    /// own vocabulary. `nod provider test` checks that the binary declares the
+    /// same set in its handshake.
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
     /// Declared ownership mode.
     pub ownership: OwnershipMode,
     /// What the provider manages, in one sentence.

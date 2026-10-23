@@ -169,6 +169,13 @@ pub async fn test(
                     )));
                 }
             }
+            for permission in &manifest.required_permissions {
+                if !handshake.required_permissions.contains(permission) {
+                    return Err(NodError::provider(format!(
+                        "manifest requires permission `{permission}` but the provider does not declare it"
+                    )));
+                }
+            }
             println!("manifest    ok   matches the handshake");
         }
         None => println!("manifest    --   none next to the binary"),

@@ -11,8 +11,8 @@ use std::time::Duration;
 use crate::domain::errors::NodError;
 use crate::domain::policy::Policy;
 use crate::domain::provider::{
-    matches_expected, AppliedChange, Change, ChangeKind, DesiredResource, Handshake, InverseChange,
-    ObservedResource,
+    matches_expected, AppliedChange, Change, ChangeKind, Condition, DesiredResource, Handshake,
+    InverseChange, ObservedResource,
 };
 use crate::infrastructure::provider::process::ProcessProvider;
 
@@ -48,8 +48,22 @@ pub struct ReconcileReport {
     pub failed: Vec<String>,
     /// Desired resources that match the declaration after the run.
     pub verified: usize,
+    /// Conditions the provider reported, deduplicated across observe and apply.
+    ///
+    /// A condition is not an error: the provider can still observe and plan,
+    /// but something about its credential or upstream limits needs attention.
+    pub conditions: Vec<Condition>,
     /// Inverse of what was applied, for `nod reconcile --rollback`.
     pub inverse: Vec<InverseChange>,
+}
+
+/// Appends the conditions the provider has not reported yet.
+fn merge_conditions(into: &mut Vec<Condition>, from: &[Condition]) {
+    for condition in from {
+        if !into.iter().any(|existing| existing == condition) {
+            into.push(condition.clone());
+        }
+    }
 }
 
 /// Decides which proposed changes may run.
@@ -121,10 +135,13 @@ pub async fn execute(
 
     let observed = provider.observe(settings).await?;
     check_capabilities(&handshake, &observed.resources, &[])?;
+    let mut conditions = Vec::new();
+    merge_conditions(&mut conditions, &observed.conditions);
     let plan = provider
         .plan(settings, desired, &observed.resources)
         .await?;
     check_capabilities(&handshake, &[], &plan.changes)?;
+    merge_conditions(&mut conditions, &plan.conditions);
     let (approved, refused) = approve(&handshake, &plan.changes, policy);
 
     let mut applied = 0;
@@ -132,6 +149,7 @@ pub async fn execute(
     let mut succeeded: Vec<Change> = Vec::new();
     if options.apply && !approved.is_empty() {
         let result = provider.apply(settings, &approved).await?;
+        merge_conditions(&mut conditions, &result.conditions);
 
         // A change counts as applied only when the provider reports it as ok.
         // A change with no result at all is unproven, and unproven is not done.
@@ -150,6 +168,7 @@ pub async fn execute(
     // also the only place that sees the provider's own id for a created
     // resource, which the recorded undo needs.
     let after = provider.observe(settings).await?;
+    merge_conditions(&mut conditions, &after.conditions);
     let inverse = if succeeded.is_empty() {
         Vec::new()
     } else {
@@ -178,6 +197,7 @@ pub async fn execute(
         applied,
         failed,
         verified,
+        conditions,
         inverse,
     })
 }
@@ -399,6 +419,7 @@ mod tests {
             protocol: 1,
             capabilities: Vec::new(),
             operations: Vec::new(),
+            required_permissions: Vec::new(),
             ownership,
             settings_schema: serde_json::json!({}),
         }

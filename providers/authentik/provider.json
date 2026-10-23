@@ -4,6 +4,12 @@
   "protocol": 1,
   "capabilities": ["authentik.group"],
   "operations": ["adopt"],
+  "required_permissions": [
+    "authentik_core.view_group",
+    "authentik_core.view_user",
+    "authentik_core.change_group",
+    "authentik_core.add_group"
+  ],
   "ownership": "marker",
   "description": "Authentik groups: observe, plan, apply and adopt, bounded by the core's deletion policy"
 }

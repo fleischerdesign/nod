@@ -19,6 +19,18 @@ use model::{Marker, ObservedResource, Resource};
 /// Protocol major version this provider speaks.
 const PROTOCOL: u32 = 1;
 
+/// What the token must be allowed to do, in Authentik's own vocabulary.
+///
+/// Deletion is not listed: `apply` only deletes when the core's policy allows
+/// it, and then the missing `authentik_core.delete_group` is reported with the
+/// change that needed it.
+const REQUIRED_PERMISSIONS: [&str; 4] = [
+    "authentik_core.view_group",
+    "authentik_core.view_user",
+    "authentik_core.change_group",
+    "authentik_core.add_group",
+];
+
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -72,6 +84,7 @@ fn handshake() -> Value {
         "protocol": PROTOCOL,
         "capabilities": ["authentik.group"],
         "operations": ["adopt"],
+        "required_permissions": REQUIRED_PERMISSIONS,
         "ownership": "marker",
         "settings_schema": {
             "type": "object",
@@ -185,6 +198,14 @@ fn client(settings: &Settings) -> Result<Authentik, String> {
     ))
 }
 
+/// A failure message that names the permission the token is missing.
+fn failure_message(error: &ApiError, permission: &str) -> String {
+    match error {
+        ApiError::Auth => format!("credentials rejected; the token needs {permission}"),
+        _ => error.message(),
+    }
+}
+
 fn observe(request: &Value) -> Value {
     let settings = match settings(request) {
         Ok(settings) => settings,
@@ -196,8 +217,24 @@ fn observe(request: &Value) -> Value {
     };
     let groups = match client.groups() {
         Ok(groups) => groups,
+        Err(ApiError::Auth) => {
+            return error_message(
+                "permission",
+                "credentials rejected; the token needs authentik_core.view_group",
+            )
+        }
         Err(error) => return api_error(&error),
     };
+
+    // Membership resolution needs the users endpoint. A token without it can
+    // still observe and plan, so the gap is a condition, not a failure.
+    let mut conditions = Vec::new();
+    if let Err(error) = client.users() {
+        conditions.push(json!({
+            "kind": if matches!(error, ApiError::Auth) { "permission" } else { error.kind() },
+            "message": failure_message(&error, "authentik_core.view_user"),
+        }));
+    }
 
     let marker = Marker {
         key: settings.marker_key,
@@ -216,7 +253,7 @@ fn observe(request: &Value) -> Value {
         })
         .collect();
 
-    json!({ "resources": resources, "conditions": [] })
+    json!({ "resources": resources, "conditions": conditions })
 }
 
 fn plan(request: &Value) -> Value {
@@ -273,10 +310,22 @@ fn apply(request: &Value) -> Value {
     };
     let groups = match client.groups() {
         Ok(groups) => groups,
+        Err(ApiError::Auth) => {
+            return error_message(
+                "permission",
+                "credentials rejected; the token needs authentik_core.view_group",
+            )
+        }
         Err(error) => return api_error(&error),
     };
     let users = match client.users() {
         Ok(users) => users,
+        Err(ApiError::Auth) => {
+            return error_message(
+                "permission",
+                "credentials rejected; the token needs authentik_core.view_user",
+            )
+        }
         Err(error) => return api_error(&error),
     };
 
@@ -316,7 +365,11 @@ fn apply(request: &Value) -> Value {
                     user_pks.as_deref(),
                 ) {
                     Ok(()) => applied.push(ok(&id)),
-                    Err(error) => applied.push(failed(&id, &error.message(), error.kind())),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_core.add_group"),
+                        error.kind(),
+                    )),
                 }
             }
             "update" => {
@@ -339,7 +392,11 @@ fn apply(request: &Value) -> Value {
                     user_pks.as_deref(),
                 ) {
                     Ok(()) => applied.push(ok(&id)),
-                    Err(error) => applied.push(failed(&id, &error.message(), error.kind())),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_core.change_group"),
+                        error.kind(),
+                    )),
                 }
             }
             "delete" => {
@@ -349,7 +406,11 @@ fn apply(request: &Value) -> Value {
                 };
                 match client.delete_group(&group.pk) {
                     Ok(()) => applied.push(ok(&id)),
-                    Err(error) => applied.push(failed(&id, &error.message(), error.kind())),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_core.delete_group"),
+                        error.kind(),
+                    )),
                 }
             }
             other => applied.push(failed(

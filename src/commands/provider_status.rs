@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::application::use_cases::reconcile::{self, ReconcileOptions};
 use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
+use crate::domain::provider::Condition;
 use crate::infrastructure::config::toml_config::{TomlConfigStore, TomlProvider};
 
 /// One provider's summary, or why it could not be summarised.
@@ -25,6 +26,7 @@ struct Entry {
     verified: usize,
     note: Option<String>,
     error: Option<String>,
+    conditions: Vec<Condition>,
 }
 
 impl Entry {
@@ -40,6 +42,7 @@ impl Entry {
             verified: 0,
             note: None,
             error: Some(error.into()),
+            conditions: Vec::new(),
         }
     }
 
@@ -55,6 +58,7 @@ impl Entry {
             verified: 0,
             note: Some(note.into()),
             error: None,
+            conditions: Vec::new(),
         }
     }
 }
@@ -102,6 +106,7 @@ pub async fn execute(
                     "verified": entry.verified,
                     "note": entry.note,
                     "error": entry.error,
+                    "conditions": entry.conditions,
                 })
             })
             .collect();
@@ -133,6 +138,9 @@ pub async fn execute(
             entry.refused,
             format!("{}/{}", entry.verified, entry.desired)
         );
+        for condition in &entry.conditions {
+            println!("    {}: {}", condition.kind, condition.message);
+        }
     }
     Ok(())
 }
@@ -186,6 +194,7 @@ async fn summarise(name: &str, declaration: &TomlProvider) -> Entry {
             verified: report.verified,
             note: None,
             error: None,
+            conditions: report.conditions,
         },
         Err(error) => Entry::failed(name, error.to_string()),
     }
