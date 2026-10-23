@@ -34,4 +34,5 @@ pub mod sync_inspect;
 pub mod sync_reconciler;
 pub mod sync_status;
 pub mod update_flake;
+pub mod verify_fleet;
 pub mod watch_flake;

@@ -46,6 +46,27 @@ pub trait DeployerPort: Send + Sync {
     /// Reverts a host to its previously known-good generation profile.
     async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError>;
 
+    /// Observes `host`'s health without deploying anything (ADR-029).
+    ///
+    /// The reconciler refreshes stale verdicts between deployments: a host
+    /// that did not change still has to be observed, or the fleet-wide
+    /// `verified` marker could only be earned by another full rollout. The
+    /// adapter owns the transport, so this is the same probe path the
+    /// post-activation check uses, with no baseline and no touched units.
+    ///
+    /// A deployer without a health transport refuses explicitly instead of
+    /// pretending the host is healthy; both real adapters implement it.
+    async fn observe_health(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+    ) -> Result<crate::domain::health::HealthVerdict, NodError> {
+        let _ = (host, profile);
+        Err(NodError::internal(
+            "health observation is not supported for this deployer",
+        ))
+    }
+
     /// Triggers a system reboot on the target host (ADR-017).
     async fn reboot(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
         let _ = (host, profile);

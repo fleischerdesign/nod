@@ -218,6 +218,21 @@ impl DeployerPort for SshCliDeployer {
         Ok(DeploymentReport { health })
     }
 
+    async fn observe_health(
+        &self,
+        host: &HostEntity,
+        profile: &SshProfile,
+    ) -> Result<HealthVerdict, NodError> {
+        use crate::infrastructure::health::probe;
+
+        if !probe::enabled(host) {
+            return Ok(HealthVerdict::Unverified {
+                reason: "health checks are disabled for this host".to_string(),
+            });
+        }
+        verify_remote_health(host, profile, None, &[]).await
+    }
+
     async fn rollback(&self, host: &HostEntity, profile: &SshProfile) -> Result<(), NodError> {
         tracing::info!(
             host = %host.name,

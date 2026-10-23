@@ -311,6 +311,21 @@ impl DeployerPort for LocalDeployer {
         Ok(DeploymentReport { health })
     }
 
+    async fn observe_health(
+        &self,
+        host: &HostEntity,
+        _profile: &SshProfile,
+    ) -> Result<HealthVerdict, NodError> {
+        use crate::infrastructure::health::probe;
+
+        if !probe::enabled(host) {
+            return Ok(HealthVerdict::Unverified {
+                reason: "health checks are disabled for this host".to_string(),
+            });
+        }
+        verify_local_health(host, None, &[]).await
+    }
+
     async fn rollback(&self, host: &HostEntity, _profile: &SshProfile) -> Result<(), NodError> {
         tracing::info!(
             host = %host.name,

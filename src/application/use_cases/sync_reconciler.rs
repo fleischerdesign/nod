@@ -24,6 +24,7 @@ use crate::application::context::AppContext;
 use crate::application::pipeline::state_machine::DeploymentState;
 use crate::application::use_cases::deploy_fleet::{DeployFleetUseCase, HostOutcome};
 use crate::application::use_cases::sync_inspect::{inspect_hosts, Reachability};
+use crate::application::use_cases::verify_fleet::VerifyFleetUseCase;
 use crate::domain::errors::NodError;
 use crate::domain::health::HealthVerdict;
 use crate::domain::host::HostEntity;
@@ -126,10 +127,40 @@ impl SyncReconcilerUseCase {
                 .collect();
 
             if away.is_empty() {
+                // A stale verdict is refreshed before any claim is made. An
+                // idle cycle that observed nothing may preserve the marker,
+                // never create it.
+                if !options.dry_run && state.verification_is_due(now) {
+                    let hosts = select_hosts().await?;
+                    let problems = VerifyFleetUseCase::new(self.ctx.clone())
+                        .observe_stale(&hosts, &mut state, now)
+                        .await?;
+                    state.last_verification_at = Some(now);
+                    state.record_deployed(local_before.clone());
+                    let verified = state.mark_verified_when_all_healthy(&local_before, &hosts, now);
+                    if verified {
+                        state.record_success(local_before.clone());
+                    }
+                    let report = SyncReport {
+                        revision: local_before.clone(),
+                        previous_revision: Some(local_before),
+                        applied: true,
+                        verified,
+                        hosts: problems,
+                        refused: None,
+                        error: None,
+                        backoff_secs: 0,
+                        plan: Vec::new(),
+                    };
+                    state_store.save(&state).await?;
+                    self.notify(&report, options).await;
+                    return Ok(report);
+                }
+
                 let verified = state.last_verified_rev.as_deref() == Some(local_before.as_str());
                 let report = SyncReport {
                     revision: local_before.clone(),
-                    previous_revision: Some(local_before),
+                    previous_revision: Some(local_before.clone()),
                     applied: true,
                     verified,
                     hosts: Vec::new(),
@@ -139,7 +170,10 @@ impl SyncReconcilerUseCase {
                     plan: Vec::new(),
                 };
                 if !options.dry_run {
-                    state.record_success(report.revision.clone());
+                    // Nothing was observed, so the marker is preserved, not
+                    // created: `record_deployed` leaves `last_verified_rev`
+                    // exactly as it was.
+                    state.record_deployed(local_before);
                     state_store.save(&state).await?;
                     self.notify(&report, options).await;
                 }
@@ -287,7 +321,7 @@ impl SyncReconcilerUseCase {
         let inspections = inspect_hosts(
             &self.ctx,
             flake_path,
-            hosts,
+            hosts.clone(),
             options.concurrency,
             options.verbose,
             &policy,
@@ -413,11 +447,27 @@ impl SyncReconcilerUseCase {
 
         if changed.is_empty() {
             let settled = reports.iter().all(|host| host.result.is_settled());
-            // An idle cycle has no fresh observation, so it can preserve a
-            // verified marker but never create one.
-            let verified = settled && state.last_verified_rev.as_deref() == Some(head.as_str());
-            let report = SyncReport {
-                revision: head.clone(),
+
+            // Discovery already happened, so refreshing stale verdicts costs a
+            // probe round, not another evaluation. The marker is created only
+            // from a complete, fresh observation.
+            let mut problems = Vec::new();
+            if !options.dry_run && state.verification_is_due(now) {
+                problems = VerifyFleetUseCase::new(self.ctx.clone())
+                    .observe_stale(&hosts, &mut state, now)
+                    .await?;
+                state.last_verification_at = Some(now);
+            }
+
+            state.last_attempt_rev = Some(head.clone());
+            state.record_deployed(head.clone());
+            let verified = settled && state.mark_verified_when_all_healthy(&head, &hosts, now);
+            if verified {
+                state.record_success(head.clone());
+            }
+
+            let mut report = SyncReport {
+                revision: head,
                 previous_revision: Some(local_before),
                 applied: settled,
                 verified,
@@ -427,16 +477,7 @@ impl SyncReconcilerUseCase {
                 backoff_secs: 0,
                 plan: Vec::new(),
             };
-            if settled && verified {
-                state.record_success(head);
-            } else {
-                // Nothing to deploy, but some host did not answer or could not
-                // be verified. `record_deployed` keeps the revision as reached
-                // without claiming the fleet is verified at it.
-                let revision = head;
-                state.last_attempt_rev = Some(revision.clone());
-                state.record_deployed(revision);
-            }
+            report.hosts.append(&mut problems);
             state_store.save(&state).await?;
             self.notify(&report, options).await;
             return Ok(report);
@@ -465,17 +506,27 @@ impl SyncReconcilerUseCase {
 
         let settled = reports.iter().all(|host| host.result.is_settled());
         let applied = settled && !failed;
-        let verified = Self::verified(&reports);
         for report in &reports {
             if let Some(verdict) = &report.health {
                 state.record_health(&report.host, verdict.clone(), now);
             }
         }
+
+        // Hosts that did not change were not observed by this deployment;
+        // refresh them before the fleet-wide marker is considered.
+        let mut problems = Vec::new();
+        if applied && state.verification_is_due(now) {
+            problems = VerifyFleetUseCase::new(self.ctx.clone())
+                .observe_stale(&hosts, &mut state, now)
+                .await?;
+            state.last_verification_at = Some(now);
+        }
+
         let mut report = SyncReport {
             revision: head.clone(),
             previous_revision: Some(local_before),
             applied,
-            verified,
+            verified: false,
             hosts: reports,
             refused: None,
             error: None,
@@ -493,16 +544,19 @@ impl SyncReconcilerUseCase {
                     .filter(|h| h.result.is_failure())
                     .count()
             ));
-        } else if verified {
-            // Every host answered and is verified healthy: the fleet is at the
-            // revision in the strong sense.
-            state.record_success(head);
         } else {
             // A host that did not answer is not a failed cycle: the revision
-            // reached every host that answered. It is not a verified cycle
-            // either — `record_deployed` keeps that distinction.
-            state.record_deployed(head);
+            // reached every host that answered. `record_deployed` keeps that
+            // distinction; the marker is a separate claim that every host was
+            // observed fresh and healthy.
+            state.record_deployed(head.clone());
+            let verified = state.mark_verified_when_all_healthy(&head, &hosts, now);
+            if verified {
+                state.record_success(head.clone());
+            }
+            report.verified = verified;
         }
+        report.hosts.append(&mut problems);
         state_store.save(&state).await?;
         self.notify(&report, options).await;
 
@@ -668,17 +722,6 @@ impl SyncReconcilerUseCase {
         report
     }
 
-    /// A cycle is verified when every selected host is settled and its health
-    /// verdict from this cycle is `healthy`. `pending-reboot` and `unverified`
-    /// are not converged (ADR-029 §1). A remembered verdict does not count:
-    /// verification is a statement about observations, not about memory.
-    fn verified(reports: &[SyncHostReport]) -> bool {
-        !reports.is_empty()
-            && reports.iter().all(|report| {
-                report.result.is_settled() && matches!(report.health, Some(HealthVerdict::Healthy))
-            })
-    }
-
     /// Runs the configured notification commands; failures are logged, never
     /// allowed to fail the cycle.
     async fn notify(&self, report: &SyncReport, options: &SyncOptions) {
@@ -828,22 +871,6 @@ mod tests {
     }
 
     #[test]
-    fn only_healthy_settled_hosts_make_a_cycle_verified() {
-        use crate::domain::health::HealthVerdict;
-
-        let healthy = SyncHostReport::new("a", SyncHostResult::Deployed)
-            .with_health(Some(HealthVerdict::Healthy));
-        assert!(SyncReconcilerUseCase::verified(&[healthy]));
-
-        let pending = SyncHostReport::new("a", SyncHostResult::Deployed)
-            .with_health(Some(HealthVerdict::PendingReboot));
-        assert!(!SyncReconcilerUseCase::verified(&[pending]));
-
-        let unknown = SyncHostReport::new("a", SyncHostResult::Deployed);
-        assert!(!SyncReconcilerUseCase::verified(&[unknown]));
-    }
-
-    #[test]
     fn an_idle_cycle_preserves_but_does_not_create_a_verified_marker() {
         let mut state = SyncState::new("repo", "main");
         assert_ne!(state.last_verified_rev.as_deref(), Some("abc"));
@@ -908,6 +935,8 @@ mod tests {
 
         let mut state = SyncState::new("origin/main", "main");
         state.record_success("aaa");
+        // The health refresh is not this test's subject; keep it out of the way.
+        state.last_verification_at = Some(crate::domain::sync::now_secs());
         let mut store = MockState::new();
         store
             .expect_load()
@@ -926,7 +955,51 @@ mod tests {
             .unwrap();
 
         assert!(report.applied);
+        assert!(report.verified, "the marker is preserved");
         assert!(report.hosts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_cycle_without_a_marker_does_not_create_one() {
+        let mut git = MockGit::new();
+        git.expect_is_dirty().returning(|_| Ok(false));
+        git.expect_local_head().returning(|_| Ok("aaa".into()));
+        git.expect_remote_head()
+            .returning(|_, _, _| Ok("aaa".into()));
+
+        let mut state = SyncState::new("origin/main", "main");
+        state.record_deployed("aaa");
+        state.last_verification_at = Some(crate::domain::sync::now_secs());
+
+        let saved = Arc::new(std::sync::Mutex::new(None));
+        let captured = saved.clone();
+        let mut store = MockState::new();
+        store
+            .expect_load()
+            .returning(move || Ok(Some(state.clone())));
+        store.expect_save().returning(move |state: &SyncState| {
+            *captured.lock().unwrap() = Some(state.clone());
+            Ok(())
+        });
+
+        let mut evaluator = MockEvaluator::new();
+        evaluator.expect_build_toplevel().times(0);
+
+        let ctx = context(git, store, evaluator, MockDeployer::new());
+        let report = SyncReconcilerUseCase::new(ctx)
+            .reconcile_once(Path::new("/repo"), &options(), || async {
+                Ok(vec![host()])
+            })
+            .await
+            .unwrap();
+
+        assert!(report.applied);
+        assert!(!report.verified);
+        assert_eq!(
+            saved.lock().unwrap().as_ref().unwrap().last_verified_rev,
+            None,
+            "an idle cycle must not invent a verified marker"
+        );
     }
 
     #[tokio::test]

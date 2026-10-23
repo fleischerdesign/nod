@@ -188,13 +188,18 @@ stored state, so it cannot answer what the last deployment concluded.
 
 The process that activates a host is stopped by that activation when the host
 is the control plane itself. Its verdict can never be written: the new daemon
-starts, the old state keeps an `unverified` entry, and no later cycle re-probes
-an unchanged host.
+starts and the old state keeps an `unverified` entry.
 
 The daemon therefore probes the local host once at startup, before its first
 cycle, and records the verdict in the state. There is no pre-activation
 baseline after a restart; an existing problem is reported as the host's state
 (`degraded`), not attributed to a deployment.
+
+The same rule covers every other host between deployments. A deployer only
+observes the hosts it activates, so the reconciler re-observes hosts whose
+verdict is missing or older than `HEALTH_REFRESH_SECS` (half the freshness
+window) without activating anything. An idle cycle may preserve the marker,
+but only a complete, fresh observation can create it.
 
 A fleet-wide `last_verified_rev` is set only when every discovered host is
 reachable and its last recorded verdict is `healthy` — an aggregation of
@@ -255,6 +260,11 @@ Present in the code:
   token that is not a unit is ignored. Stopped and deliberately unchanged units
   are excluded. `systemd.check_changed_units` (default true) switches the whole
   source off.
+- A refresh pass (`application/use_cases/verify_fleet.rs`) re-observes hosts
+  whose verdict is missing or stale, through the same deployer probe path
+  (`DeployerPort::observe_health`); it never activates or copies a closure.
+  `SyncState::mark_verified_when_all_healthy` is the single place that decides
+  the marker, and it requires every selected host, not just the changed ones.
 - `last_applied_rev` (deployed to every host that answered) and
   `last_verified_rev` (every host settled and healthy) are separate facts.
   `nod status` prints `deployed` and `verified` on their own lines.

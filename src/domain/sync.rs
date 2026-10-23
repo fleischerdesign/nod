@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::domain::health::HealthVerdict;
+use crate::domain::host::HostEntity;
 use crate::domain::watch::SyncOptions;
 
 /// Version of the on-disk state document.
@@ -29,6 +31,13 @@ pub const STATE_VERSION: u32 = 2;
 /// only aggregates verdicts from the recent cycle. A verdict from hours ago is
 /// not evidence that the host is healthy now.
 pub const HEALTH_FRESHNESS_SECS: u64 = 1800;
+
+/// How often a stored verdict is refreshed, so the fleet-wide marker stays
+/// provable between rollouts.
+///
+/// Half the freshness window: a verdict is replaced well before it stops
+/// counting, so one missed pass does not cost the marker.
+pub const HEALTH_REFRESH_SECS: u64 = HEALTH_FRESHNESS_SECS / 2;
 
 /// First backoff step after a failed cycle, in seconds.
 const BACKOFF_BASE_SECS: u64 = 30;
@@ -67,6 +76,12 @@ pub struct SyncState {
     /// Unix time the verified revision was recorded, when it was.
     #[serde(default)]
     pub verified_at: Option<u64>,
+    /// Unix time the fleet's health was last re-observed between deployments.
+    ///
+    /// Cheap gate for the refresh pass: without it, an idle cycle would have
+    /// to discover the fleet just to learn whether anything is stale.
+    #[serde(default)]
+    pub last_verification_at: Option<u64>,
     /// Consecutive failed cycles; drives the backoff.
     pub consecutive_failures: u32,
     /// Unix time before which no new cycle starts.
@@ -210,6 +225,19 @@ pub struct HostMemory {
     pub health_at: Option<u64>,
 }
 
+impl HostMemory {
+    /// Whether the stored verdict is missing or old enough to be re-observed.
+    ///
+    /// A verdict without a timestamp counts as stale: the transition from an
+    /// older state document must not be mistaken for a fresh observation.
+    pub fn health_is_stale(&self, now: u64) -> bool {
+        match self.health_at {
+            Some(at) => now.saturating_sub(at) >= HEALTH_REFRESH_SECS,
+            None => true,
+        }
+    }
+}
+
 /// The hosts a sweep may probe now, and why the rest wait.
 ///
 /// Kept as a value object so the decision is pure and testable, and so a
@@ -253,6 +281,7 @@ impl SyncState {
             last_applied_rev: None,
             last_verified_rev: None,
             verified_at: None,
+            last_verification_at: None,
             consecutive_failures: 0,
             backoff_until: None,
             backoff_rev: None,
@@ -382,6 +411,54 @@ impl SyncState {
         memory.health = Some(verdict);
         memory.health_at = Some(now);
         memory.last_seen = now;
+    }
+
+    /// Whether the fleet-wide health refresh pass is due.
+    ///
+    /// A pass is cheap to skip: the state remembers when the last one ran, so
+    /// an idle cycle does not pay for host discovery just to learn that every
+    /// verdict is still fresh.
+    pub fn verification_is_due(&self, now: u64) -> bool {
+        self.last_verification_at
+            .is_none_or(|at| now.saturating_sub(at) >= HEALTH_REFRESH_SECS)
+    }
+
+    /// Marks `revision` verified when every selected host answered, its last
+    /// verdict is `Healthy`, and that verdict is still fresh.
+    ///
+    /// Returns whether the marker was set. The caller passes the revision it
+    /// just proved: an idle cycle can establish "every host runs this head"
+    /// by drift, and the marker belongs to that head, not to an older
+    /// `last_applied_rev` that has not caught up yet.
+    ///
+    /// A missing baseline never counts. Verification is a complete
+    /// observation of the fleet, not an assumption about the hosts nobody
+    /// looked at.
+    pub fn mark_verified_when_all_healthy(
+        &mut self,
+        revision: &str,
+        hosts: &[HostEntity],
+        now: u64,
+    ) -> bool {
+        if self.last_applied_rev.is_none() || hosts.is_empty() {
+            return false;
+        }
+
+        let all_healthy = hosts.iter().all(|host| {
+            self.hosts.get(&host.name).is_some_and(|memory| {
+                matches!(memory.condition, HostCondition::Reachable)
+                    && matches!(memory.health, Some(HealthVerdict::Healthy))
+                    && memory
+                        .health_at
+                        .is_some_and(|at| now.saturating_sub(at) <= HEALTH_FRESHNESS_SECS)
+            })
+        });
+
+        if all_healthy {
+            self.last_verified_rev = Some(revision.to_string());
+            self.verified_at = Some(now);
+        }
+        all_healthy
     }
 
     /// Seconds still to wait before the next cycle, zero when not backing off.
@@ -702,6 +779,40 @@ impl SyncReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verdict_without_a_timestamp_is_stale() {
+        let memory = HostMemory {
+            condition: HostCondition::Reachable,
+            last_seen: 10,
+            health: Some(HealthVerdict::Healthy),
+            health_at: None,
+        };
+
+        assert!(memory.health_is_stale(10));
+    }
+
+    #[test]
+    fn a_verdict_is_stale_after_half_the_freshness_window() {
+        let memory = HostMemory {
+            condition: HostCondition::Reachable,
+            last_seen: 0,
+            health: Some(HealthVerdict::Healthy),
+            health_at: Some(100),
+        };
+
+        assert!(!memory.health_is_stale(100 + HEALTH_REFRESH_SECS - 1));
+        assert!(memory.health_is_stale(100 + HEALTH_REFRESH_SECS));
+    }
+
+    #[test]
+    fn an_empty_fleet_is_never_verified() {
+        let mut state = SyncState::new("repo", "main");
+        state.last_applied_rev = Some("abc".to_string());
+
+        assert!(!state.mark_verified_when_all_healthy("abc", &[], 1));
+        assert_eq!(state.last_verified_rev, None);
+    }
 
     #[test]
     fn backoff_grows_exponentially_and_is_capped() {
