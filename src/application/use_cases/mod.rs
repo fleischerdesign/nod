@@ -28,6 +28,7 @@ pub mod rekey_secrets;
 pub mod render_graph;
 pub mod rollback;
 pub mod scaffold_flake;
+pub mod self_check;
 pub mod sync_daemon;
 pub mod sync_inspect;
 pub mod sync_reconciler;

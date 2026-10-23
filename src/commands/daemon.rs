@@ -42,6 +42,15 @@ pub async fn execute(
     let _lock = wiring::sync_lock(&options.state_dir)?;
     let ctx = Arc::new(ctx);
 
+    // A host cannot verify the activation that stopped the process performing
+    // it. The daemon can: it starts after that switch, so it probes the local
+    // host once and records the verdict before the first cycle (ADR-029).
+    match crate::application::use_cases::self_check::execute(&ctx, flake_path).await {
+        Ok(Some(verdict)) => tracing::info!(?verdict, "local self-check recorded"),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "local self-check failed"),
+    }
+
     let mut next_sweep = Instant::now();
     let mut next_gate = options.gate_interval_secs.gt(&0).then(Instant::now);
     // The last head the gate saw. Until the first observation there is nothing

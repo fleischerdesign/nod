@@ -169,6 +169,22 @@ verified. A verdict without a reason cannot be acted on.
 `nod status` stays the live reachability matrix: it probes now and does not read
 stored state, so it cannot answer what the last deployment concluded.
 
+### 9. A host cannot verify the activation that stops it
+
+The process that activates a host is stopped by that activation when the host
+is the control plane itself. Its verdict can never be written: the new daemon
+starts, the old state keeps an `unverified` entry, and no later cycle re-probes
+an unchanged host.
+
+The daemon therefore probes the local host once at startup, before its first
+cycle, and records the verdict in the state. There is no pre-activation
+baseline after a restart; an existing problem is reported as the host's state
+(`degraded`), not attributed to a deployment.
+
+A fleet-wide `last_verified_rev` is set only when every discovered host is
+reachable and its last recorded verdict is `healthy` — an aggregation of
+stored observations, not a claim that a missing observation is healthy.
+
 ## Consequences
 
 - The boolean `health_verified` becomes `Option<HealthVerdict>`; every consumer
@@ -203,6 +219,9 @@ Present in the code:
   `degraded-pre-existing` distinction.
 - The verdict is persisted per host (`HostMemory.health`), so `nod status` can
   name a degraded host without re-probing it.
+- A startup self-check (`application/use_cases/self_check.rs`): the daemon
+  probes the local host once after its own activation, records the verdict,
+  and aggregates the stored verdicts for `last_verified_rev`.
 - `last_applied_rev` (deployed to every host that answered) and
   `last_verified_rev` (every host settled and healthy) are separate facts.
   `nod status` prints `deployed` and `verified` on their own lines.
