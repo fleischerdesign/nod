@@ -67,16 +67,22 @@ async fn probe_local(host: &HostEntity) -> HealthVerdict {
     )
     .await;
     let restarting = run("sh", &["-c", probe::RESTARTING_UNITS_COMMAND], timeout).await;
+    let extra = match probe::extra_probe_command(host) {
+        Some(command) => run("sh", &["-c", &command], timeout).await,
+        None => Ok(String::new()),
+    };
 
-    match (failed, restarting) {
-        (Ok(failed), Ok(restarting)) => {
-            let snapshot = probe::snapshot(host, &failed, &restarting);
+    match (failed, restarting, extra) {
+        (Ok(failed), Ok(restarting), Ok(extra)) => {
+            let snapshot = probe::snapshot(host, &failed, &restarting, &extra);
             // There is no pre-activation baseline after a restart; an existing
             // problem is reported as this host's state, not attributed to a
             // deployment. `degraded` is the conservative answer.
             verdict_against(None, &snapshot)
         }
-        (Err(reason), _) | (_, Err(reason)) => HealthVerdict::Unverified { reason },
+        (Err(reason), _, _) | (_, Err(reason), _) | (_, _, Err(reason)) => {
+            HealthVerdict::Unverified { reason }
+        }
     }
 }
 

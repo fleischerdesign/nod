@@ -106,7 +106,11 @@ async fn verify_local_health(
     let failed =
         run_local_probe(host, "systemctl", &["--failed", "--no-legend", "--plain"]).await?;
     let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND]).await?;
-    let current = probe::snapshot(host, &failed, &restarting);
+    let extra = match probe::extra_probe_command(host) {
+        Some(command) => run_local_probe(host, "sh", &["-c", &command]).await?,
+        None => String::new(),
+    };
+    let current = probe::snapshot(host, &failed, &restarting, &extra);
 
     Ok(verdict_against(baseline, &current))
 }
@@ -133,8 +137,12 @@ async fn snapshot_local(host: &HostEntity) -> Option<HealthSnapshot> {
     let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND])
         .await
         .ok()?;
+    let extra = match probe::extra_probe_command(host) {
+        Some(command) => run_local_probe(host, "sh", &["-c", &command]).await.ok()?,
+        None => String::new(),
+    };
 
-    Some(probe::snapshot(host, &failed, &restarting))
+    Some(probe::snapshot(host, &failed, &restarting, &extra))
 }
 
 /// Runs one local probe command under the host's timeout, returning its stdout.

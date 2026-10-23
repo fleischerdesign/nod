@@ -85,6 +85,93 @@ pub fn restarting_units(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Quotes a value for a POSIX shell.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The shell command that checks declared units and probes, when any are
+/// configured.
+///
+/// One command, one channel: every problem is a line, and the snapshot keeps
+/// the line as the reason. A new probe kind does not change the snapshot type.
+pub fn extra_probe_command(host: &HostEntity) -> Option<String> {
+    let health = &host.nod_config.health_checks;
+    let mut parts = Vec::new();
+
+    let units = health.systemd.required_units.as_deref().unwrap_or(&[]);
+    if health.systemd.check_running.unwrap_or(true) && !units.is_empty() {
+        let list = units
+            .iter()
+            .map(|unit| shell_quote(unit))
+            .collect::<Vec<_>>()
+            .join(" ");
+        parts.push(format!(
+            r#"for unit in {list}; do
+  state=$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)
+  sub=$(systemctl show "$unit" --property=SubState --value 2>/dev/null)
+  result=$(systemctl show "$unit" --property=Result --value 2>/dev/null)
+  if [ "$state" = activating ] && [ "$sub" != auto-restart ]; then
+    for _ in 1 2 3 4 5; do
+      sleep 1
+      state=$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)
+      [ "$state" = activating ] || break
+    done
+  fi
+  case "$state" in
+    active) ;;
+    inactive) [ "$result" = success ] || echo "unit $unit: inactive (${{result:-unknown}})" ;;
+    "") echo "unit $unit: unknown" ;;
+    *) echo "unit $unit: $state${{sub:+ ($sub)}}" ;;
+  esac
+done"#
+        ));
+    }
+
+    let http = health.http_probes.as_deref().unwrap_or(&[]);
+    if !http.is_empty() {
+        let mut probes = String::new();
+        for probe in http {
+            let Some(url) = probe.url.as_deref() else {
+                continue;
+            };
+            let expected = probe.expected_status.unwrap_or(200);
+            let timeout = probe.timeout_secs.unwrap_or(5);
+            probes.push_str(&format!(
+                "  code=$(curl -s -o /dev/null -w '%{{http_code}}' --max-time {timeout} {url} 2>/dev/null)\n  [ \"$code\" = \"{expected}\" ] || echo \"http {url}: expected {expected}, got ${{code:-none}}\"\n",
+                url = shell_quote(url),
+                expected = expected,
+                timeout = timeout
+            ));
+        }
+        if !probes.is_empty() {
+            parts.push(format!(
+                "if command -v curl >/dev/null 2>&1; then\n{probes}else\n  echo \"http: curl is not installed\"\nfi"
+            ));
+        }
+    }
+
+    let custom = health.custom_probes.as_deref().unwrap_or(&[]);
+    for probe in custom {
+        let Some(command) = probe.command.as_deref() else {
+            continue;
+        };
+        let name = probe.name.as_deref().unwrap_or(command);
+        let timeout = probe.timeout_secs.unwrap_or(5);
+        parts.push(format!(
+            "timeout {timeout} sh -c {command} >/dev/null 2>&1 || echo \"probe {name}: failed\"",
+            command = shell_quote(command),
+            name = shell_quote(name),
+        ));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 /// Builds the observation the deployment compares, honouring the host's
 /// switches.
 ///
@@ -94,6 +181,7 @@ pub fn snapshot(
     host: &HostEntity,
     failed_output: &str,
     restarting_output: &str,
+    extra_output: &str,
 ) -> crate::domain::health::HealthSnapshot {
     use crate::domain::health::HealthSnapshot;
 
@@ -112,6 +200,12 @@ pub fn snapshot(
         } else {
             Vec::new()
         },
+        extra_problems: extra_output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
     }
 }
 
@@ -171,6 +265,7 @@ pub fn verdict(host: &HostEntity, output: &str) -> Result<(), NodError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::config::{CustomProbeConfig, HttpProbeConfig};
 
     fn host() -> HostEntity {
         HostEntity::new("atlas", "10.0.0.8", false)
@@ -255,5 +350,75 @@ mod tests {
         let mut configured = host;
         configured.nod_config.health_checks.timeout_secs = Some(5);
         assert_eq!(timeout(&configured), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn no_extra_probes_means_no_command() {
+        assert!(extra_probe_command(&host()).is_none());
+    }
+
+    #[test]
+    fn declared_units_are_checked() {
+        let mut host = host();
+        host.nod_config.health_checks.systemd.required_units =
+            Some(vec!["web.service".to_string()]);
+
+        let command = extra_probe_command(&host).expect("a declared unit needs a probe");
+        assert!(command.contains("systemctl show"));
+        assert!(command.contains("web.service"));
+    }
+
+    #[test]
+    fn declared_units_can_be_disabled() {
+        let mut host = host();
+        host.nod_config.health_checks.systemd.check_running = Some(false);
+        host.nod_config.health_checks.systemd.required_units =
+            Some(vec!["web.service".to_string()]);
+
+        assert!(extra_probe_command(&host).is_none());
+    }
+
+    #[test]
+    fn http_probes_use_curl_and_the_expected_status() {
+        let mut host = host();
+        host.nod_config.health_checks.http_probes = Some(vec![HttpProbeConfig {
+            url: Some("https://example.org/health".to_string()),
+            expected_status: Some(204),
+            timeout_secs: Some(3),
+        }]);
+
+        let command = extra_probe_command(&host).expect("an http probe needs a probe");
+        assert!(command.contains("curl"));
+        assert!(command.contains("https://example.org/health"));
+        assert!(command.contains("204"));
+    }
+
+    #[test]
+    fn custom_probes_run_under_a_timeout() {
+        let mut host = host();
+        host.nod_config.health_checks.custom_probes = Some(vec![CustomProbeConfig {
+            name: Some("socket".to_string()),
+            command: Some("test -S /run/app.sock".to_string()),
+            timeout_secs: Some(2),
+        }]);
+
+        let command = extra_probe_command(&host).expect("a custom probe needs a probe");
+        assert!(command.contains("timeout 2"));
+        assert!(command.contains("test -S /run/app.sock"));
+        assert!(command.contains("socket"));
+    }
+
+    #[test]
+    fn extra_problems_are_included_in_the_snapshot() {
+        let mut host = host();
+        host.nod_config.health_checks.systemd.required_units =
+            Some(vec!["web.service".to_string()]);
+
+        let snapshot = snapshot(&host, "", "", "unit web.service: inactive (failed)\n");
+        assert_eq!(
+            snapshot.extra_problems,
+            vec!["unit web.service: inactive (failed)".to_string()]
+        );
+        assert!(!snapshot.is_clean());
     }
 }

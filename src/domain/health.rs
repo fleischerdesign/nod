@@ -17,6 +17,12 @@ pub struct HealthSnapshot {
     pub failed_units: Vec<String>,
     /// Units systemd is restarting on its own (`activating`/`auto-restart`).
     pub restarting_units: Vec<String>,
+    /// Problems from declared units and probes, already rendered by the probe.
+    ///
+    /// Kept generic so a new probe kind does not change the snapshot type; the
+    /// line names what failed (`unit web.service: inactive`, `http …`).
+    #[serde(default)]
+    pub extra_problems: Vec<String>,
 }
 
 impl HealthSnapshot {
@@ -33,6 +39,7 @@ impl HealthSnapshot {
             .failed_units
             .iter()
             .chain(self.restarting_units.iter())
+            .chain(self.extra_problems.iter())
             .cloned()
             .collect();
         units.sort();
@@ -180,6 +187,7 @@ mod tests {
         HealthSnapshot {
             failed_units: failed.iter().map(|unit| unit.to_string()).collect(),
             restarting_units: restarting.iter().map(|unit| unit.to_string()).collect(),
+            extra_problems: Vec::new(),
         }
     }
 
@@ -258,5 +266,22 @@ mod tests {
         let current = snapshot(&[], &["crowdsec.service"]);
 
         assert!(verdict_against(Some(&baseline), &current).is_failure());
+    }
+
+    #[test]
+    fn an_extra_problem_is_part_of_the_verdict() {
+        let baseline = HealthSnapshot::clean();
+        let current = HealthSnapshot {
+            failed_units: Vec::new(),
+            restarting_units: Vec::new(),
+            extra_problems: vec!["unit web.service: inactive (failed)".to_string()],
+        };
+
+        let verdict = verdict_against(Some(&baseline), &current);
+        assert!(verdict.is_failure());
+        assert_eq!(
+            verdict.units(),
+            &["unit web.service: inactive (failed)".to_string()]
+        );
     }
 }

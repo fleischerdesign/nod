@@ -135,28 +135,28 @@ assumes this fleet's names, paths or services.
 [hosts.web1.health_checks]
 enable = true                 # false => verdict unverified, never healthy
 timeout_secs = 60
-require_baseline = true       # false => no attribution, failures are degraded
-changed_units = true          # score units this activation restarted
 
 [hosts.web1.health_checks.systemd]
 check_failed_units = true
 check_restart_loops = true
-max_restarts = 0              # allowed increases after activation
+check_running = true         # judge the declared units below
+required_units = ["sshd.service", "caddy.service"]
 
 [[hosts.web1.health_checks.http_probes]]
 url = "https://web1.example/health"
-expect_status = 200
+expected_status = 200
 timeout_secs = 5
 
 [[hosts.web1.health_checks.custom_probes]]
+name = "app-socket"
 command = "test -S /run/app.sock"
 timeout_secs = 5
 ```
 
 Fleet-wide defaults live in `[health_checks]` and are overridden per host. A
-host that declares nothing gets: failed units + restart loops + changed units,
-no probes, baseline on. That is strictly more than today and still silent on a
-healthy fleet.
+host that declares nothing gets failed units and restart loops; declared units
+and probes add to that. Baseline attribution is always on: a verdict without a
+baseline is `degraded`, never `healthy`.
 
 ### 8. Reporting
 
@@ -225,6 +225,10 @@ Present in the code:
 - A startup self-check (`application/use_cases/self_check.rs`): the daemon
   probes the local host once after its own activation, records the verdict,
   and aggregates the stored verdicts for `last_verified_rev`.
+- Declared units (`systemd.required_units`) and probes (`http_probes`,
+  `custom_probes`) are scored through one extra channel; each problem is a line
+  in the snapshot. HTTP probes use `curl`, and a host without it reports that
+  instead of passing silently.
 - `last_applied_rev` (deployed to every host that answered) and
   `last_verified_rev` (every host settled and healthy) are separate facts.
   `nod status` prints `deployed` and `verified` on their own lines.
@@ -233,8 +237,6 @@ Present in the code:
 
 Not built yet:
 
-- Declared units, HTTP probes and custom probes: `health_checks.*` is parsed,
-  not consulted.
 - `NRestarts` counters as a scored input; restart loops are detected from
   `activating`/`auto-restart` instead.
 - Scoring the units an activation touched.

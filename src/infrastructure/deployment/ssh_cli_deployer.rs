@@ -477,7 +477,11 @@ async fn verify_remote_health(
 
     let failed = run_remote_probe(host, profile, probe::FAILED_UNITS_COMMAND).await?;
     let restarting = run_remote_probe(host, profile, probe::RESTARTING_UNITS_COMMAND).await?;
-    let current = probe::snapshot(host, &failed, &restarting);
+    let extra = match probe::extra_probe_command(host) {
+        Some(command) => run_remote_probe(host, profile, &command).await?,
+        None => String::new(),
+    };
+    let current = probe::snapshot(host, &failed, &restarting, &extra);
 
     Ok(verdict_against(baseline, &current))
 }
@@ -496,8 +500,12 @@ async fn snapshot_remote(host: &HostEntity, profile: &SshProfile) -> Option<Heal
     let restarting = run_remote_probe(host, profile, probe::RESTARTING_UNITS_COMMAND)
         .await
         .ok()?;
+    let extra = match probe::extra_probe_command(host) {
+        Some(command) => run_remote_probe(host, profile, &command).await.ok()?,
+        None => String::new(),
+    };
 
-    Some(probe::snapshot(host, &failed, &restarting))
+    Some(probe::snapshot(host, &failed, &restarting, &extra))
 }
 
 /// Runs one probe command on `host` over SSH, returning its stdout.
