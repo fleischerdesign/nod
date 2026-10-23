@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "protocol": 1,
   "capabilities": ["authentik.group"],
-  "operations": [],
+  "operations": ["adopt"],
   "ownership": "marker",
   "description": "Authentik groups: observe and plan; apply is not enabled in this read-only build"
 }

@@ -42,6 +42,7 @@ fn main() {
             Some("observe") => observe(&request),
             Some("plan") => plan(&request),
             Some("apply") => apply(&request),
+            Some("adopt") => adopt(&request),
             Some(other) => {
                 eprintln!("unknown operation: {other}");
                 std::process::exit(1);
@@ -70,7 +71,7 @@ fn handshake() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
         "capabilities": ["authentik.group"],
-        "operations": [],
+        "operations": ["adopt"],
         "ownership": "marker",
         "settings_schema": {
             "type": "object",
@@ -282,6 +283,78 @@ fn apply(request: &Value) -> Value {
     json!({ "applied": applied, "conditions": [] })
 }
 
+fn adopt(request: &Value) -> Value {
+    let resources = match request.get("resources").cloned() {
+        Some(value) => match serde_json::from_value::<Vec<ObservedResource>>(value) {
+            Ok(resources) => resources,
+            Err(error) => {
+                eprintln!("invalid adopt resources: {error}");
+                return error_message("protocol", "invalid adopt resources");
+            }
+        },
+        None => Vec::new(),
+    };
+
+    if resources.is_empty() {
+        return json!({ "adopted": [], "conditions": [] });
+    }
+
+    let settings = match settings(request) {
+        Ok(settings) => settings,
+        Err(message) => return error_message("config", &message),
+    };
+    let client = match client(&settings) {
+        Ok(client) => client,
+        Err(message) => return error_message("config", &message),
+    };
+    let groups = match client.groups() {
+        Ok(groups) => groups,
+        Err(error) => return api_error(&error),
+    };
+
+    let marker = Marker {
+        key: settings.marker_key,
+        value: settings.marker_value,
+    };
+    let mut adopted = Vec::new();
+
+    for resource in resources
+        .iter()
+        .filter(|resource| resource.kind == model::KIND_GROUP)
+    {
+        let Some(group) = groups.iter().find(|group| group.name == resource.id) else {
+            adopted.push(json!({
+                "id": resource.id,
+                "ok": false,
+                "message": "group not found",
+                "error": { "kind": "config", "message": "group not found" }
+            }));
+            continue;
+        };
+
+        let attributes = marker.stamp(&group.attributes);
+        match client.patch_group(&group.pk, &attributes) {
+            Ok(()) => adopted.push(json!({
+                "id": resource.id,
+                "ok": true,
+                "message": ""
+            })),
+            Err(error) => adopted.push(json!({
+                "id": resource.id,
+                "ok": false,
+                "message": error.message(),
+                "error": {
+                    "kind": error.kind(),
+                    "message": error.message(),
+                    "retry_after_secs": error.retry_after()
+                }
+            })),
+        }
+    }
+
+    json!({ "adopted": adopted, "conditions": [] })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +364,13 @@ mod tests {
         let handshake = handshake();
         assert_eq!(handshake["capabilities"][0], json!("authentik.group"));
         assert_eq!(handshake["ownership"], json!("marker"));
-        assert!(handshake["operations"].as_array().unwrap().is_empty());
+        assert_eq!(handshake["operations"][0], json!("adopt"));
+    }
+
+    #[test]
+    fn an_empty_adopt_is_a_no_op() {
+        let response = adopt(&json!({ "resources": [] }));
+        assert!(response["adopted"].as_array().unwrap().is_empty());
     }
 
     #[test]

@@ -13,6 +13,8 @@ pub const KIND_GROUP: &str = "authentik.group";
 /// A group as Authentik returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Group {
+    /// Authentik's UUID primary key; used by `adopt` to address the object.
+    pub pk: String,
     /// Unique group name; the provider's stable id.
     pub name: String,
     /// Whether members become superusers.
@@ -36,6 +38,16 @@ impl Marker {
     /// Whether `group` carries this marker.
     pub fn matches(&self, group: &Group) -> bool {
         group.attributes.get(&self.key).and_then(Value::as_str) == Some(self.value.as_str())
+    }
+
+    /// Returns a copy of `attributes` with the marker set, preserving the rest.
+    ///
+    /// Adoption writes the marker and nothing else: a group's description,
+    /// its free-form attributes and its superuser flag stay as they are.
+    pub fn stamp(&self, attributes: &Value) -> Value {
+        let mut object = attributes.as_object().cloned().unwrap_or_default();
+        object.insert(self.key.clone(), Value::String(self.value.clone()));
+        Value::Object(object)
     }
 }
 
@@ -162,6 +174,7 @@ mod tests {
 
     fn group(name: &str, superuser: bool, attributes: Value) -> Group {
         Group {
+            pk: format!("pk-{name}"),
             name: name.to_string(),
             is_superuser: superuser,
             attributes,
@@ -243,6 +256,18 @@ mod tests {
     fn a_foreign_group_outside_the_declaration_is_left_alone() {
         let observed = vec![to_resource(&group("foreign", false, json!({})), &marker())];
         assert!(plan(&[], &observed).is_empty());
+    }
+
+    #[test]
+    fn stamping_preserves_existing_attributes_and_sets_the_marker() {
+        let stamped = marker().stamp(&json!({ "description": "media" }));
+        assert_eq!(stamped["description"], json!("media"));
+        assert_eq!(stamped["nod"], json!("owned"));
+    }
+
+    #[test]
+    fn stamping_null_attributes_starts_an_object() {
+        assert_eq!(marker().stamp(&Value::Null), json!({ "nod": "owned" }));
     }
 
     #[test]

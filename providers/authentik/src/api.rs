@@ -107,6 +107,31 @@ impl Authentik {
         Ok(groups)
     }
 
+    /// Writes the group's `attributes` object; the caller merges the marker.
+    ///
+    /// Adoption changes nothing else: `is_superuser`, the description and every
+    /// other attribute stay as the API returned them.
+    pub fn patch_group(&self, pk: &str, attributes: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/groups/{}/", self.base, pk);
+        let response = self
+            .agent
+            .request("PATCH", &url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Accept", "application/json")
+            .send_json(serde_json::json!({ "attributes": attributes }));
+
+        match response {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(code, response)) => Err(match code {
+                401 | 403 => ApiError::Auth,
+                429 => ApiError::RateLimited(retry_after(&response)),
+                500..=599 => ApiError::Transient(format!("HTTP {code}")),
+                _ => ApiError::Config(format!("HTTP {code}")),
+            }),
+            Err(ureq::Error::Transport(error)) => Err(ApiError::Transient(error.to_string())),
+        }
+    }
+
     fn get(&self, url: &str) -> Result<Page, ApiError> {
         let response = self
             .agent
@@ -180,16 +205,60 @@ mod tests {
         Authentik::new(base, "token".to_string(), 1, Duration::from_secs(5))
     }
 
+    /// Reads a full HTTP request, including a body split across TCP chunks.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut data = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            data.extend_from_slice(&buffer[..read]);
+            let Some(position) = data.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let header_end = position + 4;
+            let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if data.len() >= header_end + length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&data).to_string()
+    }
+
+    /// Serves one PATCH, returning the raw request so the body can be checked.
+    fn patch_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .unwrap();
+            request
+        });
+        (format!("http://{address}"), handle)
+    }
+
     #[test]
     fn pagination_follows_next_until_null() {
         let (base, handle) = server(vec![
             (
                 200,
-                r#"{"pagination":{"next":2},"results":[{"name":"a","is_superuser":false}]}"#,
+                r#"{"pagination":{"next":2},"results":[{"pk":"1","name":"a","is_superuser":false}]}"#,
             ),
             (
                 200,
-                r#"{"pagination":{"next":null},"results":[{"name":"b","is_superuser":true}]}"#,
+                r#"{"pagination":{"next":null},"results":[{"pk":"2","name":"b","is_superuser":true}]}"#,
             ),
         ]);
 
@@ -226,5 +295,22 @@ mod tests {
             Err(ApiError::Transient(_))
         ));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn patching_a_group_sends_the_attributes() {
+        let (base, handle) = patch_server();
+        client(&base)
+            .patch_group("group-uuid", &serde_json::json!({ "vyrx": "owned" }))
+            .expect("the PATCH should be accepted");
+
+        let request = handle.join().unwrap();
+        assert!(request.starts_with("PATCH /api/v3/core/groups/group-uuid/ "));
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("the body is present");
+        let body: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+        assert_eq!(body["attributes"]["vyrx"], serde_json::json!("owned"));
     }
 }

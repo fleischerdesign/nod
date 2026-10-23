@@ -18,8 +18,8 @@ fn fake_authentik() -> (String, thread::JoinHandle<()>) {
         let _ = stream.read(&mut buffer);
 
         let body = r#"{"pagination":{"next":null},"results":[
-            {"name":"admins","is_superuser":true,"attributes":{"vyrx":"owned"}},
-            {"name":"media","is_superuser":false,"attributes":{}}
+            {"pk":"1","name":"admins","is_superuser":true,"attributes":{"vyrx":"owned"}},
+            {"pk":"2","name":"media","is_superuser":false,"attributes":{}}
         ]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -99,6 +99,13 @@ fn the_provider_speaks_the_contract_without_a_real_instance() {
         .as_str()
         .unwrap()
         .contains("read-only"));
+
+    let adopted = send(serde_json::json!({
+        "op": "adopt",
+        "config": {},
+        "resources": []
+    }));
+    assert!(adopted["adopted"].as_array().unwrap().is_empty());
 
     drop(stdin);
     assert!(child.wait().unwrap().success());
