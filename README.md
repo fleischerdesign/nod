@@ -154,6 +154,10 @@ nod provider list --dir ./providers
 nod provider inspect /path/to/nod-provider
 nod provider test /path/to/nod-provider
 
+# Read-only summary of every declared provider (calls each API)
+nod provider status
+nod provider status --json
+
 # Observe and plan a declared provider; add --apply to write
 nod reconcile cloudflare
 nod reconcile cloudflare --apply
@@ -170,7 +174,9 @@ nod sync status
 but do not carry the provider's marker. `0` means drift correction is active.
 A provider may also expose a singleton such as `zone.settings`, which is only
 ever updated (ADR-033). `nod status` is the live reachability matrix;
-`nod sync status` is the reconciler's stored view.
+`nod sync status` is the reconciler's stored view. `nod config --json` prints
+the effective operational configuration with its provenance; `--format` on
+`graph` and `iso` selects an artifact, not a report serialization.
 
 ---
 

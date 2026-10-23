@@ -701,9 +701,9 @@ pub enum Commands {
         #[arg(long)]
         log: Option<String>,
 
-        /// Output format: table or json
-        #[arg(long, default_value = "table")]
-        format: String,
+        /// Print the configuration as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Reconcile declared state against a provider API (ADR-030)
@@ -1034,6 +1034,20 @@ pub enum ProviderCommands {
         /// Environment variable the provider inherits (repeatable)
         #[arg(long)]
         env: Vec<String>,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Custom path to flake root directory
+        #[arg(long, default_value = ".")]
+        flake: String,
+        /// Configuration file to read instead of discovering `.nod.toml`
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Show a read-only summary of every declared provider
+    Status {
+        /// Provider name (default: every declared provider)
+        provider: Option<String>,
         /// Print the report as JSON
         #[arg(long)]
         json: bool,

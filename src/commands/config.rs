@@ -17,7 +17,7 @@ pub async fn execute(
     config: Option<PathBuf>,
     state_dir: Option<PathBuf>,
     log: Option<String>,
-    format: &str,
+    json: bool,
 ) -> Result<(), NodError> {
     let cli = RuntimeCli {
         flake: flake.clone(),
@@ -42,19 +42,13 @@ pub async fn execute(
         store.base_dir(),
     )?;
 
-    match format {
-        "json" => {
-            let text = serde_json::to_string_pretty(&runtime).map_err(|error| {
-                NodError::config(format!("cannot render the configuration: {error}"))
-            })?;
-            println!("{text}");
-        }
-        "table" => print_table(&runtime),
-        other => {
-            return Err(NodError::config(format!(
-                "unknown format `{other}`; expected `table` or `json`"
-            )))
-        }
+    if json {
+        let text = serde_json::to_string_pretty(&runtime).map_err(|error| {
+            NodError::config(format!("cannot render the configuration: {error}"))
+        })?;
+        println!("{text}");
+    } else {
+        print_table(&runtime);
     }
     Ok(())
 }

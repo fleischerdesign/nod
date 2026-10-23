@@ -546,15 +546,29 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .await?
             }
+            nod::config::options::ProviderCommands::Status {
+                provider,
+                json,
+                flake,
+                config,
+            } => {
+                nod::commands::provider_status::execute(
+                    provider.as_deref(),
+                    json,
+                    &flake,
+                    config.as_deref(),
+                )
+                .await?
+            }
         },
         Commands::Config {
             flake,
             config,
             state_dir,
             log,
-            format,
+            json,
         } => {
-            nod::commands::config::execute(flake, config, state_dir, log, &format).await?;
+            nod::commands::config::execute(flake, config, state_dir, log, json).await?;
         }
         Commands::Reconcile {
             provider,

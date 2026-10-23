@@ -25,6 +25,7 @@ pub mod lifecycle;
 pub mod metadata;
 pub mod plan;
 pub mod provider;
+pub mod provider_status;
 pub mod reboot;
 pub mod reconcile;
 pub mod repl;
