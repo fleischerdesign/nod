@@ -5,5 +5,5 @@
   "capabilities": ["authentik.group"],
   "operations": ["adopt"],
   "ownership": "marker",
-  "description": "Authentik groups: observe and plan; apply is not enabled in this read-only build"
+  "description": "Authentik groups: observe, plan, apply and adopt, bounded by the core's deletion policy"
 }

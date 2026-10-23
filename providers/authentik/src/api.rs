@@ -59,6 +59,24 @@ struct Page {
     pagination: Pagination,
 }
 
+/// A user as the users endpoint returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct User {
+    /// User primary key; the value a group's `users` list expects.
+    pub pk: i64,
+    /// Login name.
+    pub username: String,
+}
+
+/// One page of the Authentik user list response.
+#[derive(Debug, Default, Deserialize)]
+struct UserPage {
+    #[serde(default)]
+    results: Vec<User>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
 /// Authentik's pagination block.
 #[derive(Debug, Default, Deserialize)]
 struct Pagination {
@@ -93,7 +111,7 @@ impl Authentik {
 
         loop {
             let url = format!(
-                "{}/api/v3/core/groups/?page={}&page_size={}",
+                "{}/api/v3/core/groups/?page={}&page_size={}&include_users=true",
                 self.base, page, self.page_size
             );
             let body: Page = self.get(&url)?;
@@ -107,18 +125,97 @@ impl Authentik {
         Ok(groups)
     }
 
+    /// Reads the complete user list, following pagination to the end.
+    ///
+    /// `apply` needs the pk for every username a group declaration names,
+    /// including users who are not yet members of that group.
+    pub fn users(&self) -> Result<Vec<User>, ApiError> {
+        let mut users = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/core/users/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: UserPage = self.get(&url)?;
+            users.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(users)
+    }
+
     /// Writes the group's `attributes` object; the caller merges the marker.
     ///
     /// Adoption changes nothing else: `is_superuser`, the description and every
     /// other attribute stay as the API returned them.
     pub fn patch_group(&self, pk: &str, attributes: &serde_json::Value) -> Result<(), ApiError> {
         let url = format!("{}/api/v3/core/groups/{}/", self.base, pk);
-        let response = self
+        self.write(
+            "PATCH",
+            &url,
+            serde_json::json!({ "attributes": attributes }),
+        )
+    }
+
+    /// Creates a group with the declared fields; undeclared ones keep the API default.
+    pub fn create_group(
+        &self,
+        name: &str,
+        is_superuser: Option<bool>,
+        attributes: &serde_json::Value,
+        users: Option<&[i64]>,
+    ) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/groups/", self.base);
+        let mut body = serde_json::json!({ "name": name, "attributes": attributes });
+        if let Some(flag) = is_superuser {
+            body["is_superuser"] = serde_json::json!(flag);
+        }
+        if let Some(users) = users {
+            body["users"] = serde_json::json!(users);
+        }
+        self.write("POST", &url, body)
+    }
+
+    /// Updates the declared fields of a group; an undeclared membership is not sent.
+    pub fn update_group(
+        &self,
+        pk: &str,
+        is_superuser: Option<bool>,
+        attributes: &serde_json::Value,
+        users: Option<&[i64]>,
+    ) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/groups/{}/", self.base, pk);
+        let mut body = serde_json::json!({ "attributes": attributes });
+        if let Some(flag) = is_superuser {
+            body["is_superuser"] = serde_json::json!(flag);
+        }
+        if let Some(users) = users {
+            body["users"] = serde_json::json!(users);
+        }
+        self.write("PATCH", &url, body)
+    }
+
+    /// Deletes a group.
+    pub fn delete_group(&self, pk: &str) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/groups/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
+    }
+
+    /// Sends one write request and maps its failure.
+    fn write(&self, method: &str, url: &str, body: serde_json::Value) -> Result<(), ApiError> {
+        let request = self
             .agent
-            .request("PATCH", &url)
+            .request(method, url)
             .set("Authorization", &format!("Bearer {}", self.token))
-            .set("Accept", "application/json")
-            .send_json(serde_json::json!({ "attributes": attributes }));
+            .set("Accept", "application/json");
+        let response = if body.is_null() {
+            request.call()
+        } else {
+            request.send_json(body)
+        };
 
         match response {
             Ok(_) => Ok(()),
@@ -132,7 +229,7 @@ impl Authentik {
         }
     }
 
-    fn get(&self, url: &str) -> Result<Page, ApiError> {
+    fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, ApiError> {
         let response = self
             .agent
             .get(url)

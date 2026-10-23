@@ -3,15 +3,19 @@
 Authentik groups for [nod](https://github.com/fleischerdesign/nod), spoken over
 the provider protocol (JSON Lines on stdin/stdout).
 
-**Stage 0: read-only.** `observe` and `plan` are implemented; `apply` refuses a
-non-empty change set. The core's `apply = false` is the second guard. Adoption
-and writes land in later stages, behind their own conformance runs.
+The provider owns `authentik.group` objects: it observes them, plans the
+difference against a declaration, applies it, and adopts existing groups on
+request. Users, roles, parents and bindings stay outside its scope.
 
 ## Capabilities
 
 | Kind | Id | Attributes |
 |---|---|---|
-| `authentik.group` | group name (unique in Authentik) | `is_superuser` |
+| `authentik.group` | group name (unique in Authentik) | `is_superuser`, `description`, `users` |
+
+`users` lists login names. `description` and `users` are written into the group's
+free-form `attributes` and membership respectively; `is_superuser` is the group's
+own flag.
 
 ## Settings
 
@@ -43,30 +47,61 @@ whatever it declares.
     {
       "kind": "authentik.group",
       "id": "media",
-      "attributes": { "is_superuser": false }
+      "attributes": {
+        "is_superuser": false,
+        "description": "Media consumers",
+        "users": ["philipp"]
+      }
     }
   ]
 }
 ```
 
-A missing group is planned as `create`; an owned group whose attributes differ is
-`update`; an owned group outside the declaration is `delete`. Foreign groups are
-never updated or deleted: adoption is an explicit operation, not a reconcile
-side effect.
+A missing group is planned as `create`; an owned group whose declared attributes
+differ is `update`; an owned group outside the declaration is `delete`. Foreign
+groups are never updated or deleted: adoption is an explicit operation, not a
+reconcile side effect.
+
+### Only declared attributes are managed
+
+The declaration is a subset, not a replacement. A key the resource omits is
+neither compared nor written:
+
+- `users` absent means membership stays UI-owned. The group keeps its members.
+- `users: []` is a declaration and removes every member.
+- Any other attribute outside the declaration survives an update untouched.
+
+This is what lets a fleet declare a group's purpose without taking ownership of
+a membership that an LDAP sync or an administrator maintains.
+
+## Operations
+
+| Operation | Effect |
+|---|---|
+| `observe` | Reads every group, paginated, with its members. |
+| `plan` | Computes `create`/`update`/`delete` against the declaration. |
+| `apply` | Writes the plan. Refuses every change to an unowned resource. |
+| `adopt` | Stamps the marker on an existing group; nothing else changes. |
+
+Deletion is the core's decision, not the provider's: the core's `policy.protect`
+and `policy.max_deletions` bound what a plan may remove, and a plan over the cap
+is refused as a whole.
 
 ## Token
 
-A read-only run needs an Authentik API token with `view_group` (and nothing
-else). A write stage will need `add_group`, `change_group` and `delete_group`;
-grant them only when `apply` is enabled.
+`observe` and `plan` need `view_group` and `view_user`. `apply` and `adopt` add
+`change_group`; deleting needs `delete_group`. Grant the narrowest set the
+enabled operations require — a read-only consumer of this provider never gets a
+write scope.
 
 ## Scope and limits
 
-- Groups only. Users, roles, parents and memberships are not part of this stage.
-- `apply` is not implemented; the binary refuses changes loudly.
-- `adopt` is not offered yet; the marker is read, not written.
+- Groups only. Users, roles, parents, policy bindings and applications are not
+  managed here.
 - The API is `/api/v3/core/groups/`; pagination follows `pagination.next` to the
   end. The provider was written against Authentik 2026.5.6 and speaks API v3.
+- A declared username that does not exist fails the change instead of being
+  skipped: silently dropping a member is worse than a loud error.
 
 ## Conformance
 
@@ -74,6 +109,5 @@ grant them only when `apply` is enabled.
 nod provider test ./nod-provider-authentik --settings settings.json --env AUTHENTIK_TOKEN
 ```
 
-`--write` is unavailable: the manifest has no `sandbox` and the build does not
-write. The provider's own tests cover the model, planning, pagination and the
-error classes (401/403, 429, 5xx).
+The provider's own tests cover the model, planning, subset semantics, pagination
+and the error classes (401/403, 429, 5xx).

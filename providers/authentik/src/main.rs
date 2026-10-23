@@ -248,39 +248,188 @@ fn plan(request: &Value) -> Value {
 }
 
 fn apply(request: &Value) -> Value {
-    let changes = request
-        .get("changes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let changes = match request.get("changes").cloned() {
+        Some(value) => match serde_json::from_value::<Vec<model::Change>>(value) {
+            Ok(changes) => changes,
+            Err(error) => {
+                eprintln!("invalid changes: {error}");
+                return error_message("protocol", "invalid changes");
+            }
+        },
+        None => Vec::new(),
+    };
 
     if changes.is_empty() {
         return json!({ "applied": [], "conditions": [] });
     }
 
-    // Stage 0 is read-only: every change is refused, and the core keeps
-    // `apply = false`. A silent success would be worse than a loud refusal.
-    let applied: Vec<Value> = changes
-        .iter()
-        .map(|change| {
-            let id = change
-                .get("resource")
-                .and_then(|resource| resource.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            json!({
-                "id": id,
-                "ok": false,
-                "message": "apply is not enabled in this read-only build",
-                "error": {
-                    "kind": "config",
-                    "message": "apply is not enabled in this read-only build"
+    let settings = match settings(request) {
+        Ok(settings) => settings,
+        Err(message) => return error_message("config", &message),
+    };
+    let client = match client(&settings) {
+        Ok(client) => client,
+        Err(message) => return error_message("config", &message),
+    };
+    let groups = match client.groups() {
+        Ok(groups) => groups,
+        Err(error) => return api_error(&error),
+    };
+    let users = match client.users() {
+        Ok(users) => users,
+        Err(error) => return api_error(&error),
+    };
+
+    let marker = Marker {
+        key: settings.marker_key,
+        value: settings.marker_value,
+    };
+    let mut applied = Vec::new();
+
+    for change in &changes {
+        let id = change.resource.id.clone();
+
+        if !change.owned {
+            applied.push(failed(
+                &id,
+                "refusing to change an unowned resource",
+                "config",
+            ));
+            continue;
+        }
+
+        match change.kind.as_str() {
+            "create" => {
+                let user_pks = match resolve_users(&change.resource.attributes, &users) {
+                    Ok(pks) => pks,
+                    Err(()) => {
+                        applied.push(failed(&id, "unknown user in the declaration", "config"));
+                        continue;
+                    }
+                };
+                let attributes =
+                    marker.stamp(&Value::Object(free_form(&change.resource.attributes)));
+                match client.create_group(
+                    &id,
+                    attribute_bool(&change.resource.attributes, "is_superuser"),
+                    &attributes,
+                    user_pks.as_deref(),
+                ) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(&id, &error.message(), error.kind())),
                 }
-            })
-        })
-        .collect();
+            }
+            "update" => {
+                let Some(group) = groups.iter().find(|group| group.name == id) else {
+                    applied.push(failed(&id, "group not found", "config"));
+                    continue;
+                };
+                let user_pks = match resolve_users(&change.resource.attributes, &users) {
+                    Ok(pks) => pks,
+                    Err(()) => {
+                        applied.push(failed(&id, "unknown user in the declaration", "config"));
+                        continue;
+                    }
+                };
+                let attributes = merged_attributes(&group.attributes, &change.resource.attributes);
+                match client.update_group(
+                    &group.pk,
+                    attribute_bool(&change.resource.attributes, "is_superuser"),
+                    &attributes,
+                    user_pks.as_deref(),
+                ) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(&id, &error.message(), error.kind())),
+                }
+            }
+            "delete" => {
+                let Some(group) = groups.iter().find(|group| group.name == id) else {
+                    applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
+                    continue;
+                };
+                match client.delete_group(&group.pk) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(&id, &error.message(), error.kind())),
+                }
+            }
+            other => applied.push(failed(
+                &id,
+                &format!("unsupported change kind: {other}"),
+                "protocol",
+            )),
+        }
+    }
 
     json!({ "applied": applied, "conditions": [] })
+}
+
+fn ok(id: &str) -> Value {
+    json!({ "id": id, "ok": true, "message": "" })
+}
+
+fn failed(id: &str, message: &str, kind: &str) -> Value {
+    json!({
+        "id": id,
+        "ok": false,
+        "message": message,
+        "error": { "kind": kind, "message": message }
+    })
+}
+
+fn attribute_bool(attributes: &Value, key: &str) -> Option<bool> {
+    attributes.get(key).and_then(Value::as_bool)
+}
+
+/// The keys the nod resource carries for the provider's own control, never for
+/// the object's free-form `attributes` object.
+const CONTROL_KEYS: [&str; 2] = ["is_superuser", "users"];
+
+/// The declared free-form attributes, without the control keys.
+///
+/// Authentik stores the description inside `attributes`, while `is_superuser`
+/// and `users` are top-level group fields; mixing them would put two API
+/// fields into the attributes object.
+fn free_form(declared: &Value) -> serde_json::Map<String, Value> {
+    declared
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(key, _)| !CONTROL_KEYS.contains(&key.as_str()))
+        .collect()
+}
+
+/// The attributes an update writes: the observed object with every declared
+/// free-form key overwritten, so an undeclared attribute is preserved.
+fn merged_attributes(observed: &Value, declared: &Value) -> Value {
+    let mut object = observed.as_object().cloned().unwrap_or_default();
+    for (key, value) in free_form(declared) {
+        object.insert(key, value);
+    }
+    Value::Object(object)
+}
+
+/// Resolves the declared member usernames to primary keys.
+///
+/// `Ok(None)` means the declaration does not name membership (`members = null`),
+/// so the reconcile must not write it. `Err` means a username does not exist:
+/// sending the rest would silently drop a member the declaration asks for.
+fn resolve_users(attributes: &Value, users: &[api::User]) -> Result<Option<Vec<i64>>, ()> {
+    let Some(declared) = attributes.get("users").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    declared
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|username| {
+            users
+                .iter()
+                .find(|user| user.username == username)
+                .map(|user| user.pk)
+                .ok_or(())
+        })
+        .collect::<Result<Vec<i64>, ()>>()
+        .map(Some)
 }
 
 fn adopt(request: &Value) -> Value {
@@ -380,19 +529,16 @@ mod tests {
     }
 
     #[test]
-    fn a_non_empty_apply_is_refused() {
+    fn a_non_empty_apply_needs_settings() {
         let response = apply(&json!({
             "changes": [{
-                "resource": { "kind": "authentik.group", "id": "admins", "attributes": {} }
+                "kind": "create",
+                "owned": true,
+                "destructive": false,
+                "resource": { "kind": "authentik.group", "id": "new", "attributes": {} }
             }]
         }));
-        let applied = response["applied"].as_array().unwrap();
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0]["ok"], json!(false));
-        assert!(applied[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("read-only"));
+        assert_eq!(response["error"]["kind"], json!("config"));
     }
 
     #[test]

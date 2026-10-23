@@ -10,19 +10,29 @@ use serde_json::{json, Value};
 /// Resource kind for an Authentik group.
 pub const KIND_GROUP: &str = "authentik.group";
 
+/// A user as the group serializer's `users_obj` returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PartialUser {
+    /// Login name; the provider's membership identifier.
+    pub username: String,
+}
+
 /// A group as Authentik returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Group {
-    /// Authentik's UUID primary key; used by `adopt` to address the object.
+    /// Authentik's UUID primary key; used by `adopt` and `apply` to address the object.
     pub pk: String,
     /// Unique group name; the provider's stable id.
     pub name: String,
     /// Whether members become superusers.
     #[serde(default)]
     pub is_superuser: bool,
-    /// Free-form attributes; the ownership marker lives here.
+    /// Free-form attributes; the ownership marker and the description live here.
     #[serde(default)]
     pub attributes: Value,
+    /// Current members as partial users, including usernames.
+    #[serde(default)]
+    pub users_obj: Vec<PartialUser>,
 }
 
 /// The ownership marker, configured per provider instance.
@@ -93,15 +103,47 @@ pub struct Change {
 
 /// Maps a group to the resource the core sees.
 ///
-/// Only fields the declaration controls are exposed: the name is the id, and
-/// `is_superuser` is the one attribute. The free-form `attributes` object stays
-/// out of desired state because the ownership marker lives there.
+/// The name is the id; `is_superuser`, the description and the member
+/// usernames are the attributes. The ownership marker and any other free-form
+/// attribute stay out of the comparison, so a marker write never looks like a
+/// desired-state change.
 pub fn to_resource(group: &Group, marker: &Marker) -> ObservedResource {
+    let description = group
+        .attributes
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut users: Vec<&str> = group
+        .users_obj
+        .iter()
+        .map(|user| user.username.as_str())
+        .collect();
+    users.sort_unstable();
+
     ObservedResource {
         kind: KIND_GROUP.to_string(),
         id: group.name.clone(),
-        attributes: json!({ "is_superuser": group.is_superuser }),
+        attributes: json!({
+            "is_superuser": group.is_superuser,
+            "description": description,
+            "users": users,
+        }),
         owned: marker.matches(group),
+    }
+}
+
+/// Whether the declaration asks for anything the observation does not show.
+///
+/// Only the keys the declaration names are compared. `members = null` in the
+/// directory contract means membership stays UI-owned, so the declaration omits
+/// `users`; a reconcile must then neither compare nor write it. An explicitly
+/// empty `users: []` is a declaration and does remove every member.
+fn differs(declared: &Value, observed: &Value) -> bool {
+    match declared.as_object() {
+        Some(want) => want
+            .iter()
+            .any(|(key, value)| observed.get(key) != Some(value)),
+        None => declared != observed,
     }
 }
 
@@ -127,12 +169,14 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
                 resource: want.clone(),
             }),
             Some(current) if !current.owned => {}
-            Some(current) if current.attributes != want.attributes => changes.push(Change {
-                kind: "update".to_string(),
-                owned: true,
-                destructive: false,
-                resource: want.clone(),
-            }),
+            Some(current) if differs(&want.attributes, &current.attributes) => {
+                changes.push(Change {
+                    kind: "update".to_string(),
+                    owned: true,
+                    destructive: false,
+                    resource: want.clone(),
+                })
+            }
             Some(_) => {}
         }
     }
@@ -178,6 +222,7 @@ mod tests {
             name: name.to_string(),
             is_superuser: superuser,
             attributes,
+            users_obj: Vec::new(),
         }
     }
 
@@ -185,7 +230,11 @@ mod tests {
         Resource {
             kind: KIND_GROUP.to_string(),
             id: name.to_string(),
-            attributes: json!({ "is_superuser": superuser }),
+            attributes: json!({
+                "is_superuser": superuser,
+                "description": "",
+                "users": [],
+            }),
         }
     }
 
@@ -201,8 +250,28 @@ mod tests {
         let mapped = to_resource(&group("admins", true, json!({})), &marker());
         assert_eq!(mapped.kind, KIND_GROUP);
         assert_eq!(mapped.id, "admins");
-        assert_eq!(mapped.attributes, json!({ "is_superuser": true }));
+        assert_eq!(
+            mapped.attributes,
+            json!({ "is_superuser": true, "description": "", "users": [] })
+        );
         assert!(!mapped.owned);
+    }
+
+    #[test]
+    fn a_group_maps_description_and_members_sorted() {
+        let mut group = group("admins", false, json!({ "description": "ops" }));
+        group.users_obj = vec![
+            PartialUser {
+                username: "zoe".to_string(),
+            },
+            PartialUser {
+                username: "ada".to_string(),
+            },
+        ];
+
+        let mapped = to_resource(&group, &marker());
+        assert_eq!(mapped.attributes["description"], json!("ops"));
+        assert_eq!(mapped.attributes["users"], json!(["ada", "zoe"]));
     }
 
     #[test]
@@ -232,6 +301,42 @@ mod tests {
             &marker(),
         )];
         assert!(plan(&[resource("admins", true)], &observed).is_empty());
+    }
+
+    #[test]
+    fn undeclared_membership_is_neither_compared_nor_written() {
+        let mut current = group("media", false, json!({ "nod": "owned" }));
+        current.users_obj = vec![PartialUser {
+            username: "philipp".to_string(),
+        }];
+        let observed = vec![to_resource(&current, &marker())];
+
+        // `members = null`: the declaration names no `users`, so a UI-owned
+        // membership must not read as drift.
+        let desired = vec![Resource {
+            kind: KIND_GROUP.to_string(),
+            id: "media".to_string(),
+            attributes: json!({ "is_superuser": false, "description": "" }),
+        }];
+        assert!(plan(&desired, &observed).is_empty());
+    }
+
+    #[test]
+    fn a_declared_empty_membership_removes_the_members() {
+        let mut current = group("media", false, json!({ "nod": "owned" }));
+        current.users_obj = vec![PartialUser {
+            username: "philipp".to_string(),
+        }];
+        let observed = vec![to_resource(&current, &marker())];
+
+        let desired = vec![Resource {
+            kind: KIND_GROUP.to_string(),
+            id: "media".to_string(),
+            attributes: json!({ "is_superuser": false, "description": "", "users": [] }),
+        }];
+        let changes = plan(&desired, &observed);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "update");
     }
 
     #[test]
