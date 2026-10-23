@@ -188,9 +188,11 @@ pub async fn test(
     );
 
     let observed = provider.observe(&settings).await?;
+    assert_no_secret(&observed, env)?;
     println!("observe     ok   {} resource(s)", observed.resources.len());
 
     let plan = provider.plan(&settings, &[], &observed.resources).await?;
+    assert_no_secret(&plan, env)?;
     println!("plan        ok   {} change(s)", plan.changes.len());
 
     // A declaration that names capabilities must stay inside them — checked
@@ -210,6 +212,7 @@ pub async fn test(
         .any(|operation| operation == "adopt")
     {
         let adopted = provider.adopt(&settings, &[]).await?;
+        assert_no_secret(&adopted, env)?;
         if !adopted.adopted.is_empty() {
             return Err(NodError::provider(
                 "a provider adopted resources when asked to adopt none",
@@ -232,9 +235,11 @@ pub async fn test(
     }
 
     let applied = provider.apply(&settings, &[]).await?;
+    assert_no_secret(&applied, env)?;
     println!("apply       ok   {} applied", applied.applied.len());
 
     let verified = provider.observe(&settings).await?;
+    assert_no_secret(&verified, env)?;
     println!("verify      ok   {} resource(s)", verified.resources.len());
 
     if write {
@@ -244,7 +249,7 @@ pub async fn test(
         let sandbox = manifest
             .sandbox
             .ok_or_else(|| NodError::config("provider declares no sandbox; refusing to write"))?;
-        write_conformance(&mut provider, &handshake, &settings, &sandbox).await?;
+        write_conformance(&mut provider, &handshake, &settings, &sandbox, env).await?;
     }
 
     println!("PASS");
@@ -273,6 +278,7 @@ async fn write_conformance(
     handshake: &crate::domain::provider::Handshake,
     settings: &serde_json::Value,
     sandbox: &crate::domain::provider::Sandbox,
+    env: &[String],
 ) -> Result<(), NodError> {
     use crate::application::use_cases::reconcile::approve;
     use crate::domain::provider::{Change, ChangeKind, DesiredResource};
@@ -284,9 +290,11 @@ async fn write_conformance(
     }
 
     let observed = provider.observe(settings).await?;
+    assert_no_secret(&observed, env)?;
     let plan = provider
         .plan(settings, &sandbox.desired, &observed.resources)
         .await?;
+    assert_no_secret(&plan, env)?;
     let (approved, refused) = approve(
         handshake,
         &plan.changes,
@@ -305,15 +313,21 @@ async fn write_conformance(
     }
 
     let applied = provider.apply(settings, &approved).await?;
+    assert_no_secret(&applied, env)?;
     if applied.applied.iter().any(|entry| !entry.ok) {
         return Err(NodError::provider("apply reported a failed change"));
     }
 
     // Idempotency: the same declaration must now produce an empty plan.
     let after = provider.observe(settings).await?;
+    assert_no_secret(&after, env)?;
+    // Apply must have written what it reported; an empty plan alone proves
+    // nothing if observe never saw the fixture.
+    assert_fixture_observed(sandbox, &after.resources)?;
     let second = provider
         .plan(settings, &sandbox.desired, &after.resources)
         .await?;
+    assert_no_secret(&second, env)?;
     if !second.changes.is_empty() {
         return Err(NodError::provider(format!(
             "provider is not idempotent: {} change(s) after apply",
@@ -345,6 +359,7 @@ async fn write_conformance(
 
     if !deletes.is_empty() {
         let cleanup = provider.apply(settings, &deletes).await?;
+        assert_no_secret(&cleanup, env)?;
         if cleanup.applied.iter().any(|entry| !entry.ok) {
             return Err(NodError::provider(
                 "cleanup failed; the sandbox may hold leftovers",
@@ -353,6 +368,65 @@ async fn write_conformance(
     }
 
     println!("write       ok   created, idempotent, cleaned up");
+    Ok(())
+}
+
+/// Refuses a provider response that echoes a secret from its environment.
+///
+/// `env` names the variables the core passes to the provider; their values are
+/// secrets by declaration. A provider that prints one in a response has leaked
+/// it, and the test must fail before the value reaches a log.
+fn assert_no_secret<T: serde::Serialize>(value: &T, env: &[String]) -> Result<(), NodError> {
+    let secrets: Vec<(&str, String)> = env
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|value| (name.as_str(), value))
+        })
+        .collect();
+    scan_for_secrets(value, &secrets)
+}
+
+/// The testable core of [`assert_no_secret`]: scans a serialized response for
+/// each named secret.
+fn scan_for_secrets<T: serde::Serialize>(
+    value: &T,
+    secrets: &[(&str, String)],
+) -> Result<(), NodError> {
+    let text = serde_json::to_string(value)
+        .map_err(|error| NodError::provider(format!("cannot scan a response: {error}")))?;
+    for (name, secret) in secrets {
+        if text.contains(secret.as_str()) {
+            return Err(NodError::provider(format!(
+                "provider leaked the value of {name} in its response"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Proves that `apply` did what it said: every sandbox resource is visible in
+/// the next observation.
+///
+/// Without this check a provider can report `ok` for a create, never write it,
+/// and still pass the idempotency test with an empty plan.
+fn assert_fixture_observed(
+    sandbox: &crate::domain::provider::Sandbox,
+    observed: &[crate::domain::provider::ObservedResource],
+) -> Result<(), NodError> {
+    for desired in &sandbox.desired {
+        let present = observed
+            .iter()
+            .any(|resource| resource.kind == desired.kind && resource.id == desired.id);
+        if !present {
+            return Err(NodError::provider(format!(
+                "apply reported success but {}:{} is not observed",
+                desired.kind, desired.id
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -393,5 +467,41 @@ mod tests {
     fn settings_must_be_an_object() {
         let schema = json!({ "type": "object", "required": ["state"] });
         assert!(check_settings(&schema, &json!([])).is_err());
+    }
+
+    #[test]
+    fn a_secret_in_a_response_is_rejected() {
+        let response = json!({"resources": [{"attributes": {"token": "super-secret"}}]});
+        let secrets = vec![("AUTHENTIK_TOKEN", "super-secret".to_string())];
+        let error = scan_for_secrets(&response, &secrets).unwrap_err();
+        assert!(error.to_string().contains("AUTHENTIK_TOKEN"));
+    }
+
+    #[test]
+    fn a_response_without_the_secret_passes() {
+        let response = json!({"resources": []});
+        let secrets = vec![("AUTHENTIK_TOKEN", "super-secret".to_string())];
+        assert!(scan_for_secrets(&response, &secrets).is_ok());
+    }
+
+    #[test]
+    fn a_sandbox_fixture_must_be_observed_after_apply() {
+        let sandbox = crate::domain::provider::Sandbox {
+            desired: vec![crate::domain::provider::DesiredResource {
+                kind: "authentik.group".to_string(),
+                id: "nod-conformance".to_string(),
+                attributes: json!({}),
+            }],
+        };
+
+        assert!(assert_fixture_observed(&sandbox, &[]).is_err());
+
+        let observed = vec![crate::domain::provider::ObservedResource {
+            kind: "authentik.group".to_string(),
+            id: "nod-conformance".to_string(),
+            attributes: json!({}),
+            owned: true,
+        }];
+        assert!(assert_fixture_observed(&sandbox, &observed).is_ok());
     }
 }

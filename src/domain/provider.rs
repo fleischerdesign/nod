@@ -414,7 +414,7 @@ pub struct ObserveRequest<'a> {
 }
 
 /// `observe` response.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObserveResponse {
     /// Observed resources.
     #[serde(default)]
@@ -438,7 +438,7 @@ pub struct PlanRequest<'a> {
 }
 
 /// `plan` response.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlanResponse {
     /// Proposed changes.
     #[serde(default)]
@@ -460,7 +460,7 @@ pub struct ApplyRequest<'a> {
 }
 
 /// `apply` response.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApplyResponse {
     /// Per-change results.
     #[serde(default)]
@@ -487,7 +487,7 @@ pub struct AdoptRequest<'a> {
 }
 
 /// `adopt` response.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdoptResponse {
     /// Per-resource results; `ok` means the marker is now present.
     #[serde(default)]

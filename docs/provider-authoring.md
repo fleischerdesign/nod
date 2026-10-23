@@ -241,7 +241,10 @@ nod provider test /path/to/provider --write
 
 The suite proves: the handshake, the manifest agreement, a valid observe, a
 plan that obeys ownership, a declared `adopt` that answers an empty request,
-and — with `--write` — create, idempotency and cleanup in a **sandbox**.
+that no declared secret env value appears in any response, and — with `--write`
+— create, idempotency and cleanup in a **sandbox**. After apply the fixture
+must be visible in the next observe: a provider that reports `ok` without
+writing anything fails there, not only at the next plan.
 
 `--write` requires a `sandbox` fixture in the manifest: a namespace the test is
 allowed to destroy. Cleanup deletes exactly the fixture ids, never the whole
@@ -249,7 +252,8 @@ namespace. Do not point it at a production zone; a provider that cannot offer a
 disposable namespace should omit `sandbox` and leave `--write` unavailable.
 
 The suite does not prove the API integration. That needs the provider's own
-fake API or a real sandbox account.
+fake API or a real sandbox account; the error taxonomy (401/403 → `auth`,
+429 → `rate-limited`, 5xx → `transient`) is part of that provider-owned proof.
 
 ## Packaging
 
@@ -273,7 +277,9 @@ gain an HTTP client because one provider needs one.
 - [ ] 401/403 is `auth`, 429 is `rate-limited`, 5xx is `transient`.
 - [ ] `adopt` writes only the marker.
 - [ ] A singleton is update-only and absent means unchanged.
-- [ ] No secret in stdout, stderr, a plan or a resource.
+- [ ] The sandbox fixture is visible after apply.
+- [ ] No secret in stdout, stderr, a plan or a resource; the suite scans
+  responses for every declared `--env` value.
 - [ ] `provider test --write` passes in a disposable sandbox.
 
 ## Reference implementations
