@@ -46,6 +46,10 @@ Feature: Every options.nod option has a deserializable peer in the domain model 
     And the module declares nod.rollout.action as an enum of
       "switch" "boot" "test" "dry-run"
     And the module declares nod.healthChecks.systemd.requiredUnits as listOf str
+    And the module declares nod.healthChecks.systemd.checkRestartLoops as bool
+    And the module declares nod.healthChecks.systemd.checkChangedUnits as bool
+    And the module declares nod.healthChecks.systemd.maxRestarts as ints.unsigned
+    And the module declares nod.healthChecks.tcpPorts as listOf port
     And the module declares nod.healthChecks.httpProbes as a list of submodules
     And the module declares nod.healthChecks.customProbes as a list of submodules
     When the domain structs RolloutConfig and HealthCheckConfig are deserialized
@@ -53,6 +57,10 @@ Feature: Every options.nod option has a deserializable peer in the domain model 
     And the field magic_rollback_timeout_secs maps to rollout.magicRollbackTimeoutSecs
     And the field health_checks maps to healthChecks
     And the field required_units maps to healthChecks.systemd.requiredUnits
+    And the field check_restart_loops maps to healthChecks.systemd.checkRestartLoops
+    And the field check_changed_units maps to healthChecks.systemd.checkChangedUnits
+    And the field max_restarts maps to healthChecks.systemd.maxRestarts
+    And the field tcp_ports maps to healthChecks.tcpPorts
     And the field http_probes maps to healthChecks.httpProbes (url + expectedStatus)
     And the field custom_probes maps to healthChecks.customProbes (name + command)
 

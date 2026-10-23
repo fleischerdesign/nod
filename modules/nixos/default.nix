@@ -332,6 +332,30 @@
                     Report any systemd units in a failed state.
                   '';
                 };
+                checkRestartLoops = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = ''
+                    Report units that systemd is restarting on its own
+                    (`activating`/`auto-restart`).
+                  '';
+                };
+                checkChangedUnits = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = ''
+                    Verify the units this activation restarted, started,
+                    reloaded or added.
+                  '';
+                };
+                maxRestarts = lib.mkOption {
+                  type = lib.types.ints.unsigned;
+                  default = 0;
+                  description = ''
+                    Allowed increase of `NRestarts` per declared unit relative
+                    to the pre-activation baseline.
+                  '';
+                };
                 requiredUnits = lib.mkOption {
                   type = lib.types.listOf lib.types.str;
                   default = [];
@@ -344,7 +368,10 @@
             default = {
               checkRunning = true;
               checkFailedUnits = true;
+              checkRestartLoops = true;
+              checkChangedUnits = true;
               requiredUnits = [];
+              maxRestarts = 0;
             };
             description = ''
               systemd unit verification sub-settings.

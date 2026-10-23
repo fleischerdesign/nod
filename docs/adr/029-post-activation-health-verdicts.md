@@ -69,9 +69,9 @@ Three sources, each independently switchable:
    required to run.
 2. **Declared units** (`health_checks.units`). For services that may legitimately
    be quiet but must not be broken.
-3. **Declared probes** (`health_checks.http_probes`, `custom_probes`). For the
-   failures no unit state can show: a web server answering 502 with a perfectly
-   healthy unit.
+3. **Declared probes** (`health_checks.tcp_ports`, `http_probes`,
+   `custom_probes`). For the failures no unit state can show: a web server
+   answering 502 with a perfectly healthy unit, or a port nobody listens on.
 
 ### 3. How a unit is judged
 
@@ -89,6 +89,8 @@ Per unit, in this order:
 - `ActiveState=inactive` with `Result=success` for a `oneshot` unit → healthy.
 - `ActiveState=inactive` otherwise → unhealthy **only** when the unit is
   declared or was touched; otherwise ignored.
+- A declared TCP port must have a listening socket (`ss -ltnH`). A host
+  without `ss` reports that as a problem instead of passing silently.
 - `NRestarts` greater than the baseline plus `max_restarts` for a **declared**
   unit → unhealthy. Units the activation merely touched are not counted: the
   activation restarts them by design, and a counter that rises because the
@@ -153,6 +155,7 @@ check_running = true         # judge the declared units below
 check_changed_units = true   # judge the units this activation touched
 required_units = ["sshd.service", "caddy.service"]
 max_restarts = 0             # allowed automatic-restart increases
+tcp_ports = [443, 8443]      # sockets that must be listening
 
 [[hosts.web1.health_checks.http_probes]]
 url = "https://web1.example/health"
@@ -237,10 +240,10 @@ Present in the code:
 - A startup self-check (`application/use_cases/self_check.rs`): the daemon
   probes the local host once after its own activation, records the verdict,
   and aggregates the stored verdicts for `last_verified_rev`.
-- Declared units (`systemd.required_units`) and probes (`http_probes`,
-  `custom_probes`) are scored through one extra channel; each problem is a line
-  in the snapshot. HTTP probes use `curl`, and a host without it reports that
-  instead of passing silently.
+- Declared units (`systemd.required_units`) and probes (`tcp_ports`,
+  `http_probes`, `custom_probes`) are scored through one extra channel; each
+  problem is a line in the snapshot. HTTP probes use `curl` and TCP ports use
+  `ss`; a host without either reports that instead of passing silently.
 - `NRestarts` counters for declared units are part of the baseline comparison:
   an increase beyond `systemd.max_restarts` (default 0) is a regression, even
   when the unit is `active` at the sample.

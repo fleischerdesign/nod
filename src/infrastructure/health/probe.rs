@@ -185,6 +185,19 @@ pub fn extra_probe_command(host: &HostEntity, touched: &[String]) -> Option<Stri
         parts.push(UNIT_LOOP.replace("__PAIRS__", &pairs));
     }
 
+    let ports = health.tcp_ports.as_deref().unwrap_or(&[]);
+    if !ports.is_empty() {
+        let mut checks = String::new();
+        for port in ports {
+            checks.push_str(&format!(
+                "  ss -ltnH \"sport = :{port}\" 2>/dev/null | grep -q . || echo \"tcp port {port}: not listening\"\n"
+            ));
+        }
+        parts.push(format!(
+            "if command -v ss >/dev/null 2>&1; then\n{checks}else\n  echo \"tcp: ss is not installed\"\nfi"
+        ));
+    }
+
     let http = health.http_probes.as_deref().unwrap_or(&[]);
     if !http.is_empty() {
         let mut probes = String::new();
@@ -490,6 +503,27 @@ mod tests {
         assert!(extra_probe_command(&host, &["app.socket".to_string()]).is_none());
     }
 
+    /// Writes an executable double into its own temporary directory.
+    fn shim(name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("nod-probe-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    /// The probe's `PATH` with `dir` in front, so a double wins over the host.
+    fn path_with(dir: &std::path::Path) -> String {
+        format!(
+            "{}:{}",
+            dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
     /// Proves the generated loop, not the string that builds it.
     ///
     /// A `systemctl` double answers for three units: one that must be running,
@@ -498,13 +532,8 @@ mod tests {
     /// state, and name a missing unit instead of passing it silently.
     #[tokio::test]
     async fn the_generated_loop_separates_missing_from_failed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!("nod-probe-shim-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let shim = dir.join("systemctl");
-        std::fs::write(
-            &shim,
+        let dir = shim(
+            "systemctl",
             r#"#!/bin/sh
 unit=$2
 prop=${3#--property=}
@@ -523,9 +552,7 @@ case "$unit:$prop" in
   *) echo "" ;;
 esac
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let mut host = host();
         host.nod_config.health_checks.systemd.required_units =
@@ -535,14 +562,7 @@ esac
 
         let output = tokio::process::Command::new("sh")
             .args(["-c", &command])
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    dir.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
+            .env("PATH", path_with(&dir))
             .output()
             .await
             .expect("the probe shell should run");
@@ -561,6 +581,54 @@ esac
         );
         assert!(!stdout.contains("restart app.socket"), "got: {stdout}");
         assert!(!stdout.contains("unit web.service"), "got: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declared_tcp_ports_are_checked_with_ss() {
+        let mut host = host();
+        host.nod_config.health_checks.tcp_ports = Some(vec![443, 8080]);
+
+        let command = extra_probe_command(&host, &[]).expect("a declared port needs a probe");
+
+        assert!(command.contains("ss -ltnH"));
+        assert!(command.contains("sport = :443"));
+        assert!(command.contains("sport = :8080"));
+        assert!(command.contains("ss is not installed"));
+    }
+
+    /// Proves the port probe against a `ss` double: one port answers, one does
+    /// not, and only the silent one becomes a problem line.
+    #[tokio::test]
+    async fn the_port_probe_reports_only_the_closed_port() {
+        let dir = shim(
+            "ss",
+            r#"#!/bin/sh
+case "$*" in
+  *":443"*) echo 'LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*' ;;
+  *) : ;;
+esac
+"#,
+        );
+
+        let mut host = host();
+        host.nod_config.health_checks.tcp_ports = Some(vec![443, 8080]);
+        let command = extra_probe_command(&host, &[]).expect("declared ports need a probe");
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", &command])
+            .env("PATH", path_with(&dir))
+            .output()
+            .await
+            .expect("the probe shell should run");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("tcp port 8080: not listening"),
+            "got: {stdout}"
+        );
+        assert!(!stdout.contains("tcp port 443"), "got: {stdout}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
