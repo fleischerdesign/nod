@@ -172,6 +172,7 @@ pub async fn execute(
 }
 
 /// One declared provider and its cadence.
+#[derive(Debug)]
 struct ProviderEntry {
     name: String,
     command: std::path::PathBuf,
@@ -413,5 +414,90 @@ mod tests {
             ..SyncOptions::default()
         };
         assert!(on.gate_interval_secs.gt(&0).then(Instant::now).is_some());
+    }
+
+    #[tokio::test]
+    async fn providers_load_from_a_file_with_every_declared_field() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("desired.json"),
+            r#"{"resources":[{"kind":"example.record","id":"demo","attributes":{"value":"dry-run"}}]}"#,
+        )
+        .unwrap();
+        let config = dir.path().join(".nod.toml");
+        std::fs::write(
+            &config,
+            r#"
+[providers.example]
+command = "/bin/true"
+desired = "desired.json"
+apply = true
+interval_secs = 120
+timeout_secs = 90
+env = ["NOD_TEST_TOKEN"]
+
+[providers.example.settings]
+state = "/tmp/example-state.json"
+
+[providers.example.policy]
+max_deletions = 2
+protect = ["demo"]
+"#,
+        )
+        .unwrap();
+
+        let entries = load_providers(dir.path(), Some(&config)).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.name, "example");
+        assert_eq!(entry.command, std::path::PathBuf::from("/bin/true"));
+        assert_eq!(entry.desired.len(), 1);
+        assert!(entry.apply);
+        assert_eq!(entry.env, vec!["NOD_TEST_TOKEN".to_string()]);
+        assert_eq!(entry.timeout, Duration::from_secs(90));
+        assert_eq!(entry.policy.max_deletions, 2);
+        assert!(entry.policy.is_protected("demo"));
+        assert_eq!(
+            entry.settings["state"].as_str(),
+            Some("/tmp/example-state.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_desired_is_not_scheduled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".nod.toml");
+        std::fs::write(
+            &config,
+            r#"
+[providers.skipped]
+command = "/bin/true"
+"#,
+        )
+        .unwrap();
+
+        let entries = load_providers(dir.path(), Some(&config)).await.unwrap();
+        assert!(entries.is_empty(), "no desired file means no schedule");
+    }
+
+    #[tokio::test]
+    async fn a_missing_desired_file_names_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".nod.toml");
+        std::fs::write(
+            &config,
+            r#"
+[providers.broken]
+command = "/bin/true"
+desired = "missing.json"
+"#,
+        )
+        .unwrap();
+
+        let error = load_providers(dir.path(), Some(&config))
+            .await
+            .expect_err("a missing declaration must fail the daemon start");
+        assert!(error.to_string().contains("broken"), "{error}");
+        assert!(error.to_string().contains("missing.json"), "{error}");
     }
 }
