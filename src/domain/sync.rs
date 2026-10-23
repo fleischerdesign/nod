@@ -431,6 +431,12 @@ impl SyncState {
     /// by drift, and the marker belongs to that head, not to an older
     /// `last_applied_rev` that has not caught up yet.
     ///
+    /// A host that has been gone longer than `gone_after_secs` is outside the
+    /// claim: the operator declared it absent, the status still reports it as
+    /// gone, and one sleeping device must not make the marker unattainable.
+    /// An outage inside the threshold still blocks, because that host may be
+    /// about to come back.
+    ///
     /// A missing baseline never counts. Verification is a complete
     /// observation of the fleet, not an assumption about the hosts nobody
     /// looked at.
@@ -439,6 +445,7 @@ impl SyncState {
         revision: &str,
         hosts: &[HostEntity],
         now: u64,
+        gone_after_secs: u64,
     ) -> bool {
         if self.last_applied_rev.is_none() || hosts.is_empty() {
             return false;
@@ -446,11 +453,12 @@ impl SyncState {
 
         let all_healthy = hosts.iter().all(|host| {
             self.hosts.get(&host.name).is_some_and(|memory| {
-                matches!(memory.condition, HostCondition::Reachable)
-                    && matches!(memory.health, Some(HealthVerdict::Healthy))
-                    && memory
-                        .health_at
-                        .is_some_and(|at| now.saturating_sub(at) <= HEALTH_FRESHNESS_SECS)
+                memory.condition.is_gone(now, gone_after_secs)
+                    || (matches!(memory.condition, HostCondition::Reachable)
+                        && matches!(memory.health, Some(HealthVerdict::Healthy))
+                        && memory
+                            .health_at
+                            .is_some_and(|at| now.saturating_sub(at) <= HEALTH_FRESHNESS_SECS))
             })
         });
 
@@ -810,8 +818,50 @@ mod tests {
         let mut state = SyncState::new("repo", "main");
         state.last_applied_rev = Some("abc".to_string());
 
-        assert!(!state.mark_verified_when_all_healthy("abc", &[], 1));
+        assert!(!state.mark_verified_when_all_healthy("abc", &[], 1, 86_400));
         assert_eq!(state.last_verified_rev, None);
+    }
+
+    fn host(name: &str) -> HostEntity {
+        HostEntity::new(name, "10.0.0.1", false)
+    }
+
+    #[test]
+    fn a_gone_host_does_not_block_the_marker() {
+        let now = 200_000;
+        let hosts = vec![host("a"), host("b")];
+        let mut state = SyncState::new("repo", "main");
+        state.last_applied_rev = Some("abc".to_string());
+        state.observe_reachable("a", now);
+        state.record_health("a", HealthVerdict::Healthy, now);
+
+        let policy = RetryPolicy {
+            base_secs: 60,
+            max_secs: 1800,
+            gone_after_secs: 86_400,
+        };
+        state.observe_offline("b", 1, &policy);
+
+        assert!(state.mark_verified_when_all_healthy("abc", &hosts, now, 86_400));
+    }
+
+    #[test]
+    fn an_offline_host_inside_the_threshold_blocks_the_marker() {
+        let now = 200_000;
+        let hosts = vec![host("a"), host("b")];
+        let mut state = SyncState::new("repo", "main");
+        state.last_applied_rev = Some("abc".to_string());
+        state.observe_reachable("a", now);
+        state.record_health("a", HealthVerdict::Healthy, now);
+
+        let policy = RetryPolicy {
+            base_secs: 60,
+            max_secs: 1800,
+            gone_after_secs: 86_400,
+        };
+        state.observe_offline("b", now - 1_000, &policy);
+
+        assert!(!state.mark_verified_when_all_healthy("abc", &hosts, now, 86_400));
     }
 
     #[test]

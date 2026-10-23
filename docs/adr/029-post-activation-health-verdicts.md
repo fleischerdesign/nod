@@ -208,6 +208,11 @@ verdict carries `health_at`; only verdicts within `HEALTH_FRESHNESS_SECS`
 (30 minutes) count, because a `healthy` from hours ago is not evidence for the
 present.
 
+A host that has been gone longer than the operator's `--gone-after` threshold
+is outside that claim: the status still reports it as gone, and one sleeping
+device must not make the marker permanently unattainable. An outage *inside*
+the threshold still blocks, because that host may be about to come back.
+
 ## Consequences
 
 - The boolean `health_verified` becomes `Option<HealthVerdict>`; every consumer
@@ -264,7 +269,8 @@ Present in the code:
   whose verdict is missing or stale, through the same deployer probe path
   (`DeployerPort::observe_health`); it never activates or copies a closure.
   `SyncState::mark_verified_when_all_healthy` is the single place that decides
-  the marker, and it requires every selected host, not just the changed ones.
+  the marker, and it requires every selected host, not just the changed ones;
+  hosts gone past `--gone-after` are reported as gone and do not block it.
 - `last_applied_rev` (deployed to every host that answered) and
   `last_verified_rev` (every host settled and healthy) are separate facts.
   `nod status` prints `deployed` and `verified` on their own lines.

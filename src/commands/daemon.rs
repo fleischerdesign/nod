@@ -45,7 +45,13 @@ pub async fn execute(
     // A host cannot verify the activation that stopped the process performing
     // it. The daemon can: it starts after that switch, so it probes the local
     // host once and records the verdict before the first cycle (ADR-029).
-    match crate::application::use_cases::self_check::execute(&ctx, flake_path).await {
+    match crate::application::use_cases::self_check::execute(
+        &ctx,
+        flake_path,
+        options.gone_after_secs,
+    )
+    .await
+    {
         Ok(Some(verdict)) => tracing::info!(?verdict, "local self-check recorded"),
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "local self-check failed"),

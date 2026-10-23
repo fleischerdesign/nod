@@ -137,7 +137,12 @@ impl SyncReconcilerUseCase {
                         .await?;
                     state.last_verification_at = Some(now);
                     state.record_deployed(local_before.clone());
-                    let verified = state.mark_verified_when_all_healthy(&local_before, &hosts, now);
+                    let verified = state.mark_verified_when_all_healthy(
+                        &local_before,
+                        &hosts,
+                        now,
+                        policy.gone_after_secs,
+                    );
                     if verified {
                         state.record_success(local_before.clone());
                     }
@@ -461,7 +466,8 @@ impl SyncReconcilerUseCase {
 
             state.last_attempt_rev = Some(head.clone());
             state.record_deployed(head.clone());
-            let verified = settled && state.mark_verified_when_all_healthy(&head, &hosts, now);
+            let verified = settled
+                && state.mark_verified_when_all_healthy(&head, &hosts, now, retry.gone_after_secs);
             if verified {
                 state.record_success(head.clone());
             }
@@ -550,7 +556,8 @@ impl SyncReconcilerUseCase {
             // distinction; the marker is a separate claim that every host was
             // observed fresh and healthy.
             state.record_deployed(head.clone());
-            let verified = state.mark_verified_when_all_healthy(&head, &hosts, now);
+            let verified =
+                state.mark_verified_when_all_healthy(&head, &hosts, now, retry.gone_after_secs);
             if verified {
                 state.record_success(head.clone());
             }

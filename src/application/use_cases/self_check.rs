@@ -24,6 +24,7 @@ use crate::infrastructure::health::probe;
 pub async fn execute(
     ctx: &AppContext,
     flake_path: &Path,
+    gone_after_secs: u64,
 ) -> Result<Option<HealthVerdict>, NodError> {
     let hosts = ctx
         .evaluator()
@@ -46,7 +47,7 @@ pub async fn execute(
     let now = now_secs();
     state.record_health(&local.name, verdict.clone(), now);
     if let Some(applied) = state.last_applied_rev.clone() {
-        state.mark_verified_when_all_healthy(&applied, &hosts, now);
+        state.mark_verified_when_all_healthy(&applied, &hosts, now, gone_after_secs);
     }
     store.save(&state).await?;
 
@@ -124,7 +125,7 @@ mod tests {
         let hosts = vec![host("a", false), host("b", true)];
         let mut state = state_with(&[("a", HealthVerdict::Healthy), ("b", HealthVerdict::Healthy)]);
 
-        state.mark_verified_when_all_healthy("abc", &hosts, 1);
+        state.mark_verified_when_all_healthy("abc", &hosts, 1, 86_400);
         assert_eq!(state.last_verified_rev.as_deref(), Some("abc"));
         assert_eq!(state.verified_at, Some(1));
     }
@@ -138,6 +139,7 @@ mod tests {
             "abc",
             &hosts,
             1 + crate::domain::sync::HEALTH_FRESHNESS_SECS + 1,
+            86_400,
         );
         assert_eq!(state.last_verified_rev, None);
         assert_eq!(state.verified_at, None);
@@ -156,7 +158,7 @@ mod tests {
             ),
         ]);
 
-        state.mark_verified_when_all_healthy("abc", &hosts, 1);
+        state.mark_verified_when_all_healthy("abc", &hosts, 1, 86_400);
         assert_eq!(state.last_verified_rev, None);
     }
 
@@ -171,7 +173,7 @@ mod tests {
         };
         state.observe_offline("b", 2, &policy);
 
-        state.mark_verified_when_all_healthy("abc", &hosts, 1);
+        state.mark_verified_when_all_healthy("abc", &hosts, 1, 86_400);
         assert_eq!(state.last_verified_rev, None);
     }
 
@@ -180,7 +182,7 @@ mod tests {
         let hosts = vec![host("a", true), host("b", false)];
         let mut state = state_with(&[("a", HealthVerdict::Healthy)]);
 
-        state.mark_verified_when_all_healthy("abc", &hosts, 1);
+        state.mark_verified_when_all_healthy("abc", &hosts, 1, 86_400);
         assert_eq!(state.last_verified_rev, None);
     }
 
@@ -191,7 +193,7 @@ mod tests {
         state.observe_reachable("a", 1);
         state.record_health("a", HealthVerdict::Healthy, 1);
 
-        state.mark_verified_when_all_healthy("abc", &hosts, 1);
+        state.mark_verified_when_all_healthy("abc", &hosts, 1, 86_400);
         assert_eq!(state.last_verified_rev, None);
     }
 }
