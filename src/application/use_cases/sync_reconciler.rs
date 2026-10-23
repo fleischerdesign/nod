@@ -120,11 +120,7 @@ impl SyncReconcilerUseCase {
 
         if revision_unchanged && proven_applied && !recovered {
             let policy = RetryPolicy::from_options(options);
-            let away: Vec<(&String, &HostMemory)> = state
-                .hosts
-                .iter()
-                .filter(|(_, memory)| memory.condition != HostCondition::Reachable)
-                .collect();
+            let away = Self::away_hosts(&state, now, policy.gone_after_secs);
 
             if away.is_empty() {
                 // A stale verdict is refreshed before any claim is made. An
@@ -668,6 +664,24 @@ impl SyncReconcilerUseCase {
         }
     }
 
+    /// Hosts that are not reachable and not gone.
+    ///
+    /// A gone host is reported separately and must not starve the health
+    /// refresh: otherwise the fast path never reaches the verification pass
+    /// while one device is away, and `verified` can never move.
+    fn away_hosts<'a>(
+        state: &'a SyncState,
+        now: u64,
+        gone_after_secs: u64,
+    ) -> Vec<(&'a String, &'a HostMemory)> {
+        state
+            .hosts
+            .iter()
+            .filter(|(_, memory)| memory.condition != HostCondition::Reachable)
+            .filter(|(_, memory)| !memory.condition.is_gone(now, gone_after_secs))
+            .collect()
+    }
+
     fn order_last(mut hosts: Vec<HostEntity>, last_hosts: &[String]) -> Vec<HostEntity> {
         let last: Vec<String> = hosts
             .iter()
@@ -845,6 +859,24 @@ mod tests {
             ..Default::default()
         };
         assert!(SyncReconcilerUseCase::deployment_options(&options).is_err());
+    }
+
+    #[test]
+    fn a_gone_host_is_not_an_away_host() {
+        let now = 200_000;
+        let policy = RetryPolicy {
+            base_secs: 60,
+            max_secs: 1800,
+            gone_after_secs: 86_400,
+        };
+        let mut state = SyncState::new("repo", "main");
+        state.observe_reachable("up", now);
+        state.observe_offline("recent", now - 1_000, &policy);
+        state.observe_offline("gone", 1, &policy);
+
+        let away = SyncReconcilerUseCase::away_hosts(&state, now, policy.gone_after_secs);
+        let names: Vec<&str> = away.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["recent"]);
     }
 
     #[test]
