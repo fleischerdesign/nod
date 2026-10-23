@@ -5,6 +5,8 @@
 - **Deciders:** maintainers
 - **Refines:** ADR-028 §6 (health and rollback). Does not change the trigger
   model, the state schema or the rollout waves.
+- **Specification:** `docs/spec/health-verdicts.spec.md` — the complete decision
+  rules as scenarios.
 
 ## Context
 
