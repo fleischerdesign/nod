@@ -53,6 +53,54 @@ pub async fn list(dir: &Path) -> Result<(), NodError> {
     Ok(())
 }
 
+/// Preflight for `settings_schema`: shape and required keys.
+///
+/// This is deliberately not a JSON Schema validator. The provider remains the
+/// authority on types and semantics; the core catches the common failure — a
+/// malformed schema or a missing required setting — before the provider starts.
+fn check_settings(
+    schema: &serde_json::Value,
+    settings: &serde_json::Value,
+) -> Result<(), NodError> {
+    let Some(object) = schema.as_object() else {
+        return Err(NodError::provider("settings_schema must be a JSON object"));
+    };
+    if object.is_empty() {
+        return Ok(());
+    }
+    if let Some(kind) = object.get("type") {
+        if kind.as_str() != Some("object") {
+            return Err(NodError::provider(
+                "settings_schema must describe an object (`type: object`)",
+            ));
+        }
+    }
+    let Some(required) = object.get("required") else {
+        return Ok(());
+    };
+    let Some(required) = required.as_array() else {
+        return Err(NodError::provider(
+            "settings_schema.required must be an array",
+        ));
+    };
+    let Some(settings) = settings.as_object() else {
+        return Err(NodError::config("settings must be a JSON object"));
+    };
+    for key in required {
+        let Some(key) = key.as_str() else {
+            return Err(NodError::provider(
+                "settings_schema.required must contain strings",
+            ));
+        };
+        if !settings.contains_key(key) {
+            return Err(NodError::config(format!(
+                "settings: required key `{key}` is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Reads `provider.json` next to `command`, when present.
 fn manifest_for(command: &Path) -> Option<Manifest> {
     let path = command.parent()?.join("provider.json");
@@ -125,6 +173,10 @@ pub async fn test(
         }
         None => println!("manifest    --   none next to the binary"),
     }
+
+    check_settings(&handshake.settings_schema, &settings)?;
+    println!("settings    ok   schema shape and required keys");
+
     println!(
         "ownership   ok   {}{}",
         format!("{:?}", handshake.ownership).to_lowercase(),
@@ -302,4 +354,44 @@ async fn write_conformance(
 
     println!("write       ok   created, idempotent, cleaned up");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_empty_schema_is_not_checked() {
+        assert!(check_settings(&json!({}), &json!({})).is_ok());
+    }
+
+    #[test]
+    fn a_required_key_must_be_present() {
+        let schema = json!({ "type": "object", "required": ["state"] });
+        assert!(check_settings(&schema, &json!({})).is_err());
+        assert!(check_settings(&schema, &json!({ "state": "/tmp/state.json" })).is_ok());
+    }
+
+    #[test]
+    fn a_schema_must_be_an_object() {
+        assert!(check_settings(&json!([]), &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_schema_must_describe_an_object() {
+        assert!(check_settings(&json!({ "type": "string" }), &json!({})).is_err());
+    }
+
+    #[test]
+    fn required_must_be_an_array() {
+        let schema = json!({ "type": "object", "required": "state" });
+        assert!(check_settings(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn settings_must_be_an_object() {
+        let schema = json!({ "type": "object", "required": ["state"] });
+        assert!(check_settings(&schema, &json!([])).is_err());
+    }
 }
