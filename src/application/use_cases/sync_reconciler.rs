@@ -669,11 +669,11 @@ impl SyncReconcilerUseCase {
     /// A gone host is reported separately and must not starve the health
     /// refresh: otherwise the fast path never reaches the verification pass
     /// while one device is away, and `verified` can never move.
-    fn away_hosts<'a>(
-        state: &'a SyncState,
+    fn away_hosts(
+        state: &SyncState,
         now: u64,
         gone_after_secs: u64,
-    ) -> Vec<(&'a String, &'a HostMemory)> {
+    ) -> Vec<(&String, &HostMemory)> {
         state
             .hosts
             .iter()
