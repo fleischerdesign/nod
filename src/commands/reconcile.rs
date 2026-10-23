@@ -167,6 +167,21 @@ pub async fn execute(
         })?;
     }
 
+    let outcome = if !report.refused.is_empty() {
+        "refused"
+    } else if !report.failed.is_empty() {
+        "failed"
+    } else if report.applied > 0 {
+        "applied"
+    } else if report.planned > 0 {
+        "planned"
+    } else {
+        "unchanged"
+    };
+    // The audit is part of the run, not of the output format: a JSON run is
+    // still a run and must appear in the history.
+    record_audit(&report.provider, outcome).await;
+
     if json {
         let text = serde_json::to_string_pretty(&serde_json::json!({
             "provider": report.provider,
@@ -184,6 +199,12 @@ pub async fn execute(
         }))
         .map_err(|error| NodError::provider(format!("cannot render report: {error}")))?;
         println!("{text}");
+        if apply && !report.failed.is_empty() {
+            return Err(NodError::provider(format!(
+                "{} change(s) failed",
+                report.failed.len()
+            )));
+        }
         return Ok(());
     }
 
@@ -206,21 +227,14 @@ pub async fn execute(
         println!("rollback  recorded ({} operation(s))", report.inverse.len());
     }
 
-    let outcome = if !report.refused.is_empty() {
-        "refused"
-    } else if !report.failed.is_empty() {
-        "failed"
-    } else if report.applied > 0 {
-        "applied"
-    } else if report.planned > 0 {
-        "planned"
-    } else {
-        "unchanged"
-    };
-    record_audit(&report.provider, outcome).await;
-
     if !apply {
         println!("\ndry run: pass --apply to execute the approved changes");
+    }
+    if apply && !report.failed.is_empty() {
+        return Err(NodError::provider(format!(
+            "{} change(s) failed",
+            report.failed.len()
+        )));
     }
     Ok(())
 }

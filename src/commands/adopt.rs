@@ -111,6 +111,20 @@ pub async fn execute(
     )
     .await?;
 
+    let outcome = if !report.failed.is_empty() {
+        "failed"
+    } else if report.adopted > 0 {
+        "adopted"
+    } else if !report.conflicts.is_empty() {
+        "conflict"
+    } else if report.eligible > 0 {
+        "planned"
+    } else {
+        "unchanged"
+    };
+    // The audit is part of the run, not of the output format.
+    crate::commands::reconcile::record_audit(&report.provider, outcome).await;
+
     if json {
         let text = serde_json::to_string_pretty(&serde_json::json!({
             "provider": report.provider,
@@ -132,6 +146,12 @@ pub async fn execute(
         }))
         .map_err(|error| NodError::provider(format!("cannot render report: {error}")))?;
         println!("{text}");
+        if apply && !report.failed.is_empty() {
+            return Err(NodError::provider(format!(
+                "{} resource(s) failed",
+                report.failed.len()
+            )));
+        }
         return Ok(());
     }
 
@@ -152,6 +172,12 @@ pub async fn execute(
 
     if !apply {
         println!("\ndry run: pass --apply to stamp the marker on the eligible resources");
+    }
+    if apply && !report.failed.is_empty() {
+        return Err(NodError::provider(format!(
+            "{} resource(s) failed",
+            report.failed.len()
+        )));
     }
     Ok(())
 }

@@ -708,7 +708,7 @@ pub enum Commands {
 
     /// Reconcile declared state against a provider API (ADR-030)
     Reconcile {
-        /// Provider name declared in `.nod.toml` under `[providers.<name>]`
+        /// Provider name declared in the fleet (flake `nod` output or `.nod.toml`)
         provider: Option<String>,
 
         /// Provider executable (overrides the configured command)
@@ -1014,7 +1014,7 @@ pub enum ProviderCommands {
     },
     /// Take ownership of resources that already match the declaration
     Adopt {
-        /// Provider name declared in `.nod.toml` under `[providers.<name>]`
+        /// Provider name declared in the fleet (flake `nod` output or `.nod.toml`)
         provider: Option<String>,
         /// Provider executable (overrides the configured command)
         #[arg(long)]

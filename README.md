@@ -147,6 +147,31 @@ nod sync [--remote origin] [--branch main] [--once] [--interval 300]
 nod daemon [--interval 300]
 ```
 
+### Providers & Reconciliation
+```bash
+# Inspect and test provider executables against the protocol
+nod provider list --dir ./providers
+nod provider inspect /path/to/nod-provider
+nod provider test /path/to/nod-provider
+
+# Observe and plan a declared provider; add --apply to write
+nod reconcile cloudflare
+nod reconcile cloudflare --apply
+
+# Take ownership of resources that already match the declaration
+nod provider adopt cloudflare
+nod provider adopt cloudflare --apply
+
+# The reconciler's own view: deployed vs verified, per-host health
+nod sync status
+```
+
+`unowned` is the onboarding signal: declared resources that exist and match
+but do not carry the provider's marker. `0` means drift correction is active.
+A provider may also expose a singleton such as `zone.settings`, which is only
+ever updated (ADR-033). `nod status` is the live reachability matrix;
+`nod sync status` is the reconciler's stored view.
+
 ---
 
 ## 🏛 Architecture
