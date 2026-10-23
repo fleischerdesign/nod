@@ -61,10 +61,17 @@ async fn activate(
             "--quiet",
             "--collect",
             "--wait",
-            "--pipe",
             "--unit",
             &unit,
             "--property=Type=oneshot",
+            // No `--pipe`: the unit's output must not depend on this process.
+            // Activating the host that runs the daemon stops the daemon, and a
+            // pipe to a dead parent makes the switch panic on its next write
+            // (measured: status 101, mid-activation). The journal keeps the
+            // output; the self host's touched set is empty by construction and
+            // the startup self-check covers it (ADR-029).
+            "--property=StandardOutput=journal",
+            "--property=StandardError=journal",
             program,
             action,
         ]))

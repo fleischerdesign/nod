@@ -50,12 +50,18 @@ pub fn build_ssh_opts(profile: &SshProfile) -> Vec<String> {
 /// three hosts during the 2026-10-22 rollout. The probe opens its own
 /// connection instead, bounded by `ConnectTimeout`, and never prompts.
 ///
+/// `ControlMaster=no` alone is not enough: ssh still *uses* an existing master
+/// socket when `ControlPath` is set. `ControlPath=none` removes the socket
+/// entirely, so the probe cannot inherit a dead multiplex.
+///
 /// ssh honours the *first* value it sees for an option, so the probe flags come
 /// before the profile's `ControlMaster=auto`.
 pub fn build_ssh_probe_args(profile: &SshProfile, target_host: &str, command: &str) -> Vec<String> {
     let mut args = vec![
         "-o".to_string(),
         "ControlMaster=no".to_string(),
+        "-o".to_string(),
+        "ControlPath=none".to_string(),
         "-o".to_string(),
         "ConnectTimeout=10".to_string(),
         "-o".to_string(),
@@ -329,6 +335,9 @@ mod tests {
             .position(|arg| arg == "ControlMaster=auto")
             .unwrap();
         assert!(no < auto);
+        // `ControlMaster=no` alone still uses an existing socket when
+        // `ControlPath` is set; the probe must disable the path itself.
+        assert!(args.iter().any(|arg| arg == "ControlPath=none"));
         assert!(args.iter().any(|arg| arg == "ConnectTimeout=10"));
         assert!(args.iter().any(|arg| arg == "BatchMode=yes"));
         assert_eq!(args.last().unwrap(), "systemctl --failed");

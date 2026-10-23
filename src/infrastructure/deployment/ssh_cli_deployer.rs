@@ -556,9 +556,16 @@ async fn run_remote_probe(
     match probe_run {
         Ok(Ok(output)) => {
             if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr.trim();
                 return Err(NodError::health_check(format!(
-                    "health probe on {} failed",
-                    host.name
+                    "health probe on {} failed: {}",
+                    host.name,
+                    if reason.is_empty() {
+                        "no stderr"
+                    } else {
+                        reason
+                    }
                 )));
             }
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
