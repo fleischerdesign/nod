@@ -100,6 +100,10 @@ pub struct SystemdHealthConfig {
     /// Whether units in systemd's automatic restart cycle make the host
     /// unhealthy (ADR-029). Defaults to true where it is read.
     pub check_restart_loops: Option<bool>,
+    /// Whether the units the activation touched must be running afterwards
+    /// (ADR-029). Defaults to true where it is read.
+    #[serde(alias = "check_changed_units")]
+    pub check_changed_units: Option<bool>,
     #[serde(alias = "required_units")]
     pub required_units: Option<Vec<String>>,
     /// Allowed automatic-restart increases after activation (ADR-029).

@@ -67,7 +67,7 @@ async fn probe_local(host: &HostEntity) -> HealthVerdict {
     )
     .await;
     let restarting = run("sh", &["-c", probe::RESTARTING_UNITS_COMMAND], timeout).await;
-    let extra = match probe::extra_probe_command(host) {
+    let extra = match probe::extra_probe_command(host, &[]) {
         Some(command) => run("sh", &["-c", &command], timeout).await,
         None => Ok(String::new()),
     };

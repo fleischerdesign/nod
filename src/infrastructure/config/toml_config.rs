@@ -130,6 +130,7 @@ pub struct TomlSystemd {
     pub check_running: Option<bool>,
     pub check_failed_units: Option<bool>,
     pub check_restart_loops: Option<bool>,
+    pub check_changed_units: Option<bool>,
     #[serde(default)]
     pub required_units: Option<Vec<String>>,
     #[serde(default)]
@@ -606,6 +607,7 @@ fn to_health_config(h: &TomlHealth) -> HealthCheckConfig {
             check_running: s.check_running,
             check_failed_units: s.check_failed_units,
             check_restart_loops: s.check_restart_loops,
+            check_changed_units: s.check_changed_units,
             required_units: s.required_units.clone(),
             max_restarts: s.max_restarts,
         },
@@ -890,6 +892,33 @@ mod tests {
         let s = store(root, cli);
         let profile = s.resolve(&host("atlas")).await.unwrap();
         assert_eq!(profile.user(), "cli-user");
+    }
+
+    #[tokio::test]
+    async fn the_health_switches_reach_the_domain() {
+        let dir = tempdir().unwrap();
+        write_toml(
+            dir.path(),
+            "[hosts.web1]\n\
+             [hosts.web1.health_checks.systemd]\n\
+             required_units = [\"web.service\"]\n\
+             max_restarts = 2\n\
+             check_changed_units = false\n",
+        );
+        let s = store(dir.path(), CliOverrides::default());
+
+        let overrides = s.host_overrides("web1").await.unwrap();
+        let systemd = &overrides
+            .health_checks
+            .expect("declared health checks")
+            .systemd;
+
+        assert_eq!(
+            systemd.required_units.as_deref(),
+            Some(&["web.service".to_string()][..])
+        );
+        assert_eq!(systemd.max_restarts, Some(2));
+        assert_eq!(systemd.check_changed_units, Some(false));
     }
 
     #[tokio::test]

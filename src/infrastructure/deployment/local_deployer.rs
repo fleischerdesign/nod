@@ -12,6 +12,7 @@ use crate::domain::errors::NodError;
 use crate::domain::health::{DeploymentReport, HealthSnapshot, HealthVerdict};
 use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::ports::deployer::DeployerPort;
+use crate::infrastructure::deployment::activation;
 
 /// True when this process already holds root privileges.
 ///
@@ -47,7 +48,7 @@ async fn activate(
     switch_bin: &Path,
     action: &str,
     root: bool,
-) -> std::io::Result<std::process::ExitStatus> {
+) -> std::io::Result<activation::Watched> {
     let program = switch_bin.to_str().unwrap_or_default();
 
     if root && Path::new("/run/systemd/system").is_dir() {
@@ -56,27 +57,27 @@ async fn activate(
             sanitize_unit_name(&host.name),
             std::process::id()
         );
-        let status = Command::new("systemd-run")
-            .args([
-                "--quiet",
-                "--collect",
-                "--wait",
-                "--pipe",
-                "--unit",
-                &unit,
-                "--property=Type=oneshot",
-                program,
-                action,
-            ])
-            .status()
-            .await;
-        if let Ok(status) = status {
-            return Ok(status);
+        let watched = activation::watch(Command::new("systemd-run").args([
+            "--quiet",
+            "--collect",
+            "--wait",
+            "--pipe",
+            "--unit",
+            &unit,
+            "--property=Type=oneshot",
+            program,
+            action,
+        ]))
+        .await;
+        if let Ok(watched) = watched {
+            return Ok(watched);
         }
         // No systemd-run or it refused: fall back to the direct call.
     }
 
-    privileged(program, root).arg(action).status().await
+    let mut command = privileged(program, root);
+    command.arg(action);
+    activation::watch(&mut command).await
 }
 
 /// Maps a host name onto the character set systemd accepts in a unit name.
@@ -99,6 +100,7 @@ fn sanitize_unit_name(name: &str) -> String {
 async fn verify_local_health(
     host: &HostEntity,
     baseline: Option<&HealthSnapshot>,
+    touched: &[String],
 ) -> Result<HealthVerdict, NodError> {
     use crate::domain::health::verdict_against;
     use crate::infrastructure::health::probe;
@@ -106,7 +108,7 @@ async fn verify_local_health(
     let failed =
         run_local_probe(host, "systemctl", &["--failed", "--no-legend", "--plain"]).await?;
     let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND]).await?;
-    let extra = match probe::extra_probe_command(host) {
+    let extra = match probe::extra_probe_command(host, touched) {
         Some(command) => run_local_probe(host, "sh", &["-c", &command]).await?,
         None => String::new(),
     };
@@ -141,7 +143,7 @@ async fn snapshot_local(host: &HostEntity) -> Option<HealthSnapshot> {
     let restarting = run_local_probe(host, "sh", &["-c", probe::RESTARTING_UNITS_COMMAND])
         .await
         .ok()?;
-    let extra = match probe::extra_probe_command(host) {
+    let extra = match probe::extra_probe_command(host, &[]) {
         Some(command) => run_local_probe(host, "sh", &["-c", &command]).await.ok()?,
         None => String::new(),
     };
@@ -236,9 +238,9 @@ impl DeployerPort for LocalDeployer {
         // a reason to skip verification (ADR-029).
         let baseline = snapshot_local(host).await;
 
-        let status = if is_agentless {
+        let watched = if is_agentless {
             let activate_bin = resolve_activation_binary(closure, &host.name)?;
-            Command::new(&activate_bin).args([action]).status().await
+            activation::watch(Command::new(&activate_bin).args([action])).await
         } else {
             // Register as new system generation for switch and boot (ADR-003, ADR-015).
             // Without updating the profile link, bootloaders (like systemd-boot) cannot see
@@ -266,16 +268,23 @@ impl DeployerPort for LocalDeployer {
             activate(host, &switch_bin, action, root).await
         };
 
-        if status.is_err() {
-            return Err(NodError::local_activate(
-                "failed to launch activation executable",
-            ));
-        }
-        if !status.unwrap().success() {
+        let watched = match watched {
+            Ok(watched) => watched,
+            Err(_) => {
+                return Err(NodError::local_activate(
+                    "failed to launch activation executable",
+                ))
+            }
+        };
+        if !watched.status.success() {
             return Err(NodError::local_activate(
                 "activation reported non-zero failure exit code",
             ));
         }
+
+        let touched: Vec<String> = activation::touched_units(&watched.markers)
+            .into_iter()
+            .collect();
 
         let health = if !probe::enabled(host) {
             HealthVerdict::Unverified {
@@ -284,7 +293,7 @@ impl DeployerPort for LocalDeployer {
         } else if reboot_required() {
             HealthVerdict::PendingReboot
         } else {
-            match verify_local_health(host, baseline.as_ref()).await {
+            match verify_local_health(host, baseline.as_ref(), &touched).await {
                 Ok(verdict) => verdict,
                 Err(error) => HealthVerdict::Unverified {
                     reason: error.to_string(),

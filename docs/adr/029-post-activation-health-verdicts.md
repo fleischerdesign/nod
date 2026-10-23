@@ -60,9 +60,13 @@ operators to ignore it.
 
 Three sources, each independently switchable:
 
-1. **Units this activation touched.** systemd knows which units were restarted;
-   the deployer records them from the activation output. This answers the
-   sharpest question - is what I just changed actually running?
+1. **Units this activation touched.** The deployer reads the unit lists from
+   the activation output (`restarting`, `starting`, `reloading`, new units) and
+   scores them after activation. This answers the sharpest question - is what I
+   just changed actually running? Units the activation *stopped*, and changed
+   units it deliberately did not restart, are not scored: a failed stop
+   surfaces as a failed unit, and a unit stopped on purpose must never be
+   required to run.
 2. **Declared units** (`health_checks.units`). For services that may legitimately
    be quiet but must not be broken.
 3. **Declared probes** (`health_checks.http_probes`, `custom_probes`). For the
@@ -73,6 +77,9 @@ Three sources, each independently switchable:
 
 Per unit, in this order:
 
+- `LoadState=not-found` → unhealthy. A declared or touched unit that does not
+  exist is a fault, not a silent pass: a typo in `required_units` used to look
+  exactly like a healthy host.
 - `ActiveState=failed` → unhealthy.
 - `ActiveState=activating` with `SubState=auto-restart` → **unhealthy**. This is
   the restart loop `--failed` cannot see.
@@ -82,7 +89,10 @@ Per unit, in this order:
 - `ActiveState=inactive` with `Result=success` for a `oneshot` unit → healthy.
 - `ActiveState=inactive` otherwise → unhealthy **only** when the unit is
   declared or was touched; otherwise ignored.
-- `NRestarts` greater than the baseline in §4 → unhealthy.
+- `NRestarts` greater than the baseline plus `max_restarts` for a **declared**
+  unit → unhealthy. Units the activation merely touched are not counted: the
+  activation restarts them by design, and a counter that rises because the
+  deployment did its job is not a regression.
 
 Timer and socket units are never scored "inactive equals broken": a timer is
 healthy when it is `active (waiting)`.
@@ -140,6 +150,7 @@ timeout_secs = 60
 check_failed_units = true
 check_restart_loops = true
 check_running = true         # judge the declared units below
+check_changed_units = true   # judge the units this activation touched
 required_units = ["sshd.service", "caddy.service"]
 max_restarts = 0             # allowed automatic-restart increases
 
@@ -233,15 +244,19 @@ Present in the code:
 - `NRestarts` counters for declared units are part of the baseline comparison:
   an increase beyond `systemd.max_restarts` (default 0) is a regression, even
   when the unit is `active` at the sample.
+- The activation output is watched, not swallowed
+  (`infrastructure/deployment/activation.rs`): every line is forwarded live to
+  the operator, and the marker lines are kept for the parser. `restarting`,
+  `starting`, `reloading` and new-unit lines become the touched set; colour
+  codes are stripped, both separators (space and comma) are accepted, and a
+  token that is not a unit is ignored. Stopped and deliberately unchanged units
+  are excluded. `systemd.check_changed_units` (default true) switches the whole
+  source off.
 - `last_applied_rev` (deployed to every host that answered) and
   `last_verified_rev` (every host settled and healthy) are separate facts.
   `nod status` prints `deployed` and `verified` on their own lines.
 - A degraded activation maps to a failed cycle; `pending-reboot` and
   `unverified` are reported and never counted as converged.
-
-Not built yet:
-
-- Scoring the units an activation touched.
 
 ## Open questions
 

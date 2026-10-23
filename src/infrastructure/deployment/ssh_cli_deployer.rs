@@ -14,6 +14,7 @@ use crate::domain::host::{HostEntity, SshProfile};
 use crate::domain::plan::DeploymentAction;
 use crate::domain::ports::deployer::DeployerPort;
 use crate::domain::ssh_args::{build_ssh_args, build_ssh_opts};
+use crate::infrastructure::deployment::activation;
 
 /// Deploys remote hosts through store copy over SSH and a remote switch
 /// activation.
@@ -178,13 +179,17 @@ impl DeployerPort for SshCliDeployer {
         );
 
         let args = build_ssh_args(profile, &host.target_host, false, &[remote_cmd]);
-        let ssh_status = run_ssh_inherited("ssh", &args, || {
+        let mut ssh_command = Command::new("ssh");
+        ssh_command.args(&args);
+        let watched = activation::watch(&mut ssh_command).await.map_err(|_| {
             NodError::remote_activate(format!("failed to launch `ssh` for {}", host.name))
-        })
-        .await?;
-        if !ssh_status.success() {
+        })?;
+        if !watched.status.success() {
             return Err(NodError::remote_activate(host.name.clone()));
         }
+        let touched: Vec<String> = activation::touched_units(&watched.markers)
+            .into_iter()
+            .collect();
 
         let health = if !probe::enabled(host) {
             HealthVerdict::Unverified {
@@ -193,7 +198,7 @@ impl DeployerPort for SshCliDeployer {
         } else {
             match run_remote_probe(host, profile, probe::REBOOT_REQUIRED_COMMAND).await {
                 Ok(output) if probe::reboot_required(&output) => HealthVerdict::PendingReboot,
-                _ => match verify_remote_health(host, profile, baseline.as_ref()).await {
+                _ => match verify_remote_health(host, profile, baseline.as_ref(), &touched).await {
                     Ok(verdict) => verdict,
                     Err(error) => HealthVerdict::Unverified {
                         reason: error.to_string(),
@@ -471,13 +476,14 @@ async fn verify_remote_health(
     host: &HostEntity,
     profile: &SshProfile,
     baseline: Option<&HealthSnapshot>,
+    touched: &[String],
 ) -> Result<HealthVerdict, NodError> {
     use crate::domain::health::verdict_against;
     use crate::infrastructure::health::probe;
 
     let failed = run_remote_probe(host, profile, probe::FAILED_UNITS_COMMAND).await?;
     let restarting = run_remote_probe(host, profile, probe::RESTARTING_UNITS_COMMAND).await?;
-    let extra = match probe::extra_probe_command(host) {
+    let extra = match probe::extra_probe_command(host, touched) {
         Some(command) => run_remote_probe(host, profile, &command).await?,
         None => String::new(),
     };
@@ -504,7 +510,7 @@ async fn snapshot_remote(host: &HostEntity, profile: &SshProfile) -> Option<Heal
     let restarting = run_remote_probe(host, profile, probe::RESTARTING_UNITS_COMMAND)
         .await
         .ok()?;
-    let extra = match probe::extra_probe_command(host) {
+    let extra = match probe::extra_probe_command(host, &[]) {
         Some(command) => run_remote_probe(host, profile, &command).await.ok()?,
         None => String::new(),
     };
