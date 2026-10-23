@@ -111,6 +111,8 @@ pub fn extra_probe_command(host: &HostEntity) -> Option<String> {
   state=$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)
   sub=$(systemctl show "$unit" --property=SubState --value 2>/dev/null)
   result=$(systemctl show "$unit" --property=Result --value 2>/dev/null)
+  restarts=$(systemctl show "$unit" --property=NRestarts --value 2>/dev/null)
+  echo "restart $unit ${{restarts:-0}}"
   if [ "$state" = activating ] && [ "$sub" != auto-restart ]; then
     for _ in 1 2 3 4 5; do
       sleep 1
@@ -189,6 +191,24 @@ pub fn snapshot(
         return HealthSnapshot::clean();
     }
 
+    let mut restarts = std::collections::BTreeMap::new();
+    let mut extra_problems = Vec::new();
+    for line in extra_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some(rest) = line.strip_prefix("restart ") {
+            if let Some((unit, count)) = rest.split_once(' ') {
+                if let Ok(count) = count.trim().parse::<u32>() {
+                    restarts.insert(unit.to_string(), count);
+                    continue;
+                }
+            }
+        }
+        extra_problems.push(line.to_string());
+    }
+
     HealthSnapshot {
         failed_units: if checks_failed_units(host) {
             failed_units(failed_output)
@@ -200,12 +220,8 @@ pub fn snapshot(
         } else {
             Vec::new()
         },
-        extra_problems: extra_output
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect(),
+        extra_problems,
+        restarts,
     }
 }
 
@@ -214,6 +230,15 @@ pub fn timeout(host: &HostEntity) -> Duration {
     Duration::from_secs(u64::from(
         host.nod_config.health_checks.timeout_secs.unwrap_or(60),
     ))
+}
+
+/// Allowed automatic-restart increases for `host` (ADR-029).
+pub fn max_restarts(host: &HostEntity) -> u32 {
+    host.nod_config
+        .health_checks
+        .systemd
+        .max_restarts
+        .unwrap_or(0)
 }
 
 /// Turns the two probes into a health verdict.
@@ -365,6 +390,7 @@ mod tests {
 
         let command = extra_probe_command(&host).expect("a declared unit needs a probe");
         assert!(command.contains("systemctl show"));
+        assert!(command.contains("NRestarts"));
         assert!(command.contains("web.service"));
     }
 
@@ -420,5 +446,22 @@ mod tests {
             vec!["unit web.service: inactive (failed)".to_string()]
         );
         assert!(!snapshot.is_clean());
+    }
+
+    #[test]
+    fn a_restart_counter_line_is_parsed_into_the_snapshot() {
+        let snapshot = snapshot(&host(), "", "", "restart web.service 2\n");
+        assert_eq!(snapshot.restarts.get("web.service"), Some(&2));
+        assert!(snapshot.extra_problems.is_empty());
+    }
+
+    #[test]
+    fn max_restarts_defaults_to_zero_and_honours_configuration() {
+        let host = host();
+        assert_eq!(max_restarts(&host), 0);
+
+        let mut configured = host;
+        configured.nod_config.health_checks.systemd.max_restarts = Some(2);
+        assert_eq!(max_restarts(&configured), 2);
     }
 }

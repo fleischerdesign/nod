@@ -483,7 +483,11 @@ async fn verify_remote_health(
     };
     let current = probe::snapshot(host, &failed, &restarting, &extra);
 
-    Ok(verdict_against(baseline, &current))
+    Ok(verdict_against(
+        baseline,
+        &current,
+        probe::max_restarts(host),
+    ))
 }
 
 /// Observes the remote host's health inputs, tolerating probe failures.

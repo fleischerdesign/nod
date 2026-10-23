@@ -23,6 +23,12 @@ pub struct HealthSnapshot {
     /// line names what failed (`unit web.service: inactive`, `http …`).
     #[serde(default)]
     pub extra_problems: Vec<String>,
+    /// Automatic restart counters, when the probe reported them.
+    ///
+    /// A unit that restarts quickly can be `active` at the sample; the counter
+    /// is the only evidence of the loop. Compared against the baseline.
+    #[serde(default)]
+    pub restarts: std::collections::BTreeMap<String, u32>,
 }
 
 impl HealthSnapshot {
@@ -151,8 +157,27 @@ impl DeploymentReport {
 pub fn verdict_against(
     baseline: Option<&HealthSnapshot>,
     current: &HealthSnapshot,
+    allowed_restarts: u32,
 ) -> HealthVerdict {
-    let current_problems = current.problems();
+    let mut current_problems = current.problems();
+
+    let mut restarted = Vec::new();
+    for (unit, count) in &current.restarts {
+        let before = baseline
+            .and_then(|baseline| baseline.restarts.get(unit))
+            .copied()
+            .unwrap_or(0);
+        if *count > before.saturating_add(allowed_restarts) {
+            restarted.push(unit.clone());
+        }
+    }
+    for unit in restarted {
+        if !current_problems.contains(&unit) {
+            current_problems.push(unit);
+        }
+    }
+    current_problems.sort();
+
     if current_problems.is_empty() {
         return HealthVerdict::Healthy;
     }
@@ -188,6 +213,7 @@ mod tests {
             failed_units: failed.iter().map(|unit| unit.to_string()).collect(),
             restarting_units: restarting.iter().map(|unit| unit.to_string()).collect(),
             extra_problems: Vec::new(),
+            restarts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -203,7 +229,7 @@ mod tests {
         let current = snapshot(&[], &[]);
 
         assert_eq!(
-            verdict_against(Some(&baseline), &current),
+            verdict_against(Some(&baseline), &current, 0),
             HealthVerdict::Healthy
         );
     }
@@ -213,7 +239,7 @@ mod tests {
         let current = snapshot(&["new.service"], &[]);
 
         assert_eq!(
-            verdict_against(None, &current),
+            verdict_against(None, &current, 0),
             HealthVerdict::Degraded {
                 units: vec!["new.service".to_string()]
             }
@@ -225,7 +251,7 @@ mod tests {
         let baseline = snapshot(&["old.service"], &[]);
         let current = snapshot(&["old.service"], &[]);
 
-        let verdict = verdict_against(Some(&baseline), &current);
+        let verdict = verdict_against(Some(&baseline), &current, 0);
         assert_eq!(
             verdict,
             HealthVerdict::DegradedPreExisting {
@@ -241,7 +267,7 @@ mod tests {
         let current = snapshot(&["old.service", "new.service"], &["loop.service"]);
 
         assert_eq!(
-            verdict_against(Some(&baseline), &current),
+            verdict_against(Some(&baseline), &current, 0),
             HealthVerdict::Degraded {
                 units: vec!["loop.service".to_string(), "new.service".to_string()]
             }
@@ -253,7 +279,7 @@ mod tests {
         let baseline = snapshot(&[], &[]);
         let current = snapshot(&[], &["crowdsec.service"]);
 
-        let verdict = verdict_against(Some(&baseline), &current);
+        let verdict = verdict_against(Some(&baseline), &current, 0);
         assert!(verdict.is_failure());
         assert_eq!(verdict.units(), &["crowdsec.service".to_string()]);
     }
@@ -265,23 +291,68 @@ mod tests {
         let baseline = snapshot(&[], &[]);
         let current = snapshot(&[], &["crowdsec.service"]);
 
-        assert!(verdict_against(Some(&baseline), &current).is_failure());
+        assert!(verdict_against(Some(&baseline), &current, 0).is_failure());
     }
 
     #[test]
     fn an_extra_problem_is_part_of_the_verdict() {
         let baseline = HealthSnapshot::clean();
         let current = HealthSnapshot {
-            failed_units: Vec::new(),
-            restarting_units: Vec::new(),
             extra_problems: vec!["unit web.service: inactive (failed)".to_string()],
+            ..HealthSnapshot::clean()
         };
 
-        let verdict = verdict_against(Some(&baseline), &current);
+        let verdict = verdict_against(Some(&baseline), &current, 0);
         assert!(verdict.is_failure());
         assert_eq!(
             verdict.units(),
             &["unit web.service: inactive (failed)".to_string()]
         );
+    }
+
+    #[test]
+    fn a_restart_counter_above_the_allowed_increase_is_a_failure() {
+        let mut baseline = snapshot(&[], &[]);
+        baseline.restarts.insert("web.service".to_string(), 1);
+        let mut current = snapshot(&[], &[]);
+        current.restarts.insert("web.service".to_string(), 2);
+
+        let verdict = verdict_against(Some(&baseline), &current, 0);
+        assert!(verdict.is_failure());
+        assert_eq!(verdict.units(), &["web.service".to_string()]);
+    }
+
+    #[test]
+    fn an_allowed_restart_increase_is_healthy() {
+        let mut baseline = snapshot(&[], &[]);
+        baseline.restarts.insert("web.service".to_string(), 1);
+        let mut current = snapshot(&[], &[]);
+        current.restarts.insert("web.service".to_string(), 2);
+
+        assert_eq!(
+            verdict_against(Some(&baseline), &current, 1),
+            HealthVerdict::Healthy
+        );
+    }
+
+    #[test]
+    fn an_unchanged_counter_is_not_a_regression() {
+        let mut baseline = snapshot(&[], &[]);
+        baseline.restarts.insert("web.service".to_string(), 5);
+        let mut current = snapshot(&[], &[]);
+        current.restarts.insert("web.service".to_string(), 5);
+
+        assert_eq!(
+            verdict_against(Some(&baseline), &current, 0),
+            HealthVerdict::Healthy
+        );
+    }
+
+    #[test]
+    fn a_restart_without_baseline_is_degraded() {
+        let mut current = snapshot(&[], &[]);
+        current.restarts.insert("web.service".to_string(), 1);
+
+        assert!(verdict_against(None, &current, 0).is_failure());
     }
 }

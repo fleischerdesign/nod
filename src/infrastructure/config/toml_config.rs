@@ -132,6 +132,8 @@ pub struct TomlSystemd {
     pub check_restart_loops: Option<bool>,
     #[serde(default)]
     pub required_units: Option<Vec<String>>,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
 }
 
 /// One `[hosts.<name>.health_checks.http_probes]` entry.
@@ -605,6 +607,7 @@ fn to_health_config(h: &TomlHealth) -> HealthCheckConfig {
             check_failed_units: s.check_failed_units,
             check_restart_loops: s.check_restart_loops,
             required_units: s.required_units.clone(),
+            max_restarts: s.max_restarts,
         },
         None => SystemdHealthConfig::default(),
     };

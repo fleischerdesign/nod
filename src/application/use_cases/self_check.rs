@@ -78,7 +78,7 @@ async fn probe_local(host: &HostEntity) -> HealthVerdict {
             // There is no pre-activation baseline after a restart; an existing
             // problem is reported as this host's state, not attributed to a
             // deployment. `degraded` is the conservative answer.
-            verdict_against(None, &snapshot)
+            verdict_against(None, &snapshot, probe::max_restarts(host))
         }
         (Err(reason), _, _) | (_, Err(reason), _) | (_, _, Err(reason)) => {
             HealthVerdict::Unverified { reason }

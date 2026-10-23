@@ -141,6 +141,7 @@ check_failed_units = true
 check_restart_loops = true
 check_running = true         # judge the declared units below
 required_units = ["sshd.service", "caddy.service"]
+max_restarts = 0             # allowed automatic-restart increases
 
 [[hosts.web1.health_checks.http_probes]]
 url = "https://web1.example/health"
@@ -229,6 +230,9 @@ Present in the code:
   `custom_probes`) are scored through one extra channel; each problem is a line
   in the snapshot. HTTP probes use `curl`, and a host without it reports that
   instead of passing silently.
+- `NRestarts` counters for declared units are part of the baseline comparison:
+  an increase beyond `systemd.max_restarts` (default 0) is a regression, even
+  when the unit is `active` at the sample.
 - `last_applied_rev` (deployed to every host that answered) and
   `last_verified_rev` (every host settled and healthy) are separate facts.
   `nod status` prints `deployed` and `verified` on their own lines.
@@ -237,8 +241,6 @@ Present in the code:
 
 Not built yet:
 
-- `NRestarts` counters as a scored input; restart loops are detected from
-  `activating`/`auto-restart` instead.
 - Scoring the units an activation touched.
 
 ## Open questions

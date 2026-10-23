@@ -102,6 +102,9 @@ pub struct SystemdHealthConfig {
     pub check_restart_loops: Option<bool>,
     #[serde(alias = "required_units")]
     pub required_units: Option<Vec<String>>,
+    /// Allowed automatic-restart increases after activation (ADR-029).
+    #[serde(alias = "max_restarts")]
+    pub max_restarts: Option<u32>,
 }
 
 /// One HTTP probe (1:1 with a `options.nod.healthChecks.httpProbes` entry).

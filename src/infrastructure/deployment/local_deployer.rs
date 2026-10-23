@@ -112,7 +112,11 @@ async fn verify_local_health(
     };
     let current = probe::snapshot(host, &failed, &restarting, &extra);
 
-    Ok(verdict_against(baseline, &current))
+    Ok(verdict_against(
+        baseline,
+        &current,
+        probe::max_restarts(host),
+    ))
 }
 
 /// Whether the running system asks for a reboot to complete the change.
