@@ -87,12 +87,24 @@ Deletion is the core's decision, not the provider's: the core's `policy.protect`
 and `policy.max_deletions` bound what a plan may remove, and a plan over the cap
 is refused as a whole.
 
-## Token
+## Permissions
 
-`observe` and `plan` need `view_group` and `view_user`. `apply` and `adopt` add
-`change_group`; deleting needs `delete_group`. Grant the narrowest set the
-enabled operations require — a read-only consumer of this provider never gets a
-write scope.
+The manifest and the handshake name what the token must be allowed to do:
+
+| Permission | Needed for |
+|---|---|
+| `authentik_core.view_group` | `observe`, `plan`, `apply` |
+| `authentik_core.view_user` | resolving declared members to primary keys |
+| `authentik_core.change_group` | `update`, `adopt` |
+| `authentik_core.add_group` | `create` |
+| `authentik_core.delete_group` | `delete`, only when the core's policy allows it |
+
+`observe` checks the two read permissions by using them: a token without
+`view_group` fails the observation with the permission named, and a token
+without `view_user` still observes and reports a condition, so
+`nod provider status` shows the gap before the first write. The write
+permissions cannot be probed without writing; a rejected write names the
+permission it needed instead of saying "credentials rejected".
 
 ## Scope and limits
 
