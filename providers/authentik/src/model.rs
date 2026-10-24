@@ -47,6 +47,13 @@ pub const KIND_OUTPOST: &str = "authentik.outpost";
 /// onto it (ADR-044). An observation therefore carries only its facts.
 pub const KIND_CERTIFICATE_KEYPAIR: &str = "authentik.certificatekeypair";
 
+/// Resource kind for a custom OAuth2 scope mapping.
+///
+/// Authentik's built-in mappings carry a `managed` key and are not resources: a
+/// declaration references them by key (`openid`, `email`, …) and never creates
+/// them. This kind covers the mappings an endpoint adds beside them (ADR-046).
+pub const KIND_SCOPE_MAPPING: &str = "authentik.scope_mapping";
+
 /// A user as the group serializer's `users_obj` returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartialUser {
@@ -306,6 +313,24 @@ pub fn oauth2_provider_resource(
     }
 }
 
+/// Maps a scope mapping to the resource the core sees.
+///
+/// The name is the id; the scope it grants and the expression that builds the
+/// claims are the attributes. A built-in mapping has no declaration and is never
+/// mapped here (ADR-046).
+pub fn scope_mapping_resource(mapping: &crate::api::ScopeMapping) -> ObservedResource {
+    ObservedResource {
+        kind: KIND_SCOPE_MAPPING.to_string(),
+        id: mapping.name.clone(),
+        attributes: json!({
+            "scope_name": mapping.scope_name,
+            "expression": mapping.expression,
+            "description": mapping.description,
+        }),
+        owned: false,
+    }
+}
+
 /// Maps a certificate/key pair to the resource the core sees.
 ///
 /// The name is the id. The material is write-only, so the observation carries
@@ -469,8 +494,9 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
     // application that names it, a group before either. Deletions run in the
     // opposite order: an application before its provider, so the provider is
     // unreferenced when it goes.
-    const CREATE_ORDER: [&str; 6] = [
+    const CREATE_ORDER: [&str; 7] = [
         KIND_CERTIFICATE_KEYPAIR,
+        KIND_SCOPE_MAPPING,
         KIND_GROUP,
         KIND_PROVIDER_PROXY,
         KIND_PROVIDER_OAUTH2,
@@ -512,6 +538,7 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
         KIND_PROVIDER_OAUTH2,
         KIND_PROVIDER_PROXY,
         KIND_GROUP,
+        KIND_SCOPE_MAPPING,
         KIND_CERTIFICATE_KEYPAIR,
     ] {
         for current in observed
@@ -975,6 +1002,9 @@ mod tests {
             pk: pk.to_string(),
             name: managed.rsplit('/').next().unwrap_or(managed).to_string(),
             managed: Some(managed.to_string()),
+            scope_name: String::new(),
+            expression: String::new(),
+            description: String::new(),
         }
     }
 
@@ -1077,6 +1107,48 @@ mod tests {
 
         let observed = oauth2_provider_resource(&provider, &[], &[], &[]);
         assert!(observed.attributes.get("signing_key").is_none());
+    }
+
+    #[test]
+    fn a_scope_mapping_maps_its_scope_and_expression() {
+        let mapping = crate::api::ScopeMapping {
+            pk: "mapping-uuid".to_string(),
+            name: "grafana-username".to_string(),
+            managed: None,
+            scope_name: "username".to_string(),
+            expression: "return {\"username\": request.user.username}".to_string(),
+            description: String::new(),
+        };
+        let observed = scope_mapping_resource(&mapping);
+
+        assert_eq!(observed.kind, KIND_SCOPE_MAPPING);
+        assert_eq!(observed.id, "grafana-username");
+        assert_eq!(observed.attributes["scope_name"], json!("username"));
+        assert_eq!(
+            observed.attributes["expression"],
+            json!("return {\"username\": request.user.username}")
+        );
+        assert!(!observed.owned, "a mapping has no marker; the record owns it");
+    }
+
+    #[test]
+    fn a_scope_mapping_is_created_before_the_provider_that_names_it() {
+        let desired = vec![
+            Resource {
+                kind: KIND_PROVIDER_OAUTH2.to_string(),
+                id: "grafana".to_string(),
+                attributes: json!({}),
+            },
+            Resource {
+                kind: KIND_SCOPE_MAPPING.to_string(),
+                id: "grafana-username".to_string(),
+                attributes: json!({ "scope_name": "username" }),
+            },
+        ];
+
+        let changes = plan(&desired, &[]);
+        assert_eq!(changes[0].resource.kind, KIND_SCOPE_MAPPING);
+        assert_eq!(changes[1].resource.kind, KIND_PROVIDER_OAUTH2);
     }
 
     #[test]

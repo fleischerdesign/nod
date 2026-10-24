@@ -295,12 +295,24 @@ pub struct RedirectUri {
 pub struct ScopeMapping {
     /// Mapping uuid.
     pub pk: String,
-    /// Human name.
+    /// Human name; the stable id for a mapping this fleet declares.
     #[serde(default)]
     pub name: String,
     /// Managed key, e.g. `goauthentik.io/providers/oauth2/scope-openid`.
+    ///
+    /// Set for Authentik's built-in mappings, which are not resources: a
+    /// declaration names them by key and never creates them (ADR-046).
     #[serde(default)]
     pub managed: Option<String>,
+    /// The scope the mapping grants, e.g. `openid`.
+    #[serde(default)]
+    pub scope_name: String,
+    /// The expression that builds the claims.
+    #[serde(default)]
+    pub expression: String,
+    /// Free-form description.
+    #[serde(default)]
+    pub description: String,
 }
 
 /// A certificate/key pair as the list returns it.
@@ -661,6 +673,24 @@ impl Authentik {
             }
         }
         Ok(mappings)
+    }
+
+    /// Creates a scope mapping; only declared fields are sent.
+    pub fn create_scope_mapping(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/propertymappings/provider/scope/", self.base);
+        self.write("POST", &url, body.clone())
+    }
+
+    /// Updates the declared fields of a scope mapping.
+    pub fn update_scope_mapping(&self, pk: &str, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/propertymappings/provider/scope/{}/", self.base, pk);
+        self.write("PATCH", &url, body.clone())
+    }
+
+    /// Deletes a scope mapping.
+    pub fn delete_scope_mapping(&self, pk: &str) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/propertymappings/provider/scope/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
     }
 
     /// Creates an OAuth2 provider; `client_secret` is only sent on create.

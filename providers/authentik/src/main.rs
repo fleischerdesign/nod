@@ -26,7 +26,7 @@ const PROTOCOL: u32 = 1;
 /// reported with the change that needed it. Applications are fully managed —
 /// created and deleted by the fleet — so their deletion permission is part of
 /// the required set.
-const REQUIRED_PERMISSIONS: [&str; 29] = [
+const REQUIRED_PERMISSIONS: [&str; 32] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.view_application",
@@ -52,6 +52,9 @@ const REQUIRED_PERMISSIONS: [&str; 29] = [
     "authentik_providers_oauth2.change_oauth2provider",
     "authentik_providers_oauth2.delete_oauth2provider",
     "authentik_providers_oauth2.view_scopemapping",
+    "authentik_providers_oauth2.add_scopemapping",
+    "authentik_providers_oauth2.change_scopemapping",
+    "authentik_providers_oauth2.delete_scopemapping",
     "authentik_crypto.view_certificatekeypair",
     "authentik_crypto.add_certificatekeypair",
     "authentik_crypto.change_certificatekeypair",
@@ -117,6 +120,7 @@ fn handshake() -> Value {
             "authentik.provider.oauth2",
             "authentik.outpost",
             "authentik.certificatekeypair",
+            "authentik.scope_mapping",
         ],
         "operations": ["adopt"],
         "required_permissions": REQUIRED_PERMISSIONS,
@@ -420,6 +424,20 @@ fn observe(request: &Value) -> Value {
                 "owned": resource.owned,
             })
         }))
+        .chain(
+            scope_mappings
+                .iter()
+                .filter(|mapping| mapping.managed.is_none())
+                .map(|mapping| {
+                    let resource = model::scope_mapping_resource(mapping);
+                    json!({
+                        "kind": resource.kind,
+                        "id": resource.id,
+                        "attributes": resource.attributes,
+                        "owned": resource.owned,
+                    })
+                }),
+        )
         .collect();
 
     json!({ "resources": resources, "conditions": conditions })
@@ -1160,6 +1178,96 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
+            (kind @ ("create" | "update"), model::KIND_SCOPE_MAPPING) => {
+                let body = match scope_mapping_body(&id, &change.resource.attributes) {
+                    Ok(body) => body,
+                    Err(message) => {
+                        applied.push(failed(&id, &message, "config"));
+                        continue;
+                    }
+                };
+                if kind == "create" {
+                    match client.create_scope_mapping(&body) {
+                        Ok(()) => applied.push(ok(&id)),
+                        Err(error) => applied.push(failed(
+                            &id,
+                            &failure_message(&error, "authentik_providers_oauth2.add_scopemapping"),
+                            error.kind(),
+                        )),
+                    }
+                    continue;
+                }
+                if scope_mappings.is_none() {
+                    match client.scope_mappings() {
+                        Ok(list) => scope_mappings = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_oauth2.view_scopemapping",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = scope_mappings
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|mapping| mapping.name == id)
+                    .map(|mapping| mapping.pk.clone());
+                let Some(pk) = pk else {
+                    applied.push(failed(&id, "scope mapping not found", "config"));
+                    continue;
+                };
+                match client.update_scope_mapping(&pk, &body) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_providers_oauth2.change_scopemapping"),
+                        error.kind(),
+                    )),
+                }
+            }
+            ("delete", model::KIND_SCOPE_MAPPING) => {
+                if scope_mappings.is_none() {
+                    match client.scope_mappings() {
+                        Ok(list) => scope_mappings = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_oauth2.view_scopemapping",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = scope_mappings
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|mapping| mapping.name == id)
+                    .map(|mapping| mapping.pk.clone());
+                let Some(pk) = pk else {
+                    applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
+                    continue;
+                };
+                match client.delete_scope_mapping(&pk) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_providers_oauth2.delete_scopemapping"),
+                        error.kind(),
+                    )),
+                }
+            }
             (kind @ ("create" | "update"), model::KIND_PROVIDER_OAUTH2) => {
                 if flows.is_none() {
                     match client.flows() {
@@ -1690,6 +1798,25 @@ fn outpost_body(
     Ok(Value::Object(body))
 }
 
+/// Builds a scope mapping's create or patch body from the declared attributes.
+///
+/// Only what the declaration names is sent; the name is the id. A built-in
+/// mapping is never a resource, so this body always describes a custom one
+/// (ADR-046).
+fn scope_mapping_body(id: &str, attributes: &Value) -> Result<Value, String> {
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_string(), json!(id));
+    for key in ["scope_name", "expression", "description"] {
+        if let Some(value) = attributes.get(key) {
+            let Some(text) = value.as_str() else {
+                return Err(format!("`{key}` must be a string"));
+            };
+            body.insert(key.to_string(), json!(text));
+        }
+    }
+    Ok(Value::Object(body))
+}
+
 /// Builds an OAuth2 provider's create or patch body from the declared attributes.
 ///
 /// `secret` is passed only on create; the helper never reads the environment and
@@ -1892,6 +2019,10 @@ fn adopt(request: &Value) -> Value {
         Ok(pairs) => pairs,
         Err(error) => return api_error(&error),
     };
+    let scope_mappings = match client.scope_mappings() {
+        Ok(mappings) => mappings,
+        Err(error) => return api_error(&error),
+    };
 
     let marker = Marker {
         key: settings.marker_key,
@@ -1961,6 +2092,25 @@ fn adopt(request: &Value) -> Value {
                             "retry_after_secs": error.retry_after()
                         }
                     })),
+                }
+            }
+            model::KIND_SCOPE_MAPPING => {
+                if scope_mappings
+                    .iter()
+                    .any(|mapping| mapping.name == resource.id)
+                {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": "no marker field; the core records ownership"
+                    }));
+                } else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "scope mapping not found",
+                        "error": { "kind": "config", "message": "scope mapping not found" }
+                    }));
                 }
             }
             model::KIND_CERTIFICATE_KEYPAIR => {
@@ -2123,6 +2273,9 @@ mod tests {
             pk: pk.to_string(),
             name: "scope".to_string(),
             managed: Some(managed.to_string()),
+            scope_name: String::new(),
+            expression: String::new(),
+            description: String::new(),
         }
     }
 
@@ -2159,6 +2312,24 @@ mod tests {
         );
         assert_eq!(body["redirect_uris"][0]["url"], json!("https://grafana.lan.vyrx.de/login/generic_oauth"));
         assert_eq!(body["redirect_uris"][0]["matching_mode"], json!("strict"));
+    }
+
+    #[test]
+    fn a_scope_mapping_body_sends_only_declared_keys() {
+        let body = scope_mapping_body(
+            "grafana-username",
+            &json!({ "scope_name": "username", "expression": "return {}" }),
+        )
+        .expect("a declared mapping builds a body");
+        assert_eq!(body["name"], json!("grafana-username"));
+        assert_eq!(body["scope_name"], json!("username"));
+        assert!(body.get("description").is_none());
+    }
+
+    #[test]
+    fn a_scope_mapping_body_rejects_a_non_string_expression() {
+        let error = scope_mapping_body("m", &json!({ "expression": 1 })).unwrap_err();
+        assert!(error.contains("`expression` must be a string"), "{error}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ stay outside its scope.
 | `authentik.provider.proxy` | provider name (unique in Authentik) | `mode`, `external_host`, `cookie_domain`, `authorization_flow`, `invalidation_flow` |
 | `authentik.provider.oauth2` | provider name (unique in Authentik) | `client_id`, `authorization_flow`, `invalidation_flow`, `redirect_uris`, `sub_mode`, `include_claims_in_id_token`, `grant_types`, `access_token_validity`, `property_mappings`, `signing_key`, `client_secret_env` (write-only) |
 | `authentik.certificatekeypair` | keypair name (unique in Authentik) | `certificate_path`, `private_key_path` (both write-only) |
+| `authentik.scope_mapping` | mapping name | `scope_name`, `expression`, `description` (custom mappings only; built-ins are addressed by scope key) |
 | `authentik.outpost` | outpost name | `type`, `providers`, `config.authentik_host`, `config.authentik_host_browser`, `config.authentik_host_insecure` |
 
 `users` lists login names. `description` and `users` are written into the group's
@@ -95,11 +96,37 @@ Authentik's own managed JWT certificate cannot be named through the API
 (`/crypto/certificatekeypairs/` excludes managed rows), which is exactly why a
 fleet that wants a deterministic signing key declares its own.
 
+A fresh installation produces the material once, outside the declaration:
+
+```bash
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 3650 \
+  -subj "/CN=nod OIDC signing key/O=nod" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature" \
+  -keyout key.pem -out cert.pem
+```
+
+Keep both PEMs in the secret store that feeds the reconciler host's filesystem
+(SOPS in this fleet), declare the two paths, and the first apply creates the
+keypair. Nothing in the repository carries the key.
+
 A declared OAuth2 provider is verified against the honest type map from
 `/providers/all/`: the typed endpoint serializes a proxy provider as an OAuth2
 provider too, so only `meta_model_name` tells them apart. A proxy row is never
 planned as an OAuth2 provider, and an OAuth2 provider is never mistaken for one
 of its subclasses.
+
+### Scope mappings
+
+An OAuth2 provider's `property_mappings` lists scope keys. A key Authentik ships
+(`openid`, `email`, `profile`) resolves to its built-in mapping; any other name
+resolves to a custom mapping, which this provider can declare.
+
+The built-ins are **not resources**: they carry a `managed` key, exist in every
+installation, and no run may touch them. The observation skips them, so a plan
+never reports them as unowned and no declaration can plan their deletion. A
+declaration that tries to create one fails with the API's conflict — the fix is
+to reference it by scope key (ADR-046).
 
 ### Outposts
 
@@ -207,7 +234,10 @@ The manifest and the handshake name what the token must be allowed to do:
 | `authentik_providers_proxy.change_proxyprovider` | `update` of a proxy provider |
 | `authentik_providers_proxy.delete_proxyprovider` | `delete` of a proxy provider |
 | `authentik_providers_oauth2.view_oauth2provider` | `observe`, `plan`, `apply` of an OAuth2 provider |
-| `authentik_providers_oauth2.view_scopemapping` | resolving a declared scope key to its uuid |
+| `authentik_providers_oauth2.view_scopemapping` | resolving a declared scope key to its uuid, and observing custom mappings |
+| `authentik_providers_oauth2.add_scopemapping` | `create` of a custom mapping |
+| `authentik_providers_oauth2.change_scopemapping` | `update` of a custom mapping |
+| `authentik_providers_oauth2.delete_scopemapping` | `delete` of a custom mapping |
 | `authentik_providers_oauth2.add_oauth2provider` | `create` of an OAuth2 provider |
 | `authentik_providers_oauth2.change_oauth2provider` | `update` of an OAuth2 provider |
 | `authentik_providers_oauth2.delete_oauth2provider` | `delete` of an OAuth2 provider |
