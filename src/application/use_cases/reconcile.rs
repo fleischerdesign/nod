@@ -39,6 +39,8 @@ pub struct ReconcileReport {
     pub desired: usize,
     /// Resources materialised by a declared derivation.
     pub derived: usize,
+    /// The derived resources with their origin, for the plan display.
+    pub derived_resources: Vec<derive::Derived>,
     /// The derived set this run declared, for the next run's budget.
     pub derivations: crate::domain::derivation::Derivations,
     /// Changes the provider proposed.
@@ -344,6 +346,7 @@ pub async fn execute(
         unowned: crate::domain::adoption::unowned(&observed.resources, &effective, &changed_before),
         desired: effective.len(),
         derived: derived.len(),
+        derived_resources: derived.clone(),
         derivations,
         planned: plan.changes.len(),
         approved,

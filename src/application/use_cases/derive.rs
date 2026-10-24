@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::errors::NodError;
@@ -63,7 +63,7 @@ pub struct Template {
 }
 
 /// One expanded resource and where it came from.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Derived {
     /// The resource the provider will see.
     pub resource: DesiredResource,

@@ -210,6 +210,7 @@ pub async fn execute(
             "applied": report.applied,
             "failed": report.failed,
             "verified": report.verified,
+            "derived": report.derived_resources,
             "rollback_recorded": apply && !report.inverse.is_empty(),
         }))
         .map_err(|error| NodError::provider(format!("cannot render report: {error}")))?;
@@ -238,6 +239,13 @@ pub async fn execute(
         println!("          {reason}");
     }
     println!("verified  {}/{}", report.verified, report.desired);
+    println!("derived   {}", report.derived_resources.len());
+    for entry in &report.derived_resources {
+        println!(
+            "          {} {} <- {} member {}",
+            entry.resource.kind, entry.resource.id, entry.rule, entry.member
+        );
+    }
     if apply && !report.inverse.is_empty() {
         println!("rollback  recorded ({} operation(s))", report.inverse.len());
     }

@@ -298,6 +298,7 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
                     observed = report.observed,
                     unowned = report.unowned,
                     planned = report.planned,
+                    derived = report.derived,
                     approved = report.approved.len(),
                     refused = report.refused.len(),
                     applied = report.applied,
