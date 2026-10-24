@@ -79,7 +79,35 @@ pub async fn execute(
     let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .map_err(|error| NodError::config(format!("cannot watch SIGHUP: {error}")))?;
 
+    // A stop (systemd, an activation) must never cut a provider apply in half: a
+    // dropped future can leave the provider's write unfinished and its ownership
+    // evidence unwritten, which makes a resource this fleet created look foreign.
+    // The watcher only records the request; the loop decides when it is safe to
+    // stop, which is between cycles, never during one.
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_requested = std::sync::Arc::new(tokio::sync::Notify::new());
+    {
+        let flag = std::sync::Arc::clone(&shutdown);
+        let notify = std::sync::Arc::clone(&shutdown_requested);
+        tokio::spawn(async move {
+            if let Ok(mut terminate) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                terminate.recv().await;
+            }
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            notify.notify_waiters();
+        });
+    }
+
     loop {
+        // A signal that arrived during the last cycle was recorded, not delivered:
+        // the work above ran to completion, and only now is it safe to stop.
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("SIGTERM: the running cycle finished, exiting");
+            break;
+        }
+
         let mut wake = next_sweep;
         if let Some(gate) = next_gate {
             wake = wake.min(gate);
@@ -89,6 +117,10 @@ pub async fn execute(
         }
         tokio::select! {
             _ = tokio::time::sleep_until(wake) => {}
+            _ = shutdown_requested.notified() => {
+                tracing::info!("SIGTERM: idle, exiting");
+                break;
+            }
             _ = reload.recv() => {
                 match load_providers(flake_path, config).await {
                     Ok(entries) => {
@@ -176,6 +208,8 @@ pub async fn execute(
         };
         next_sweep = Instant::now() + Duration::from_secs(wait);
     }
+
+    Ok(())
 }
 
 /// One declared provider and its cadence.
