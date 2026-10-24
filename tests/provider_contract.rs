@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nod::application::use_cases::adopt::{execute as adopt, AdoptOptions};
+use nod::application::use_cases::derive::{DeriveRule, Source, Template};
 use nod::application::use_cases::reconcile::{execute, rollback, Desired, ReconcileOptions};
 use nod::domain::derivation::Derivations;
 use nod::domain::policy::Policy;
@@ -439,4 +440,138 @@ done
     .expect_err("an undeclared kind must fail the run");
 
     assert!(error.to_string().contains("mail.mailbox"), "{error}");
+}
+
+fn deriving_rule(max_deletions: usize) -> DeriveRule {
+    DeriveRule {
+        id: "per-member".to_string(),
+        from: Source {
+            kind: "authentik.group".to_string(),
+            id: "ai-users".to_string(),
+            attribute: "users".to_string(),
+        },
+        template: Template {
+            kind: "authentik.group".to_string(),
+            id: "per-{member}".to_string(),
+            attributes: serde_json::json!({ "description": "{member}" }),
+        },
+        max_deletions,
+    }
+}
+
+#[tokio::test]
+async fn a_derivation_reaches_the_provider_and_is_recorded() {
+    let _guard = SERIAL.lock().await;
+    let work = tempfile::tempdir().unwrap();
+    let requests = work.path().join("plan-request.json");
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[{"kind":"authentik.group","id":"ai-users","attributes":{"users":["ada","zoe"]},"owned":true}],"conditions":[]}'
+      ;;
+    *'"op":"plan"'*)
+      printf '%s\n' "$line" > @REQUESTS@
+      echo '{"changes":[],"conditions":[]}'
+      ;;
+  esac
+done
+"#
+        .replace("@REQUESTS@", requests.to_str().unwrap()),
+    );
+
+    let declaration = Desired {
+        resources: Vec::new(),
+        absent: Vec::new(),
+        derive: vec![deriving_rule(0)],
+    };
+
+    let report = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &declaration,
+        &Derivations::default(),
+        ReconcileOptions { apply: false },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("the derivation should run");
+
+    let request = std::fs::read_to_string(&requests).unwrap();
+    assert!(request.contains("per-ada"), "{request}");
+    assert!(request.contains("per-zoe"), "{request}");
+    assert_eq!(report.derived, 2, "both members materialise");
+    assert_eq!(report.derivations.rule("per-member").len(), 2);
+    assert!(
+        report
+            .derived_resources
+            .iter()
+            .any(|entry| entry.member == "ada" && entry.rule == "per-member"),
+        "{:?}",
+        report.derived_resources
+    );
+}
+
+#[tokio::test]
+async fn a_derived_removal_over_its_budget_refuses_the_plan() {
+    let _guard = SERIAL.lock().await;
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[{"kind":"authentik.group","id":"ai-users","attributes":{"users":["zoe"]},"owned":true},{"kind":"authentik.group","id":"per-ada","attributes":{"description":"ada"},"owned":true}],"conditions":[]}'
+      ;;
+    *'"op":"plan"'*)
+      echo '{"changes":[{"kind":"delete","owned":true,"destructive":true,"resource":{"kind":"authentik.group","id":"per-ada","attributes":{}}}],"conditions":[]}'
+      ;;
+  esac
+done
+"#,
+    );
+
+    let declaration = Desired {
+        resources: Vec::new(),
+        absent: Vec::new(),
+        derive: vec![deriving_rule(0)],
+    };
+    let mut record = Derivations::default();
+    record
+        .rules
+        .insert("per-member".to_string(), vec!["per-ada".to_string()]);
+
+    let report = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &declaration,
+        &record,
+        ReconcileOptions { apply: false },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("the refusal is a report, not an error");
+
+    assert!(
+        report.approved.is_empty(),
+        "a refused plan must apply nothing"
+    );
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|reason| reason.contains("derivation `per-member`")),
+        "{:?}",
+        report.refused
+    );
 }
