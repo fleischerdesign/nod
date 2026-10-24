@@ -8,7 +8,12 @@ use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::thread;
 
-/// Serves one page per endpoint the provider reads: groups, users, applications.
+/// Serves one page per endpoint the provider reads, in the order `observe`
+/// requests them: groups, users, applications, proxy providers, flows, the
+/// provider type map, outposts, the typed OAuth2 list, scope mappings.
+///
+/// The OAuth2 row carries a `client_secret` exactly as the API returns it; the
+/// provider must not pass it on (ADR-043).
 fn fake_authentik() -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -19,12 +24,27 @@ fn fake_authentik() -> (String, thread::JoinHandle<()>) {
                 {"pk":"1","name":"admins","is_superuser":true,"attributes":{"vyrx":"owned"}},
                 {"pk":"2","name":"media","is_superuser":false,"attributes":{}}
             ]}"#,
-            // users, applications, proxy providers, flows, providers, outposts
+            // users
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            // applications
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            // proxy providers
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            // flows
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            // provider type map: one proxy, one OAuth2
+            r#"{"pagination":{"count":2,"next":null},"results":[
+                {"pk":1,"name":"bazarr","meta_model_name":"authentik_providers_proxy.proxyprovider"},
+                {"pk":2,"name":"grafana","meta_model_name":"authentik_providers_oauth2.oauth2provider"}
+            ]}"#,
+            // outposts
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            // typed OAuth2 list: serializes the proxy subclass as OAuth2 too
+            r#"{"pagination":{"count":2,"next":null},"results":[
+                {"pk":1,"name":"bazarr","client_id":"proxy-client","client_secret":"proxy-secret"},
+                {"pk":2,"name":"grafana","client_id":"grafana-client","client_secret":"super-secret-value","sub_mode":"user_email","include_claims_in_id_token":true}
+            ]}"#,
+            // scope mappings
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
         ];
         for body in bodies {
@@ -67,6 +87,10 @@ fn the_provider_speaks_the_contract_without_a_real_instance() {
     assert_eq!(handshake["provider"], "authentik");
     assert_eq!(handshake["capabilities"][0], "authentik.group");
     assert_eq!(handshake["ownership"], "marker");
+    assert!(handshake["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("authentik.provider.oauth2")));
 
     let observed = send(serde_json::json!({
         "op": "observe",
@@ -78,10 +102,30 @@ fn the_provider_speaks_the_contract_without_a_real_instance() {
         }
     }));
     let resources = observed["resources"].as_array().unwrap();
-    assert_eq!(resources.len(), 2);
+    assert_eq!(resources.len(), 3);
     assert_eq!(resources[0]["id"], "admins");
     assert_eq!(resources[0]["owned"], true);
     assert_eq!(resources[1]["owned"], false);
+
+    // The typed list labelled the proxy row as OAuth2; the type map is what
+    // keeps it out. The one real OAuth2 provider arrives without its secret.
+    let oauth2 = resources
+        .iter()
+        .find(|resource| resource["kind"] == "authentik.provider.oauth2")
+        .expect("the OAuth2 provider is observed");
+    assert_eq!(oauth2["id"], "grafana");
+    assert_eq!(oauth2["attributes"]["client_id"], "grafana-client");
+    assert!(oauth2["attributes"].get("client_secret").is_none());
+    assert!(
+        !observed.to_string().contains("super-secret-value"),
+        "the secret must never reach the wire"
+    );
+    assert!(
+        resources
+            .iter()
+            .all(|resource| resource["id"] != "bazarr"),
+        "a proxy provider is not an OAuth2 provider"
+    );
 
     let planned = send(serde_json::json!({
         "op": "plan",

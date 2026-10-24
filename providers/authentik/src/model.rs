@@ -27,6 +27,12 @@ pub const KIND_APPLICATION: &str = "authentik.application";
 /// A provider has no free-form field either; the core's record owns it.
 pub const KIND_PROVIDER_PROXY: &str = "authentik.provider.proxy";
 
+/// Resource kind for an Authentik OAuth2 provider.
+///
+/// The client secret is never part of the resource: it is write-only and read
+/// from `client_secret_env` on create (ADR-043).
+pub const KIND_PROVIDER_OAUTH2: &str = "authentik.provider.oauth2";
+
 /// Resource kind for an Authentik outpost.
 ///
 /// The outpost is what serves a provider; its `providers` list is the reason a
@@ -224,6 +230,62 @@ pub fn application_resource(
     }
 }
 
+/// Maps an OAuth2 provider to the resource the core sees.
+///
+/// The name is the id; flows are slugs, scopes are the managed keys
+/// (`openid`, `email`, …), redirect URIs are plain strings. The client secret
+/// is absent by construction — the API returns it, the resource must not.
+pub fn oauth2_provider_resource(
+    provider: &crate::api::OAuth2Provider,
+    flows: &[crate::api::Flow],
+    scopes: &[crate::api::ScopeMapping],
+) -> ObservedResource {
+    let slug = |pk: &Option<String>| {
+        pk.as_deref()
+            .and_then(|pk| flows.iter().find(|flow| flow.pk == pk))
+            .map(|flow| flow.slug.clone())
+            .unwrap_or_default()
+    };
+    let mut mappings: Vec<String> = provider
+        .property_mappings
+        .iter()
+        .map(|pk| {
+            scopes
+                .iter()
+                .find(|mapping| &mapping.pk == pk)
+                .map(|mapping| {
+                    mapping
+                        .managed
+                        .as_deref()
+                        .and_then(|managed| {
+                            managed.strip_prefix("goauthentik.io/providers/oauth2/scope-")
+                        })
+                        .map(str::to_string)
+                        .unwrap_or_else(|| mapping.name.clone())
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    mappings.sort_unstable();
+
+    ObservedResource {
+        kind: KIND_PROVIDER_OAUTH2.to_string(),
+        id: provider.name.clone(),
+        attributes: json!({
+            "client_id": provider.client_id,
+            "authorization_flow": slug(&provider.authorization_flow),
+            "invalidation_flow": slug(&provider.invalidation_flow),
+            "redirect_uris": provider.redirect_uris.iter().map(|uri| uri.url.clone()).collect::<Vec<_>>(),
+            "sub_mode": provider.sub_mode,
+            "include_claims_in_id_token": provider.include_claims_in_id_token,
+            "grant_types": provider.grant_types,
+            "access_token_validity": provider.access_token_validity,
+            "property_mappings": mappings,
+        }),
+        owned: false,
+    }
+}
+
 /// Maps an outpost to the resource the core sees.
 ///
 /// The name is the id; the type, the provider names and the three host keys of
@@ -298,6 +360,14 @@ pub fn proxy_provider_resource(
     }
 }
 
+/// Keys that name an input rather than describe state.
+///
+/// `client_secret_env` locates a credential for `create`; the secret itself is
+/// never observed (ADR-043). Comparing the locator would report drift every
+/// cycle, so the comparison skips it — the declaration may carry it, the
+/// observation never will.
+const WRITE_ONLY: [&str; 1] = ["client_secret_env"];
+
 /// Whether the declaration asks for anything the observation does not show.
 ///
 /// Only the keys the declaration names are compared. `members = null` in the
@@ -306,9 +376,9 @@ pub fn proxy_provider_resource(
 /// empty `users: []` is a declaration and does remove every member.
 fn differs(declared: &Value, observed: &Value) -> bool {
     match declared.as_object() {
-        Some(want) => want
-            .iter()
-            .any(|(key, value)| observed.get(key) != Some(value)),
+        Some(want) => want.iter().any(|(key, value)| {
+            !WRITE_ONLY.contains(&key.as_str()) && observed.get(key) != Some(value)
+        }),
         None => declared != observed,
     }
 }
@@ -359,9 +429,10 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
     // application that names it, a group before either. Deletions run in the
     // opposite order: an application before its provider, so the provider is
     // unreferenced when it goes.
-    const CREATE_ORDER: [&str; 4] = [
+    const CREATE_ORDER: [&str; 5] = [
         KIND_GROUP,
         KIND_PROVIDER_PROXY,
+        KIND_PROVIDER_OAUTH2,
         KIND_OUTPOST,
         KIND_APPLICATION,
     ];
@@ -397,8 +468,9 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
     for kind in [
         KIND_APPLICATION,
         KIND_OUTPOST,
-        KIND_GROUP,
+        KIND_PROVIDER_OAUTH2,
         KIND_PROVIDER_PROXY,
+        KIND_GROUP,
     ] {
         for current in observed
             .iter()
@@ -684,6 +756,7 @@ mod tests {
             provider_obj: provider.map(|name| crate::api::ProviderSummary {
                 pk: 7,
                 name: name.to_string(),
+                meta_model_name: "authentik_providers_proxy.proxyprovider".to_string(),
             }),
             open_in_new_tab: false,
             meta_launch_url: "https://app.example.test".to_string(),
@@ -836,6 +909,89 @@ mod tests {
         }
     }
 
+    fn oauth2_provider(name: &str) -> crate::api::OAuth2Provider {
+        crate::api::OAuth2Provider {
+            pk: 3,
+            name: name.to_string(),
+            client_id: "client".to_string(),
+            authorization_flow: Some("flow-auth".to_string()),
+            invalidation_flow: None,
+            redirect_uris: vec![crate::api::RedirectUri {
+                url: "https://app.example.test/callback".to_string(),
+            }],
+            sub_mode: "user_email".to_string(),
+            include_claims_in_id_token: true,
+            grant_types: vec!["authorization_code".to_string()],
+            access_token_validity: "hours=1".to_string(),
+            property_mappings: vec!["scope-openid".to_string()],
+        }
+    }
+
+    fn scope(pk: &str, managed: &str) -> crate::api::ScopeMapping {
+        crate::api::ScopeMapping {
+            pk: pk.to_string(),
+            name: managed.rsplit('/').next().unwrap_or(managed).to_string(),
+            managed: Some(managed.to_string()),
+        }
+    }
+
+    #[test]
+    fn an_oauth2_provider_maps_flows_and_scopes_to_stable_names() {
+        let flows = vec![flow("flow-auth", "default-provider-authorization-explicit-consent")];
+        let scopes = vec![
+            scope("scope-openid", "goauthentik.io/providers/oauth2/scope-openid"),
+            scope("scope-email", "goauthentik.io/providers/oauth2/scope-email"),
+        ];
+        let observed = oauth2_provider_resource(&oauth2_provider("grafana"), &flows, &scopes);
+
+        assert_eq!(observed.kind, KIND_PROVIDER_OAUTH2);
+        assert_eq!(observed.id, "grafana");
+        assert_eq!(
+            observed.attributes["authorization_flow"],
+            json!("default-provider-authorization-explicit-consent")
+        );
+        assert_eq!(observed.attributes["property_mappings"], json!(["openid"]));
+        assert!(!observed.owned, "a provider has no marker; the record owns it");
+    }
+
+    #[test]
+    fn an_oauth2_provider_never_carries_the_client_secret() {
+        // The API returns the secret; the observed resource must not. The
+        // resource is built from a struct that has no such field, so this test
+        // guards the shape rather than a filter (ADR-043).
+        let observed = oauth2_provider_resource(&oauth2_provider("grafana"), &[], &[]);
+        assert!(observed.attributes.get("client_secret").is_none());
+    }
+
+    #[test]
+    fn the_secret_locator_is_declared_but_never_compared() {
+        // A declaration names where the secret lives; the observation cannot
+        // echo it. Comparing it would plan an update every cycle (ADR-043).
+        let desired = vec![Resource {
+            kind: KIND_PROVIDER_OAUTH2.to_string(),
+            id: "grafana".to_string(),
+            attributes: json!({
+                "client_id": "client",
+                "client_secret_env": "GRAFANA_CLIENT_SECRET"
+            }),
+        }];
+        let mut observed = vec![ObservedResource {
+            kind: KIND_PROVIDER_OAUTH2.to_string(),
+            id: "grafana".to_string(),
+            attributes: json!({ "client_id": "client" }),
+            owned: true,
+        }];
+
+        assert!(plan(&desired, &observed).is_empty());
+
+        // Everything else still drifts.
+        let changed = vec![ObservedResource {
+            attributes: json!({ "client_id": "other" }),
+            ..observed.remove(0)
+        }];
+        assert_eq!(plan(&desired, &changed)[0].kind, "update");
+    }
+
     #[test]
     fn a_proxy_provider_maps_flow_uuids_to_slugs() {
         let flows = vec![flow("flow-auth", "auth"), flow("flow-inval", "inval")];
@@ -908,6 +1064,7 @@ mod tests {
         crate::api::ProviderSummary {
             pk,
             name: name.to_string(),
+            meta_model_name: "authentik_providers_proxy.proxyprovider".to_string(),
         }
     }
 

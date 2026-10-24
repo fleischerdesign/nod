@@ -96,6 +96,10 @@ pub struct ProviderSummary {
     pub pk: i64,
     /// Unique provider name.
     pub name: String,
+    /// The model the row really is; the only honest type source (`/providers/all/`
+    /// uses `select_subclasses`, the typed endpoints use a fixed serializer).
+    #[serde(default)]
+    pub meta_model_name: String,
 }
 
 /// A policy binding as the bindings endpoint returns it.
@@ -230,6 +234,86 @@ struct ApplicationPage {
 struct ProviderPage {
     #[serde(default)]
     results: Vec<ProviderSummary>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
+/// The model name of a true OAuth2 provider, as `/providers/all/` reports it.
+const OAUTH2_MODEL: &str = "authentik_providers_oauth2.oauth2provider";
+
+/// An OAuth2 provider as the OAuth2 endpoint returns it.
+///
+/// `client_secret` is deliberately absent: the API returns it, the provider
+/// must never carry it into observation, a plan or a report (ADR-043).
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuth2Provider {
+    /// Primary key the API addresses.
+    pub pk: i64,
+    /// Unique provider name; the stable id.
+    pub name: String,
+    /// Public client id.
+    #[serde(default)]
+    pub client_id: String,
+    /// Authorization flow uuid.
+    #[serde(default)]
+    pub authorization_flow: Option<String>,
+    /// Invalidation flow uuid.
+    #[serde(default)]
+    pub invalidation_flow: Option<String>,
+    /// Registered redirect URIs.
+    #[serde(default)]
+    pub redirect_uris: Vec<RedirectUri>,
+    /// Subject mode, e.g. `hashed_user_id`.
+    #[serde(default)]
+    pub sub_mode: String,
+    /// Whether claims are included in the id token.
+    #[serde(default)]
+    pub include_claims_in_id_token: bool,
+    /// Granted OAuth2 flows.
+    #[serde(default)]
+    pub grant_types: Vec<String>,
+    /// Access-token lifetime, e.g. `hours=1`.
+    #[serde(default)]
+    pub access_token_validity: String,
+    /// Property (scope) mapping uuids.
+    #[serde(default)]
+    pub property_mappings: Vec<String>,
+}
+
+/// One redirect URI as the API returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RedirectUri {
+    /// The URL.
+    pub url: String,
+}
+
+/// A scope mapping, for resolving managed scope keys.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeMapping {
+    /// Mapping uuid.
+    pub pk: String,
+    /// Human name.
+    #[serde(default)]
+    pub name: String,
+    /// Managed key, e.g. `goauthentik.io/providers/oauth2/scope-openid`.
+    #[serde(default)]
+    pub managed: Option<String>,
+}
+
+/// One page of the OAuth2 provider list.
+#[derive(Debug, Default, Deserialize)]
+struct OAuth2ProviderPage {
+    #[serde(default)]
+    results: Vec<OAuth2Provider>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
+/// One page of the scope mapping list.
+#[derive(Debug, Default, Deserialize)]
+struct ScopeMappingPage {
+    #[serde(default)]
+    results: Vec<ScopeMapping>,
     #[serde(default)]
     pagination: Pagination,
 }
@@ -493,6 +577,77 @@ impl Authentik {
             }
         }
         Ok(providers)
+    }
+
+    /// Reads the OAuth2 providers, filtered by the honest type map.
+    ///
+    /// The typed endpoint returns every provider (a proxy provider is an
+    /// `OAuth2Provider` subclass) and labels them all as OAuth2. The type map
+    /// from `/providers/all/` is the only source that tells them apart, so the
+    /// caller passes the list it already holds — one snapshot per cycle.
+    pub fn oauth2_providers(
+        &self,
+        types: &[ProviderSummary],
+    ) -> Result<Vec<OAuth2Provider>, ApiError> {
+        let mut providers = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/providers/oauth2/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: OAuth2ProviderPage = self.get(&url)?;
+            providers.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(providers
+            .into_iter()
+            .filter(|provider| {
+                types
+                    .iter()
+                    .any(|known| known.pk == provider.pk && known.meta_model_name == OAUTH2_MODEL)
+            })
+            .collect())
+    }
+
+    /// Reads the scope mappings, for managed-scope resolution.
+    pub fn scope_mappings(&self) -> Result<Vec<ScopeMapping>, ApiError> {
+        let mut mappings = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/propertymappings/provider/scope/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: ScopeMappingPage = self.get(&url)?;
+            mappings.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(mappings)
+    }
+
+    /// Creates an OAuth2 provider; `client_secret` is only sent on create.
+    pub fn create_oauth2_provider(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/providers/oauth2/", self.base);
+        self.write("POST", &url, body.clone())
+    }
+
+    /// Updates the declared fields of an OAuth2 provider; never the secret.
+    pub fn update_oauth2_provider(&self, pk: i64, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/providers/oauth2/{}/", self.base, pk);
+        self.write("PATCH", &url, body.clone())
+    }
+
+    /// Deletes an OAuth2 provider.
+    pub fn delete_oauth2_provider(&self, pk: i64) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/providers/oauth2/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
     }
 
     /// Reads the complete binding list, for access-group reconciliation.
@@ -904,5 +1059,29 @@ mod tests {
             .expect("the body is present");
         let body: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
         assert_eq!(body["attributes"]["vyrx"], serde_json::json!("owned"));
+    }
+
+    #[test]
+    fn oauth2_providers_drop_the_proxy_subclass() {
+        let (base, handle) = server(vec![
+            (
+                200,
+                r#"{"pagination":{"next":null},"results":[{"pk":1,"name":"proxy","meta_model_name":"authentik_providers_proxy.proxyprovider"},{"pk":2,"name":"oauth","meta_model_name":"authentik_providers_oauth2.oauth2provider"}]}"#,
+            ),
+            (
+                200,
+                r#"{"pagination":{"next":null},"results":[{"pk":1,"name":"proxy","client_id":"a"},{"pk":2,"name":"oauth","client_id":"b"}]}"#,
+            ),
+        ]);
+
+        let client = client(&base);
+        let types = client.providers().expect("the type map parses");
+        let providers = client
+            .oauth2_providers(&types)
+            .expect("both lists parse");
+
+        assert_eq!(providers.len(), 1, "a proxy row is not an OAuth2 provider");
+        assert_eq!(providers[0].name, "oauth");
+        handle.join().unwrap();
     }
 }

@@ -44,6 +44,10 @@ The migration of existing providers therefore needs **no** secret on the
 reconciler host. Only a genuinely new OAuth2 provider needs a source, and then
 the variable is declared next to the token variable it already uses.
 
+`client_secret_env` is declared but **not compared**: it names an input, the
+observation cannot echo it, and comparing it would plan a no-op update every
+cycle. `differs()` skips it explicitly; every other declared key still drifts.
+
 ### 3. Names, not identifiers
 
 The declaration names what a human knows: flows by slug, the signing key by
@@ -64,8 +68,9 @@ the reference is the same, so the ordering is the same.
   single secret.
 - A new OAuth2 provider needs one environment variable, named in the
   declaration; nothing else changes.
-- A test asserts that no observed attribute contains `client_secret`, and that
-  an update succeeds without `client_secret_env`.
+- A test asserts that no observed attribute contains `client_secret`, that an
+  update succeeds without `client_secret_env`, and that a declaration carrying
+  it plans no change against an unchanged observation.
 - The type filter is a provider-internal detail; the core sees one kind,
   `authentik.provider.oauth2`.
 

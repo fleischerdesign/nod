@@ -3,10 +3,11 @@
 Authentik groups, users and applications for [nod](https://github.com/fleischerdesign/nod),
 spoken over the provider protocol (JSON Lines on stdin/stdout).
 
-The provider owns `authentik.group`, `authentik.user` and `authentik.application`
+The provider owns `authentik.group`, `authentik.user`, `authentik.application`,
+`authentik.provider.proxy`, `authentik.provider.oauth2` and `authentik.outpost`
 objects: it observes them, plans the difference against a declaration, applies
-it, and adopts existing groups and users on request. Roles, parents and policy
-bindings stay outside its scope.
+it, and takes ownership of existing objects on request. Roles, parents and
+policy bindings stay outside its scope.
 
 ## Capabilities
 
@@ -16,6 +17,8 @@ bindings stay outside its scope.
 | `authentik.user` | username | `name`, `email` |
 | `authentik.application` | slug (unique in Authentik) | `name`, `provider`, `meta_launch_url`, `meta_description`, `meta_publisher`, `open_in_new_tab`, `policy_engine_mode`, `group`, `meta_hide`, `access_groups` |
 | `authentik.provider.proxy` | provider name (unique in Authentik) | `mode`, `external_host`, `cookie_domain`, `authorization_flow`, `invalidation_flow` |
+| `authentik.provider.oauth2` | provider name (unique in Authentik) | `client_id`, `authorization_flow`, `invalidation_flow`, `redirect_uris`, `sub_mode`, `include_claims_in_id_token`, `grant_types`, `access_token_validity`, `property_mappings`, `client_secret_env` (write-only) |
+| `authentik.outpost` | outpost name | `type`, `providers`, `config.authentik_host`, `config.authentik_host_browser`, `config.authentik_host_insecure` |
 
 `users` lists login names. `description` and `users` are written into the group's
 free-form `attributes` and membership respectively; `is_superuser` is the group's
@@ -41,6 +44,43 @@ provider resolves them to the uuids the API expects. A proxy provider is
 created before the application that names it and deleted after it; a provider
 still referenced by an application that is not deleted in the same plan is
 refused instead of silently detaching it.
+
+### OAuth2 providers
+
+`client_id` is public and part of the observed resource. The **client secret is
+not**: it is write-only, it has no place in a resource, a plan or a report, and
+the provider's API types do not even carry the field (ADR-043). A `create`
+reads it from the environment variable named by `client_secret_env` — a
+variable, never a value — and an `update` never sends the key, so an adopted
+provider keeps the secret it already has. That is what makes migrating an
+existing OIDC provider safe: nod takes ownership without touching the
+credential.
+
+`property_mappings` lists **scope keys** (`openid`, `email`, `profile`, …), not
+uuids. The provider resolves them against the managed scope mappings; an
+unknown key is a declaration error. `redirect_uris` is the complete list of
+registered URLs and is written with `matching_mode: strict`.
+
+`client_secret_env` is an **input, not state**: it names the environment
+variable that holds the secret for a `create`. It is declared, never observed
+and never compared — otherwise every cycle would plan an update that changes
+nothing. Rotating a secret is not a reconcile action: nod neither reads nor
+rewrites the secret of an existing provider.
+
+A declared OAuth2 provider is verified against the honest type map from
+`/providers/all/`: the typed endpoint serializes a proxy provider as an OAuth2
+provider too, so only `meta_model_name` tells them apart. A proxy row is never
+planned as an OAuth2 provider, and an OAuth2 provider is never mistaken for one
+of its subclasses.
+
+### Outposts
+
+An outpost is observed and can be taken over, but not fully managed: its
+`config` object carries connection and TLS settings the provider only reports.
+`providers` is the list of provider **names**; authentik only serves a provider
+that an outpost lists, which is why the relation is visible here.
+`private_key`, `token` and the docker/kubernetes settings are deliberately
+absent from the resource.
 
 ## Settings
 
@@ -108,10 +148,10 @@ a membership that an LDAP sync or an administrator maintains.
 
 | Operation | Effect |
 |---|---|
-| `observe` | Reads every group, user and application, paginated. |
+| `observe` | Reads every group, user, application, provider and outpost, paginated. |
 | `plan` | Computes `create`/`update`/`delete` against the declaration. |
 | `apply` | Writes the plan. Refuses every change to an unowned resource. |
-| `adopt` | Stamps the marker on an existing group or user; nothing else changes. Applications are refused. |
+| `adopt` | Takes ownership on request: a group or user is stamped with the marker, a provider or outpost is verified to exist, and the core records the decision (ADR-040). An application is refused. |
 
 Deletion is the core's decision, not the provider's: the core's `policy.protect`
 and `policy.max_deletions` bound what a plan may remove, and a plan over the cap
@@ -138,6 +178,12 @@ The manifest and the handshake name what the token must be allowed to do:
 | `authentik_providers_proxy.add_proxyprovider` | `create` of a proxy provider |
 | `authentik_providers_proxy.change_proxyprovider` | `update` of a proxy provider |
 | `authentik_providers_proxy.delete_proxyprovider` | `delete` of a proxy provider |
+| `authentik_providers_oauth2.view_oauth2provider` | `observe`, `plan`, `apply` of an OAuth2 provider |
+| `authentik_providers_oauth2.view_scopemapping` | resolving a declared scope key to its uuid |
+| `authentik_providers_oauth2.add_oauth2provider` | `create` of an OAuth2 provider |
+| `authentik_providers_oauth2.change_oauth2provider` | `update` of an OAuth2 provider |
+| `authentik_providers_oauth2.delete_oauth2provider` | `delete` of an OAuth2 provider |
+| `authentik_outposts.view_outpost` | `observe`, `plan`, `apply` of an outpost |
 | `authentik_flows.view_flow` | resolving a flow slug to its uuid |
 | `authentik_core.delete_group` | `delete`, only when the core's policy allows it |
 
@@ -167,22 +213,28 @@ manage groups and users; applications need the full view.
 
 ## Scope and limits
 
-- Groups, users, applications and proxy providers. Roles, parents, policy
-  bindings and outposts are not managed here.
+- Groups, users, applications, proxy and OAuth2 providers are fully managed;
+  outposts are observed and can be adopted. Roles, parents and policy bindings
+  are not managed here.
 - A user is a **seed**: created when missing, never updated and never deleted.
   The profile, the credentials and the account belong to the person, so a
   reconcile must not turn a UI edit into drift.
 - An application is fully managed: created, updated and deleted. Its ownership
   comes from the core's record, never from a marker (ADR-037).
-- A proxy provider is fully managed as well, but only while the embedded
-  outpost's provider list is declared elsewhere: authentik only serves a
-  provider the outpost lists, and that list is currently a blueprint entry.
+- Providers and outposts have no marker field either; the core's record owns
+  them. A proxy provider is only reachable while the embedded outpost lists it,
+  and that list is declared as an outpost attribute or in a blueprint.
+- An OAuth2 provider's secret is write-only: nod can create one from
+  `client_secret_env`, and can adopt an existing one without reading or
+  changing the secret it already has. It never reports it.
 - The API is `/api/v3/core/` for groups, users and applications,
-  `/api/v3/providers/all/` for the provider-name resolution,
-  `/api/v3/providers/proxy/` for proxy providers and
-  `/api/v3/flows/instances/` for flow slugs; pagination follows
-  `pagination.next` to the end. The provider was written against Authentik
-  2026.5.6 and speaks API v3.
+  `/api/v3/providers/all/` for the provider type map and name resolution,
+  `/api/v3/providers/proxy/` for proxy providers,
+  `/api/v3/providers/oauth2/` for OAuth2 providers,
+  `/api/v3/propertymappings/provider/scope/` for scope mappings,
+  `/api/v3/outposts/instances/` for outposts and `/api/v3/flows/instances/` for
+  flow slugs; pagination follows `pagination.next` to the end. The provider was
+  written against Authentik 2026.5.6 and speaks API v3.
 - A declared username or provider name that does not exist fails the change
   instead of being skipped: silently dropping a member is worse than a loud
   error.
@@ -193,5 +245,8 @@ manage groups and users; applications need the full view.
 nod provider test ./nod-provider-authentik --settings settings.json --env AUTHENTIK_TOKEN
 ```
 
-The provider's own tests cover the model, planning, subset semantics, pagination
-and the error classes (401/403, 429, 5xx).
+The provider's own tests cover the model, planning, subset semantics, pagination,
+the OAuth2 type filter, the absence of the client secret in observed resources
+and the error classes (401/403, 429, 5xx). The protocol test drives the real
+binary against a fake API and proves the handshake, an observation that
+contains an OAuth2 provider without its secret, planning and an empty apply.

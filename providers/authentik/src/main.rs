@@ -26,7 +26,7 @@ const PROTOCOL: u32 = 1;
 /// reported with the change that needed it. Applications are fully managed —
 /// created and deleted by the fleet — so their deletion permission is part of
 /// the required set.
-const REQUIRED_PERMISSIONS: [&str; 20] = [
+const REQUIRED_PERMISSIONS: [&str; 25] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.view_application",
@@ -47,6 +47,11 @@ const REQUIRED_PERMISSIONS: [&str; 20] = [
     "authentik_outposts.add_outpost",
     "authentik_outposts.change_outpost",
     "authentik_outposts.delete_outpost",
+    "authentik_providers_oauth2.view_oauth2provider",
+    "authentik_providers_oauth2.add_oauth2provider",
+    "authentik_providers_oauth2.change_oauth2provider",
+    "authentik_providers_oauth2.delete_oauth2provider",
+    "authentik_providers_oauth2.view_scopemapping",
 ];
 
 fn main() {
@@ -105,6 +110,7 @@ fn handshake() -> Value {
             "authentik.user",
             "authentik.application",
             "authentik.provider.proxy",
+            "authentik.provider.oauth2",
             "authentik.outpost",
         ],
         "operations": ["adopt"],
@@ -305,6 +311,18 @@ fn observe(request: &Value) -> Value {
         Err(error) => return api_error(&error),
     };
 
+    // OAuth2 providers and their scope mappings. The typed endpoint returns the
+    // proxy subclasses too; `oauth2_providers` filters them by the honest type
+    // map (ADR-043).
+    let oauth2_providers = match client.oauth2_providers(&providers) {
+        Ok(providers) => providers,
+        Err(error) => return api_error(&error),
+    };
+    let scope_mappings = match client.scope_mappings() {
+        Ok(mappings) => mappings,
+        Err(error) => return api_error(&error),
+    };
+
     let marker = Marker {
         key: settings.marker_key,
         value: settings.marker_value,
@@ -363,6 +381,15 @@ fn observe(request: &Value) -> Value {
         }))
         .chain(outposts.iter().map(|outpost| {
             let resource = model::outpost_resource(outpost, &providers);
+            json!({
+                "kind": resource.kind,
+                "id": resource.id,
+                "attributes": resource.attributes,
+                "owned": resource.owned,
+            })
+        }))
+        .chain(oauth2_providers.iter().map(|provider| {
+            let resource = model::oauth2_provider_resource(provider, &flows, &scope_mappings);
             json!({
                 "kind": resource.kind,
                 "id": resource.id,
@@ -459,6 +486,8 @@ fn apply(request: &Value) -> Value {
     let mut proxy_providers: Option<Vec<api::ProxyProvider>> = None;
     let mut flows: Option<Vec<api::Flow>> = None;
     let mut outposts: Option<Vec<api::Outpost>> = None;
+    let mut oauth2_providers: Option<Vec<api::OAuth2Provider>> = None;
+    let mut scope_mappings: Option<Vec<api::ScopeMapping>> = None;
 
     for change in &changes {
         let id = change.resource.id.clone();
@@ -995,6 +1024,214 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
+            (kind @ ("create" | "update"), model::KIND_PROVIDER_OAUTH2) => {
+                if flows.is_none() {
+                    match client.flows() {
+                        Ok(list) => flows = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_flows.view_flow"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                if scope_mappings.is_none() {
+                    match client.scope_mappings() {
+                        Ok(list) => scope_mappings = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_oauth2.view_scopemapping",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let known_flows = flows.as_deref().unwrap_or(&[]);
+                let known_scopes = scope_mappings.as_deref().unwrap_or(&[]);
+
+                if kind == "create" {
+                    // The secret is write-only and required only here
+                    // (ADR-043): a named variable, never a value.
+                    let Some(env_name) = change
+                        .resource
+                        .attributes
+                        .get("client_secret_env")
+                        .and_then(Value::as_str)
+                    else {
+                        applied.push(failed(
+                            &id,
+                            "creating an OAuth2 provider needs `client_secret_env`",
+                            "config",
+                        ));
+                        continue;
+                    };
+                    let Ok(secret) = std::env::var(env_name) else {
+                        applied.push(failed(
+                            &id,
+                            &format!("environment variable `{env_name}` is not set"),
+                            "config",
+                        ));
+                        continue;
+                    };
+                    if secret.is_empty() {
+                        applied.push(failed(
+                            &id,
+                            &format!("environment variable `{env_name}` is empty"),
+                            "config",
+                        ));
+                        continue;
+                    }
+                    let body = match oauth2_provider_body(
+                        &id,
+                        &change.resource.attributes,
+                        known_flows,
+                        known_scopes,
+                        Some(&secret),
+                    ) {
+                        Ok(body) => body,
+                        Err(message) => {
+                            applied.push(failed(&id, &message, "config"));
+                            continue;
+                        }
+                    };
+                    match client.create_oauth2_provider(&body) {
+                        Ok(()) => applied.push(ok(&id)),
+                        Err(error) => applied.push(failed(
+                            &id,
+                            &failure_message(
+                                &error,
+                                "authentik_providers_oauth2.add_oauth2provider",
+                            ),
+                            error.kind(),
+                        )),
+                    }
+                    continue;
+                }
+
+                let body = match oauth2_provider_body(
+                    &id,
+                    &change.resource.attributes,
+                    known_flows,
+                    known_scopes,
+                    None,
+                ) {
+                    Ok(body) => body,
+                    Err(message) => {
+                        applied.push(failed(&id, &message, "config"));
+                        continue;
+                    }
+                };
+                if oauth2_providers.is_none() {
+                    let types = match ensure_providers(&client, &mut providers) {
+                        Ok(types) => types,
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_core.view_provider"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    };
+                    match client.oauth2_providers(types) {
+                        Ok(list) => oauth2_providers = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_oauth2.view_oauth2provider",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = oauth2_providers
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|provider| provider.name == id)
+                    .map(|provider| provider.pk);
+                let Some(pk) = pk else {
+                    applied.push(failed(
+                        &id,
+                        "OAuth2 provider not found after the update",
+                        "config",
+                    ));
+                    continue;
+                };
+                match client.update_oauth2_provider(pk, &body) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(
+                            &error,
+                            "authentik_providers_oauth2.change_oauth2provider",
+                        ),
+                        error.kind(),
+                    )),
+                }
+            }
+            ("delete", model::KIND_PROVIDER_OAUTH2) => {
+                if oauth2_providers.is_none() {
+                    let types = match ensure_providers(&client, &mut providers) {
+                        Ok(types) => types,
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_core.view_provider"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    };
+                    match client.oauth2_providers(types) {
+                        Ok(list) => oauth2_providers = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_oauth2.view_oauth2provider",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = oauth2_providers
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|provider| provider.name == id)
+                    .map(|provider| provider.pk);
+                let Some(pk) = pk else {
+                    applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
+                    continue;
+                };
+                match client.delete_oauth2_provider(pk) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(
+                            &error,
+                            "authentik_providers_oauth2.delete_oauth2provider",
+                        ),
+                        error.kind(),
+                    )),
+                }
+            }
             (other, _) => applied.push(failed(
                 &id,
                 &format!("unsupported change kind: {other}"),
@@ -1004,6 +1241,20 @@ fn apply(request: &Value) -> Value {
     }
 
     json!({ "applied": applied, "conditions": [] })
+}
+
+/// Returns the provider type map, read once per apply.
+///
+/// The map is the honest type source (ADR-043) and the name-to-pk index; one
+/// snapshot per apply keeps both uses consistent with each other.
+fn ensure_providers<'a>(
+    client: &Authentik,
+    cache: &'a mut Option<Vec<api::ProviderSummary>>,
+) -> Result<&'a [api::ProviderSummary], ApiError> {
+    if cache.is_none() {
+        *cache = Some(client.providers()?);
+    }
+    Ok(cache.as_deref().unwrap_or(&[]))
 }
 
 fn ok(id: &str) -> Value {
@@ -1287,6 +1538,112 @@ fn outpost_body(
     Ok(Value::Object(body))
 }
 
+/// Builds an OAuth2 provider's create or patch body from the declared attributes.
+///
+/// `secret` is passed only on create; the helper never reads the environment and
+/// never returns the secret in any output. Scope keys resolve against the
+/// managed scope mappings; an unknown key is a declaration error (ADR-043).
+fn oauth2_provider_body(
+    id: &str,
+    attributes: &Value,
+    flows: &[api::Flow],
+    scopes: &[api::ScopeMapping],
+    secret: Option<&str>,
+) -> Result<Value, String> {
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_string(), json!(id));
+
+    if let Some(value) = attributes.get("client_id") {
+        let Some(client_id) = value.as_str() else {
+            return Err("`client_id` must be a string".to_string());
+        };
+        body.insert("client_id".to_string(), json!(client_id));
+    }
+
+    for key in ["authorization_flow", "invalidation_flow"] {
+        if let Some(value) = attributes.get(key) {
+            let Some(slug) = value.as_str() else {
+                return Err(format!("`{key}` must be a flow slug"));
+            };
+            let Some(flow) = flows.iter().find(|flow| flow.slug == slug) else {
+                return Err(format!("unknown flow `{slug}` in `{key}`"));
+            };
+            body.insert(key.to_string(), json!(flow.pk));
+        }
+    }
+
+    if let Some(value) = attributes.get("redirect_uris") {
+        let Some(items) = value.as_array() else {
+            return Err("`redirect_uris` must be a list of URLs".to_string());
+        };
+        let mut uris = Vec::new();
+        for item in items {
+            let Some(url) = item.as_str() else {
+                return Err("`redirect_uris` must be a list of URLs".to_string());
+            };
+            uris.push(json!({ "matching_mode": "strict", "url": url }));
+        }
+        body.insert("redirect_uris".to_string(), Value::Array(uris));
+    }
+
+    for key in ["sub_mode", "access_token_validity"] {
+        if let Some(value) = attributes.get(key) {
+            let Some(text) = value.as_str() else {
+                return Err(format!("`{key}` must be a string"));
+            };
+            body.insert(key.to_string(), json!(text));
+        }
+    }
+
+    if let Some(value) = attributes.get("include_claims_in_id_token") {
+        let Some(flag) = value.as_bool() else {
+            return Err("`include_claims_in_id_token` must be a boolean".to_string());
+        };
+        body.insert("include_claims_in_id_token".to_string(), json!(flag));
+    }
+
+    if let Some(value) = attributes.get("grant_types") {
+        let Some(items) = value.as_array() else {
+            return Err("`grant_types` must be a list of strings".to_string());
+        };
+        let mut types = Vec::new();
+        for item in items {
+            let Some(name) = item.as_str() else {
+                return Err("`grant_types` must be a list of strings".to_string());
+            };
+            types.push(json!(name));
+        }
+        body.insert("grant_types".to_string(), Value::Array(types));
+    }
+
+    if let Some(value) = attributes.get("property_mappings") {
+        let Some(items) = value.as_array() else {
+            return Err("`property_mappings` must be a list of scope keys".to_string());
+        };
+        let mut pks = Vec::new();
+        for item in items {
+            let Some(key) = item.as_str() else {
+                return Err("`property_mappings` must be a list of scope keys".to_string());
+            };
+            let managed = format!("goauthentik.io/providers/oauth2/scope-{key}");
+            let Some(mapping) = scopes
+                .iter()
+                .find(|mapping| mapping.managed.as_deref() == Some(&managed) || mapping.name == key)
+            else {
+                return Err(format!("unknown scope `{key}` in `property_mappings`"));
+            };
+            pks.push(json!(mapping.pk));
+        }
+        body.insert("property_mappings".to_string(), Value::Array(pks));
+    }
+
+    if let Some(secret) = secret {
+        body.insert("client_secret".to_string(), json!(secret));
+    }
+
+    Ok(Value::Object(body))
+}
+
 /// Resolves the declared member usernames to primary keys.
 ///
 /// `Ok(None)` means the declaration does not name membership (`members = null`),
@@ -1355,6 +1712,16 @@ fn adopt(request: &Value) -> Value {
     };
     let outposts = match client.outposts() {
         Ok(outposts) => outposts,
+        Err(error) => return api_error(&error),
+    };
+    // The OAuth2 type filter needs the same provider snapshot the adoption
+    // above reads; one list serves names and types alike.
+    let providers = match client.providers() {
+        Ok(providers) => providers,
+        Err(error) => return api_error(&error),
+    };
+    let oauth2_providers = match client.oauth2_providers(&providers) {
+        Ok(providers) => providers,
         Err(error) => return api_error(&error),
     };
 
@@ -1426,6 +1793,25 @@ fn adopt(request: &Value) -> Value {
                             "retry_after_secs": error.retry_after()
                         }
                     })),
+                }
+            }
+            model::KIND_PROVIDER_OAUTH2 => {
+                if oauth2_providers
+                    .iter()
+                    .any(|provider| provider.name == resource.id)
+                {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": ""
+                    }));
+                } else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "OAuth2 provider not found",
+                        "error": { "kind": "config", "message": "OAuth2 provider not found" }
+                    }));
                 }
             }
             model::KIND_OUTPOST => {
@@ -1514,6 +1900,7 @@ mod tests {
         api::ProviderSummary {
             pk,
             name: name.to_string(),
+            meta_model_name: "authentik_providers_oauth2.oauth2provider".to_string(),
         }
     }
 
@@ -1538,6 +1925,106 @@ mod tests {
     fn an_application_body_detaches_on_an_empty_provider() {
         let body = application_body(&json!({ "provider": "" }), &[]).expect("detach");
         assert_eq!(body["provider"], Value::Null);
+    }
+
+    fn oauth2_flow(pk: &str, slug: &str) -> api::Flow {
+        api::Flow {
+            pk: pk.to_string(),
+            slug: slug.to_string(),
+        }
+    }
+
+    fn oauth2_scope(pk: &str, managed: &str) -> api::ScopeMapping {
+        api::ScopeMapping {
+            pk: pk.to_string(),
+            name: "scope".to_string(),
+            managed: Some(managed.to_string()),
+        }
+    }
+
+    #[test]
+    fn an_oauth2_body_resolves_slugs_and_scope_keys() {
+        let flows = vec![oauth2_flow("flow-uuid", "default-provider-authorization")];
+        let scopes = vec![
+            oauth2_scope("scope-openid", "goauthentik.io/providers/oauth2/scope-openid"),
+            oauth2_scope("scope-email", "goauthentik.io/providers/oauth2/scope-email"),
+        ];
+        let body = oauth2_provider_body(
+            "grafana",
+            &json!({
+                "authorization_flow": "default-provider-authorization",
+                "redirect_uris": ["https://grafana.lan.vyrx.de/login/generic_oauth"],
+                "property_mappings": ["openid", "email"],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "sub_mode": "user_email",
+                "access_token_validity": "hours=1",
+                "include_claims_in_id_token": true
+            }),
+            &flows,
+            &scopes,
+            None,
+        )
+        .expect("a complete declaration resolves");
+
+        assert_eq!(body["name"], json!("grafana"));
+        assert_eq!(body["authorization_flow"], json!("flow-uuid"));
+        assert_eq!(
+            body["property_mappings"],
+            json!(["scope-openid", "scope-email"])
+        );
+        assert_eq!(body["redirect_uris"][0]["url"], json!("https://grafana.lan.vyrx.de/login/generic_oauth"));
+        assert_eq!(body["redirect_uris"][0]["matching_mode"], json!("strict"));
+    }
+
+    #[test]
+    fn an_oauth2_update_never_sends_a_client_secret() {
+        // A migration adopts an existing provider: the update must leave the
+        // secret exactly as it is, so the key is absent, not empty (ADR-043).
+        let body = oauth2_provider_body(
+            "grafana",
+            &json!({ "client_id": "client" }),
+            &[],
+            &[],
+            None,
+        )
+        .expect("an update needs no secret");
+        assert!(body.get("client_secret").is_none());
+    }
+
+    #[test]
+    fn an_oauth2_create_carries_the_secret_once() {
+        let body = oauth2_provider_body(
+            "grafana",
+            &json!({ "client_id": "client" }),
+            &[],
+            &[],
+            Some("generated"),
+        )
+        .expect("a create carries the secret");
+        assert_eq!(body["client_secret"], json!("generated"));
+    }
+
+    #[test]
+    fn an_oauth2_body_rejects_unknown_flows_and_scopes() {
+        let error = oauth2_provider_body(
+            "grafana",
+            &json!({ "authorization_flow": "missing" }),
+            &[],
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown flow `missing`"), "{error}");
+
+        let error = oauth2_provider_body(
+            "grafana",
+            &json!({ "property_mappings": ["nope"] }),
+            &[],
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown scope `nope`"), "{error}");
     }
 
     #[test]
