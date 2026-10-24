@@ -26,7 +26,7 @@ const PROTOCOL: u32 = 1;
 /// reported with the change that needed it. Applications are fully managed —
 /// created and deleted by the fleet — so their deletion permission is part of
 /// the required set.
-const REQUIRED_PERMISSIONS: [&str; 25] = [
+const REQUIRED_PERMISSIONS: [&str; 29] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.view_application",
@@ -52,6 +52,10 @@ const REQUIRED_PERMISSIONS: [&str; 25] = [
     "authentik_providers_oauth2.change_oauth2provider",
     "authentik_providers_oauth2.delete_oauth2provider",
     "authentik_providers_oauth2.view_scopemapping",
+    "authentik_crypto.view_certificatekeypair",
+    "authentik_crypto.add_certificatekeypair",
+    "authentik_crypto.change_certificatekeypair",
+    "authentik_crypto.delete_certificatekeypair",
 ];
 
 fn main() {
@@ -112,6 +116,7 @@ fn handshake() -> Value {
             "authentik.provider.proxy",
             "authentik.provider.oauth2",
             "authentik.outpost",
+            "authentik.certificatekeypair",
         ],
         "operations": ["adopt"],
         "required_permissions": REQUIRED_PERMISSIONS,
@@ -323,6 +328,14 @@ fn observe(request: &Value) -> Value {
         Err(error) => return api_error(&error),
     };
 
+    // Signing keypairs. Authentik hides its own managed certificate from this
+    // list, so an empty result is normal: it only means no declaration can
+    // name one (ADR-044).
+    let certificate_keypairs = match client.certificate_keypairs() {
+        Ok(pairs) => pairs,
+        Err(error) => return api_error(&error),
+    };
+
     let marker = Marker {
         key: settings.marker_key,
         value: settings.marker_value,
@@ -389,7 +402,17 @@ fn observe(request: &Value) -> Value {
             })
         }))
         .chain(oauth2_providers.iter().map(|provider| {
-            let resource = model::oauth2_provider_resource(provider, &flows, &scope_mappings);
+            let resource =
+                model::oauth2_provider_resource(provider, &flows, &scope_mappings, &certificate_keypairs);
+            json!({
+                "kind": resource.kind,
+                "id": resource.id,
+                "attributes": resource.attributes,
+                "owned": resource.owned,
+            })
+        }))
+        .chain(certificate_keypairs.iter().map(|pair| {
+            let resource = model::certificate_keypair_resource(pair);
             json!({
                 "kind": resource.kind,
                 "id": resource.id,
@@ -488,6 +511,7 @@ fn apply(request: &Value) -> Value {
     let mut outposts: Option<Vec<api::Outpost>> = None;
     let mut oauth2_providers: Option<Vec<api::OAuth2Provider>> = None;
     let mut scope_mappings: Option<Vec<api::ScopeMapping>> = None;
+    let mut certificate_keypairs: Option<Vec<api::CertificateKeyPair>> = None;
 
     for change in &changes {
         let id = change.resource.id.clone();
@@ -1024,6 +1048,118 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
+            (kind @ ("create" | "update"), model::KIND_CERTIFICATE_KEYPAIR) => {
+                if kind == "create" {
+                    // Both PEMs are input, not state: named files, read once here
+                    // and never reported (ADR-044). A file is the carrier because
+                    // a PEM is multi-line and an EnvironmentFile is not.
+                    let mut material = Vec::new();
+                    for (attribute, key) in [
+                        ("certificate_path", "certificate"),
+                        ("private_key_path", "private key"),
+                    ] {
+                        let Some(path) = change
+                            .resource
+                            .attributes
+                            .get(attribute)
+                            .and_then(Value::as_str)
+                        else {
+                            applied.push(failed(
+                                &id,
+                                &format!("creating a keypair needs `{attribute}`"),
+                                "config",
+                            ));
+                            material.clear();
+                            break;
+                        };
+                        let Ok(value) = std::fs::read_to_string(path) else {
+                            applied.push(failed(
+                                &id,
+                                &format!("cannot read `{attribute}` at `{path}`"),
+                                "config",
+                            ));
+                            material.clear();
+                            break;
+                        };
+                        if value.trim().is_empty() {
+                            applied.push(failed(
+                                &id,
+                                &format!("the file at `{path}` is empty"),
+                                "config",
+                            ));
+                            material.clear();
+                            break;
+                        }
+                        material.push((key, value));
+                    }
+                    if material.len() != 2 {
+                        continue;
+                    }
+                    let body = json!({
+                        "name": id,
+                        "certificate_data": material[0].1,
+                        "key_data": material[1].1,
+                    });
+                    match client.create_certificate_keypair(&body) {
+                        Ok(()) => {
+                            applied.push(ok(&id));
+                            // The providers later in this apply resolve the new
+                            // keypair by name; a stale cache would refuse them.
+                            certificate_keypairs = None;
+                        }
+                        Err(error) => applied.push(failed(
+                            &id,
+                            &failure_message(&error, "authentik_crypto.add_certificatekeypair"),
+                            error.kind(),
+                        )),
+                    }
+                    continue;
+                }
+
+                // The material is write-only, so an update could not verify
+                // what it replaces. Rotation is a new pair, not a rewrite.
+                applied.push(failed(
+                    &id,
+                    "a keypair is immutable; declare a new one and move the providers onto it",
+                    "config",
+                ));
+            }
+            ("delete", model::KIND_CERTIFICATE_KEYPAIR) => {
+                if certificate_keypairs.is_none() {
+                    match client.certificate_keypairs() {
+                        Ok(list) => certificate_keypairs = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_crypto.view_certificatekeypair"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = certificate_keypairs
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|pair| pair.name == id)
+                    .map(|pair| pair.pk.clone());
+                let Some(pk) = pk else {
+                    applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
+                    continue;
+                };
+                match client.delete_certificate_keypair(&pk) {
+                    Ok(()) => {
+                        applied.push(ok(&id));
+                        certificate_keypairs = None;
+                    }
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_crypto.delete_certificatekeypair"),
+                        error.kind(),
+                    )),
+                }
+            }
             (kind @ ("create" | "update"), model::KIND_PROVIDER_OAUTH2) => {
                 if flows.is_none() {
                     match client.flows() {
@@ -1056,6 +1192,20 @@ fn apply(request: &Value) -> Value {
                 }
                 let known_flows = flows.as_deref().unwrap_or(&[]);
                 let known_scopes = scope_mappings.as_deref().unwrap_or(&[]);
+                if certificate_keypairs.is_none() {
+                    match client.certificate_keypairs() {
+                        Ok(list) => certificate_keypairs = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_crypto.view_certificatekeypair"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let known_keys = certificate_keypairs.as_deref().unwrap_or(&[]);
 
                 if kind == "create" {
                     // The secret is write-only and required only here
@@ -1094,6 +1244,7 @@ fn apply(request: &Value) -> Value {
                         &change.resource.attributes,
                         known_flows,
                         known_scopes,
+                        known_keys,
                         Some(&secret),
                     ) {
                         Ok(body) => body,
@@ -1121,6 +1272,7 @@ fn apply(request: &Value) -> Value {
                     &change.resource.attributes,
                     known_flows,
                     known_scopes,
+                    known_keys,
                     None,
                 ) {
                     Ok(body) => body,
@@ -1542,12 +1694,14 @@ fn outpost_body(
 ///
 /// `secret` is passed only on create; the helper never reads the environment and
 /// never returns the secret in any output. Scope keys resolve against the
-/// managed scope mappings; an unknown key is a declaration error (ADR-043).
+/// managed scope mappings, the signing key against the visible keypairs; an
+/// unknown name is a declaration error (ADR-043, ADR-044).
 fn oauth2_provider_body(
     id: &str,
     attributes: &Value,
     flows: &[api::Flow],
     scopes: &[api::ScopeMapping],
+    keys: &[api::CertificateKeyPair],
     secret: Option<&str>,
 ) -> Result<Value, String> {
     let mut body = serde_json::Map::new();
@@ -1637,6 +1791,16 @@ fn oauth2_provider_body(
         body.insert("property_mappings".to_string(), Value::Array(pks));
     }
 
+    if let Some(value) = attributes.get("signing_key") {
+        let Some(name) = value.as_str() else {
+            return Err("`signing_key` must be a keypair name".to_string());
+        };
+        let Some(key) = keys.iter().find(|key| key.name == name) else {
+            return Err(format!("unknown signing key `{name}`"));
+        };
+        body.insert("signing_key".to_string(), json!(key.pk));
+    }
+
     if let Some(secret) = secret {
         body.insert("client_secret".to_string(), json!(secret));
     }
@@ -1724,6 +1888,10 @@ fn adopt(request: &Value) -> Value {
         Ok(providers) => providers,
         Err(error) => return api_error(&error),
     };
+    let certificate_keypairs = match client.certificate_keypairs() {
+        Ok(pairs) => pairs,
+        Err(error) => return api_error(&error),
+    };
 
     let marker = Marker {
         key: settings.marker_key,
@@ -1793,6 +1961,22 @@ fn adopt(request: &Value) -> Value {
                             "retry_after_secs": error.retry_after()
                         }
                     })),
+                }
+            }
+            model::KIND_CERTIFICATE_KEYPAIR => {
+                if certificate_keypairs.iter().any(|pair| pair.name == resource.id) {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": "the material is write-only; the core records ownership"
+                    }));
+                } else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "keypair not found",
+                        "error": { "kind": "config", "message": "keypair not found" }
+                    }));
                 }
             }
             model::KIND_PROVIDER_OAUTH2 => {
@@ -1962,6 +2146,7 @@ mod tests {
             }),
             &flows,
             &scopes,
+            &[],
             None,
         )
         .expect("a complete declaration resolves");
@@ -1977,12 +2162,49 @@ mod tests {
     }
 
     #[test]
+    fn an_oauth2_body_resolves_a_signing_key_by_name() {
+        let keys = vec![api::CertificateKeyPair {
+            pk: "key-uuid".to_string(),
+            name: "nod OIDC signing key".to_string(),
+            key_type: Some("rsa".to_string()),
+            fingerprint_sha256: None,
+        }];
+        let body = oauth2_provider_body(
+            "grafana",
+            &json!({ "signing_key": "nod OIDC signing key" }),
+            &[],
+            &[],
+            &keys,
+            None,
+        )
+        .expect("a declared keypair resolves");
+        assert_eq!(body["signing_key"], json!("key-uuid"));
+    }
+
+    #[test]
+    fn an_oauth2_body_rejects_an_unknown_signing_key() {
+        // A name that resolves to nothing must fail, never write null: null is
+        // HS256, and that is a different provider (ADR-044).
+        let error = oauth2_provider_body(
+            "grafana",
+            &json!({ "signing_key": "missing" }),
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown signing key `missing`"), "{error}");
+    }
+
+    #[test]
     fn an_oauth2_update_never_sends_a_client_secret() {
         // A migration adopts an existing provider: the update must leave the
         // secret exactly as it is, so the key is absent, not empty (ADR-043).
-        let body = oauth2_provider_body(
+        let body =     oauth2_provider_body(
             "grafana",
             &json!({ "client_id": "client" }),
+            &[],
             &[],
             &[],
             None,
@@ -1993,9 +2215,10 @@ mod tests {
 
     #[test]
     fn an_oauth2_create_carries_the_secret_once() {
-        let body = oauth2_provider_body(
+        let body =     oauth2_provider_body(
             "grafana",
             &json!({ "client_id": "client" }),
+            &[],
             &[],
             &[],
             Some("generated"),
@@ -2011,6 +2234,7 @@ mod tests {
             &json!({ "authorization_flow": "missing" }),
             &[],
             &[],
+            &[],
             None,
         )
         .unwrap_err();
@@ -2019,6 +2243,7 @@ mod tests {
         let error = oauth2_provider_body(
             "grafana",
             &json!({ "property_mappings": ["nope"] }),
+            &[],
             &[],
             &[],
             None,

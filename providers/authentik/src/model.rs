@@ -40,6 +40,13 @@ pub const KIND_PROVIDER_OAUTH2: &str = "authentik.provider.oauth2";
 /// either; the core's record owns it.
 pub const KIND_OUTPOST: &str = "authentik.outpost";
 
+/// Resource kind for a certificate/key pair.
+///
+/// The material is write-only (`certificate_env`, `private_key_env`) and the
+/// object is immutable: rotation declares a new pair and moves the providers
+/// onto it (ADR-044). An observation therefore carries only its facts.
+pub const KIND_CERTIFICATE_KEYPAIR: &str = "authentik.certificatekeypair";
+
 /// A user as the group serializer's `users_obj` returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartialUser {
@@ -235,10 +242,16 @@ pub fn application_resource(
 /// The name is the id; flows are slugs, scopes are the managed keys
 /// (`openid`, `email`, …), redirect URIs are plain strings. The client secret
 /// is absent by construction — the API returns it, the resource must not.
+///
+/// The signing key is a name, resolved against the visible keypairs. A pk that
+/// names none (Authentik's managed internal certificate) is omitted rather than
+/// invented, so a declaration that names a keypair plans exactly one update
+/// onto it (ADR-044).
 pub fn oauth2_provider_resource(
     provider: &crate::api::OAuth2Provider,
     flows: &[crate::api::Flow],
     scopes: &[crate::api::ScopeMapping],
+    keys: &[crate::api::CertificateKeyPair],
 ) -> ObservedResource {
     let slug = |pk: &Option<String>| {
         pk.as_deref()
@@ -268,19 +281,46 @@ pub fn oauth2_provider_resource(
         .collect();
     mappings.sort_unstable();
 
+    let mut attributes = json!({
+        "client_id": provider.client_id,
+        "authorization_flow": slug(&provider.authorization_flow),
+        "invalidation_flow": slug(&provider.invalidation_flow),
+        "redirect_uris": provider.redirect_uris.iter().map(|uri| uri.url.clone()).collect::<Vec<_>>(),
+        "sub_mode": provider.sub_mode,
+        "include_claims_in_id_token": provider.include_claims_in_id_token,
+        "grant_types": provider.grant_types,
+        "access_token_validity": provider.access_token_validity,
+        "property_mappings": mappings,
+    });
+    if let Some(pk) = provider.signing_key.as_deref() {
+        if let Some(key) = keys.iter().find(|key| key.pk == pk) {
+            attributes["signing_key"] = json!(key.name);
+        }
+    }
+
     ObservedResource {
         kind: KIND_PROVIDER_OAUTH2.to_string(),
         id: provider.name.clone(),
+        attributes,
+        owned: false,
+    }
+}
+
+/// Maps a certificate/key pair to the resource the core sees.
+///
+/// The name is the id. The material is write-only, so the observation carries
+/// only what the API reports about it: the key algorithm and the certificate's
+/// SHA-256 fingerprint. Nothing here can drift — a declaration sets inputs, and
+/// inputs are not compared (ADR-044).
+pub fn certificate_keypair_resource(
+    pair: &crate::api::CertificateKeyPair,
+) -> ObservedResource {
+    ObservedResource {
+        kind: KIND_CERTIFICATE_KEYPAIR.to_string(),
+        id: pair.name.clone(),
         attributes: json!({
-            "client_id": provider.client_id,
-            "authorization_flow": slug(&provider.authorization_flow),
-            "invalidation_flow": slug(&provider.invalidation_flow),
-            "redirect_uris": provider.redirect_uris.iter().map(|uri| uri.url.clone()).collect::<Vec<_>>(),
-            "sub_mode": provider.sub_mode,
-            "include_claims_in_id_token": provider.include_claims_in_id_token,
-            "grant_types": provider.grant_types,
-            "access_token_validity": provider.access_token_validity,
-            "property_mappings": mappings,
+            "key_type": pair.key_type,
+            "fingerprint_sha256": pair.fingerprint_sha256,
         }),
         owned: false,
     }
@@ -362,11 +402,11 @@ pub fn proxy_provider_resource(
 
 /// Keys that name an input rather than describe state.
 ///
-/// `client_secret_env` locates a credential for `create`; the secret itself is
-/// never observed (ADR-043). Comparing the locator would report drift every
-/// cycle, so the comparison skips it — the declaration may carry it, the
-/// observation never will.
-const WRITE_ONLY: [&str; 1] = ["client_secret_env"];
+/// The secret locators are declared but never observed: `client_secret_env`
+/// names a variable, `certificate_path` and `private_key_path` name files. A
+/// keypair's material is a PEM document, so it travels as a file; an
+/// EnvironmentFile is line-oriented and would tear it apart (ADR-044).
+const WRITE_ONLY: [&str; 3] = ["client_secret_env", "certificate_path", "private_key_path"];
 
 /// Whether the declaration asks for anything the observation does not show.
 ///
@@ -429,7 +469,8 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
     // application that names it, a group before either. Deletions run in the
     // opposite order: an application before its provider, so the provider is
     // unreferenced when it goes.
-    const CREATE_ORDER: [&str; 5] = [
+    const CREATE_ORDER: [&str; 6] = [
+        KIND_CERTIFICATE_KEYPAIR,
         KIND_GROUP,
         KIND_PROVIDER_PROXY,
         KIND_PROVIDER_OAUTH2,
@@ -471,6 +512,7 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
         KIND_PROVIDER_OAUTH2,
         KIND_PROVIDER_PROXY,
         KIND_GROUP,
+        KIND_CERTIFICATE_KEYPAIR,
     ] {
         for current in observed
             .iter()
@@ -924,6 +966,7 @@ mod tests {
             grant_types: vec!["authorization_code".to_string()],
             access_token_validity: "hours=1".to_string(),
             property_mappings: vec!["scope-openid".to_string()],
+            signing_key: None,
         }
     }
 
@@ -942,7 +985,7 @@ mod tests {
             scope("scope-openid", "goauthentik.io/providers/oauth2/scope-openid"),
             scope("scope-email", "goauthentik.io/providers/oauth2/scope-email"),
         ];
-        let observed = oauth2_provider_resource(&oauth2_provider("grafana"), &flows, &scopes);
+        let observed = oauth2_provider_resource(&oauth2_provider("grafana"), &flows, &scopes, &[]);
 
         assert_eq!(observed.kind, KIND_PROVIDER_OAUTH2);
         assert_eq!(observed.id, "grafana");
@@ -959,7 +1002,7 @@ mod tests {
         // The API returns the secret; the observed resource must not. The
         // resource is built from a struct that has no such field, so this test
         // guards the shape rather than a filter (ADR-043).
-        let observed = oauth2_provider_resource(&oauth2_provider("grafana"), &[], &[]);
+        let observed = oauth2_provider_resource(&oauth2_provider("grafana"), &[], &[], &[]);
         assert!(observed.attributes.get("client_secret").is_none());
     }
 
@@ -990,6 +1033,50 @@ mod tests {
             ..observed.remove(0)
         }];
         assert_eq!(plan(&desired, &changed)[0].kind, "update");
+    }
+
+    #[test]
+    fn a_keypair_reports_facts_and_never_material() {
+        let pair = crate::api::CertificateKeyPair {
+            pk: "key-uuid".to_string(),
+            name: "nod OIDC signing key".to_string(),
+            key_type: Some("rsa".to_string()),
+            fingerprint_sha256: Some("ab:cd".to_string()),
+        };
+        let observed = certificate_keypair_resource(&pair);
+
+        assert_eq!(observed.kind, KIND_CERTIFICATE_KEYPAIR);
+        assert_eq!(observed.id, "nod OIDC signing key");
+        assert_eq!(observed.attributes["key_type"], json!("rsa"));
+        assert_eq!(observed.attributes["fingerprint_sha256"], json!("ab:cd"));
+        assert!(!observed.owned, "a keypair has no marker; the record owns it");
+    }
+
+    #[test]
+    fn an_oauth2_provider_names_its_signing_key() {
+        let keys = vec![crate::api::CertificateKeyPair {
+            pk: "key-uuid".to_string(),
+            name: "nod OIDC signing key".to_string(),
+            key_type: Some("rsa".to_string()),
+            fingerprint_sha256: None,
+        }];
+        let mut provider = oauth2_provider("grafana");
+        provider.signing_key = Some("key-uuid".to_string());
+
+        let observed = oauth2_provider_resource(&provider, &[], &[], &keys);
+        assert_eq!(observed.attributes["signing_key"], json!("nod OIDC signing key"));
+    }
+
+    #[test]
+    fn an_unnameable_signing_key_is_omitted_not_invented() {
+        // Authentik's managed internal certificate is invisible to the API. A
+        // pk we cannot name must stay out of the resource (ADR-044), so a
+        // declaration that names one plans exactly one update.
+        let mut provider = oauth2_provider("grafana");
+        provider.signing_key = Some("managed-uuid".to_string());
+
+        let observed = oauth2_provider_resource(&provider, &[], &[], &[]);
+        assert!(observed.attributes.get("signing_key").is_none());
     }
 
     #[test]

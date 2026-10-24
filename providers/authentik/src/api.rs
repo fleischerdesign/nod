@@ -278,6 +278,9 @@ pub struct OAuth2Provider {
     /// Property (scope) mapping uuids.
     #[serde(default)]
     pub property_mappings: Vec<String>,
+    /// Keypair uuid that signs the tokens; null means HS256 with the secret.
+    #[serde(default)]
+    pub signing_key: Option<String>,
 }
 
 /// One redirect URI as the API returns it.
@@ -298,6 +301,34 @@ pub struct ScopeMapping {
     /// Managed key, e.g. `goauthentik.io/providers/oauth2/scope-openid`.
     #[serde(default)]
     pub managed: Option<String>,
+}
+
+/// A certificate/key pair as the list returns it.
+///
+/// The material is write-only: the API exposes `key_data` and
+/// `certificate_data` on write and returns only facts about them, so a
+/// keypair can be observed without carrying a private key (ADR-044).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CertificateKeyPair {
+    /// Primary key, a uuid.
+    pub pk: String,
+    /// Unique name; the stable id.
+    pub name: String,
+    /// Detected key algorithm, e.g. `rsa`.
+    #[serde(default)]
+    pub key_type: Option<String>,
+    /// SHA-256 fingerprint of the certificate.
+    #[serde(default)]
+    pub fingerprint_sha256: Option<String>,
+}
+
+/// One page of the certificate keypair list.
+#[derive(Debug, Default, Deserialize)]
+struct CertificateKeyPairPage {
+    #[serde(default)]
+    results: Vec<CertificateKeyPair>,
+    #[serde(default)]
+    pagination: Pagination,
 }
 
 /// One page of the OAuth2 provider list.
@@ -647,6 +678,41 @@ impl Authentik {
     /// Deletes an OAuth2 provider.
     pub fn delete_oauth2_provider(&self, pk: i64) -> Result<(), ApiError> {
         let url = format!("{}/api/v3/providers/oauth2/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
+    }
+
+    /// Reads the certificate keypairs the token may see.
+    ///
+    /// Authentik hides its own managed keypair from this list, so the result is
+    /// complete *for what a declaration can name* — the internal JWT
+    /// certificate is not addressable by name (ADR-044).
+    pub fn certificate_keypairs(&self) -> Result<Vec<CertificateKeyPair>, ApiError> {
+        let mut pairs = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/crypto/certificatekeypairs/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: CertificateKeyPairPage = self.get(&url)?;
+            pairs.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(pairs)
+    }
+
+    /// Creates a keypair; both PEMs are sent once, on create.
+    pub fn create_certificate_keypair(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/crypto/certificatekeypairs/", self.base);
+        self.write("POST", &url, body.clone())
+    }
+
+    /// Deletes a keypair.
+    pub fn delete_certificate_keypair(&self, pk: &str) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/crypto/certificatekeypairs/{}/", self.base, pk);
         self.write("DELETE", &url, serde_json::Value::Null)
     }
 

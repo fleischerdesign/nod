@@ -42,10 +42,15 @@ fn fake_authentik() -> (String, thread::JoinHandle<()>) {
             // typed OAuth2 list: serializes the proxy subclass as OAuth2 too
             r#"{"pagination":{"count":2,"next":null},"results":[
                 {"pk":1,"name":"bazarr","client_id":"proxy-client","client_secret":"proxy-secret"},
-                {"pk":2,"name":"grafana","client_id":"grafana-client","client_secret":"super-secret-value","sub_mode":"user_email","include_claims_in_id_token":true}
+                {"pk":2,"name":"grafana","client_id":"grafana-client","client_secret":"super-secret-value","sub_mode":"user_email","include_claims_in_id_token":true,"signing_key":"key-uuid"}
             ]}"#,
             // scope mappings
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            // certificate keypairs: the API is write-only for the material, so a
+            // response that carried it anyway must not leak it
+            r#"{"pagination":{"count":1,"next":null},"results":[
+                {"pk":"key-uuid","name":"nod OIDC signing key","key_type":"rsa","fingerprint_sha256":"ab:cd","key_data":"-----BEGIN PRIVATE KEY-----","certificate_data":"-----BEGIN CERTIFICATE-----"}
+            ]}"#,
         ];
         for body in bodies {
             let (mut stream, _) = listener.accept().unwrap();
@@ -102,7 +107,7 @@ fn the_provider_speaks_the_contract_without_a_real_instance() {
         }
     }));
     let resources = observed["resources"].as_array().unwrap();
-    assert_eq!(resources.len(), 3);
+    assert_eq!(resources.len(), 4);
     assert_eq!(resources[0]["id"], "admins");
     assert_eq!(resources[0]["owned"], true);
     assert_eq!(resources[1]["owned"], false);
@@ -115,10 +120,25 @@ fn the_provider_speaks_the_contract_without_a_real_instance() {
         .expect("the OAuth2 provider is observed");
     assert_eq!(oauth2["id"], "grafana");
     assert_eq!(oauth2["attributes"]["client_id"], "grafana-client");
+    assert_eq!(
+        oauth2["attributes"]["signing_key"],
+        "nod OIDC signing key"
+    );
     assert!(oauth2["attributes"].get("client_secret").is_none());
     assert!(
         !observed.to_string().contains("super-secret-value"),
         "the secret must never reach the wire"
+    );
+
+    // The keypair is observed as facts; the material never leaves the API.
+    let keypair = resources
+        .iter()
+        .find(|resource| resource["kind"] == "authentik.certificatekeypair")
+        .expect("the keypair is observed");
+    assert_eq!(keypair["attributes"]["key_type"], "rsa");
+    assert!(
+        !observed.to_string().contains("BEGIN PRIVATE KEY"),
+        "key material must never reach the wire"
     );
     assert!(
         resources

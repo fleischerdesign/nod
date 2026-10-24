@@ -4,10 +4,11 @@ Authentik groups, users and applications for [nod](https://github.com/fleischerd
 spoken over the provider protocol (JSON Lines on stdin/stdout).
 
 The provider owns `authentik.group`, `authentik.user`, `authentik.application`,
-`authentik.provider.proxy`, `authentik.provider.oauth2` and `authentik.outpost`
-objects: it observes them, plans the difference against a declaration, applies
-it, and takes ownership of existing objects on request. Roles, parents and
-policy bindings stay outside its scope.
+`authentik.provider.proxy`, `authentik.provider.oauth2`,
+`authentik.certificatekeypair` and `authentik.outpost` objects: it observes
+them, plans the difference against a declaration, applies it, and takes
+ownership of existing objects on request. Roles, parents and policy bindings
+stay outside its scope.
 
 ## Capabilities
 
@@ -17,7 +18,8 @@ policy bindings stay outside its scope.
 | `authentik.user` | username | `name`, `email` |
 | `authentik.application` | slug (unique in Authentik) | `name`, `provider`, `meta_launch_url`, `meta_description`, `meta_publisher`, `open_in_new_tab`, `policy_engine_mode`, `group`, `meta_hide`, `access_groups` |
 | `authentik.provider.proxy` | provider name (unique in Authentik) | `mode`, `external_host`, `cookie_domain`, `authorization_flow`, `invalidation_flow` |
-| `authentik.provider.oauth2` | provider name (unique in Authentik) | `client_id`, `authorization_flow`, `invalidation_flow`, `redirect_uris`, `sub_mode`, `include_claims_in_id_token`, `grant_types`, `access_token_validity`, `property_mappings`, `client_secret_env` (write-only) |
+| `authentik.provider.oauth2` | provider name (unique in Authentik) | `client_id`, `authorization_flow`, `invalidation_flow`, `redirect_uris`, `sub_mode`, `include_claims_in_id_token`, `grant_types`, `access_token_validity`, `property_mappings`, `signing_key`, `client_secret_env` (write-only) |
+| `authentik.certificatekeypair` | keypair name (unique in Authentik) | `certificate_path`, `private_key_path` (both write-only) |
 | `authentik.outpost` | outpost name | `type`, `providers`, `config.authentik_host`, `config.authentik_host_browser`, `config.authentik_host_insecure` |
 
 `users` lists login names. `description` and `users` are written into the group's
@@ -61,11 +63,37 @@ uuids. The provider resolves them against the managed scope mappings; an
 unknown key is a declaration error. `redirect_uris` is the complete list of
 registered URLs and is written with `matching_mode: strict`.
 
+`signing_key` names a keypair (below). Without one, Authentik signs with HS256
+and the client secret — no JWKS, and a strict client rejects the token. An
+unknown name is a configuration error, never a silent null (ADR-044).
+
 `client_secret_env` is an **input, not state**: it names the environment
 variable that holds the secret for a `create`. It is declared, never observed
 and never compared — otherwise every cycle would plan an update that changes
 nothing. Rotating a secret is not a reconcile action: nod neither reads nor
 rewrites the secret of an existing provider.
+
+### Certificate keypairs
+
+A keypair signs tokens. Its material is a PEM **document**, so the declaration
+names files (`certificate_path`, `private_key_path`), not variables: an
+`EnvironmentFile` is line-oriented and would tear a PEM apart at the first
+newline.
+
+Both paths are inputs, declared but never compared. The observation reports
+only facts the API exposes — `key_type`, `fingerprint_sha256` — and never the
+material; the API marks `certificate_data` and `key_data` write-only in any
+case.
+
+A keypair is **immutable**: `update` is refused, because a provider that cannot
+read what it replaces must not rewrite it, and a silently replaced signing key
+breaks every client that cached a `kid`. Rotation is a new name, providers
+moved onto it, old pair retired — three normal plan entries. A changed
+certificate under an unchanged name is invisible: declare a new one.
+
+Authentik's own managed JWT certificate cannot be named through the API
+(`/crypto/certificatekeypairs/` excludes managed rows), which is exactly why a
+fleet that wants a deterministic signing key declares its own.
 
 A declared OAuth2 provider is verified against the honest type map from
 `/providers/all/`: the typed endpoint serializes a proxy provider as an OAuth2
@@ -184,6 +212,10 @@ The manifest and the handshake name what the token must be allowed to do:
 | `authentik_providers_oauth2.change_oauth2provider` | `update` of an OAuth2 provider |
 | `authentik_providers_oauth2.delete_oauth2provider` | `delete` of an OAuth2 provider |
 | `authentik_outposts.view_outpost` | `observe`, `plan`, `apply` of an outpost |
+| `authentik_crypto.view_certificatekeypair` | `observe`, `plan`, `apply` of a keypair |
+| `authentik_crypto.add_certificatekeypair` | `create` of a keypair |
+| `authentik_crypto.change_certificatekeypair` | reserved: a keypair is immutable, the permission is listed for completeness |
+| `authentik_crypto.delete_certificatekeypair` | `delete` of a keypair |
 | `authentik_flows.view_flow` | resolving a flow slug to its uuid |
 | `authentik_core.delete_group` | `delete`, only when the core's policy allows it |
 
@@ -214,8 +246,8 @@ manage groups and users; applications need the full view.
 ## Scope and limits
 
 - Groups, users, applications, proxy and OAuth2 providers are fully managed;
-  outposts are observed and can be adopted. Roles, parents and policy bindings
-  are not managed here.
+  outposts and keypairs are observed and can be adopted, and a keypair can be
+  created. Roles, parents and policy bindings are not managed here.
 - A user is a **seed**: created when missing, never updated and never deleted.
   The profile, the credentials and the account belong to the person, so a
   reconcile must not turn a UI edit into drift.
