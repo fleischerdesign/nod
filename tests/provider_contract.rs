@@ -671,3 +671,88 @@ done
         report.refused
     );
 }
+
+/// A creation is evidence that outlives the run: the next reconcile still owns
+/// the resource, even though the provider reports `owned: false`.
+#[tokio::test]
+async fn a_created_resource_is_still_owned_on_the_next_run() {
+    let _guard = SERIAL.lock().await;
+    let work = tempfile::tempdir().unwrap();
+    let state = work.path().join("created");
+    let (_dir, path) = script(
+        r#"
+if [ -f @STATE@ ]; then
+  observed='[{"kind":"authentik.application","id":"canary","attributes":{},"owned":false}]'
+  changes='[]'
+else
+  observed='[]'
+  changes='[{"kind":"create","owned":true,"destructive":false,"resource":{"kind":"authentik.application","id":"canary","attributes":{}}}]'
+fi
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":["authentik.application"],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      printf '{"resources":%s,"conditions":[]}\n' "$observed"
+      ;;
+    *'"op":"plan"'*)
+      printf '{"changes":%s,"conditions":[]}\n' "$changes"
+      ;;
+    *'"op":"apply"'*)
+      touch @STATE@
+      echo '{"applied":[{"id":"canary","ok":true,"message":""}],"conditions":[]}'
+      ;;
+  esac
+done
+"#
+        .replace("@STATE@", state.to_str().unwrap()),
+    );
+
+    let declaration = Desired {
+        resources: vec![DesiredResource {
+            kind: "authentik.application".to_string(),
+            id: "canary".to_string(),
+            attributes: serde_json::json!({}),
+        }],
+        absent: Vec::new(),
+        derive: Vec::new(),
+    };
+
+    let first = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &declaration,
+        &Ownership::default(),
+        ReconcileOptions { apply: true },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("the create runs");
+    assert_eq!(first.applied, 1);
+    assert!(
+        first.ownership.owns("authentik.application", "canary"),
+        "a create is recorded as evidence"
+    );
+
+    let second = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &declaration,
+        &first.ownership,
+        ReconcileOptions { apply: false },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("the next run reads the record");
+    assert_eq!(second.unowned, 0, "the record owns what it created");
+    assert_eq!(second.planned, 0, "a recorded creation is already owned");
+    assert!(
+        second.ownership.owns("authentik.application", "canary"),
+        "the next record still carries the creation"
+    );
+}

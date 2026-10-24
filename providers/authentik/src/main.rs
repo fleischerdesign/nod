@@ -529,13 +529,19 @@ fn apply(request: &Value) -> Value {
                     }
                 }
                 let known = providers.as_deref().unwrap_or(&[]);
-                let body = match application_body(&change.resource.attributes, known) {
+                let mut body = match application_body(&change.resource.attributes, known) {
                     Ok(body) => body,
                     Err(message) => {
                         applied.push(failed(&id, &message, "config"));
                         continue;
                     }
                 };
+                // Authentik requires the slug when an application is created; the
+                // resource id is it. An update addresses the slug in the URL and
+                // must not resend it.
+                if kind == "create" {
+                    body["slug"] = Value::String(id.clone());
+                }
 
                 let access = match declared_access_groups(&change.resource.attributes) {
                     Ok(access) => access,
