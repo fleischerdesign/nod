@@ -5,6 +5,8 @@
 - **Deciders:** maintainers
 - **Supersedes:** the ad-hoc parts of ADR-004 (four-tier precedence) that mixed
   fleet declaration with process operation. ADR-004 still owns host overrides.
+- **Refined by:** ADR-042 (the desired state is a value or a path; the fleet is a
+  typed `services.nod` module).
 
 ## Context
 
