@@ -251,16 +251,19 @@ fn observe(request: &Value) -> Value {
 
     // Applications have no marker field; the core owns them through its record
     // (ADR-037). A token without the permission can still reconcile groups, so
-    // the gap is a condition, never a failed run.
+    // that gap is a condition. Anything else — a filtered list above all — is a
+    // configuration error: planning against a partial observation would treat
+    // invisible applications as absent (ADR-038).
     let applications = match client.applications() {
         Ok(applications) => applications,
-        Err(error) => {
+        Err(error) if matches!(error, ApiError::Auth) => {
             conditions.push(json!({
-                "kind": if matches!(error, ApiError::Auth) { "permission" } else { error.kind() },
+                "kind": "permission",
                 "message": failure_message(&error, "authentik_core.view_application"),
             }));
             Vec::new()
         }
+        Err(error) => return api_error(&error),
     };
 
     let marker = Marker {

@@ -122,10 +122,27 @@ The manifest and the handshake name what the token must be allowed to do:
 
 `observe` checks the read permissions by using them: a token without
 `view_group` fails the observation with the permission named, and a token
-without `view_user` or `view_application` still observes the rest and reports a
-condition, so `nod provider status` shows the gap before the first write. The
-write permissions cannot be probed without writing; a rejected write names the
+without `view_user` still observes the rest and reports a condition, so
+`nod provider status` shows the gap before the first write. The write
+permissions cannot be probed without writing; a rejected write names the
 permission it needed instead of saying "credentials rejected".
+
+### Authority, not a permission list
+
+Authentik filters the application list by policy for every non-superuser: the
+paginator counts all objects, the response contains only those the account may
+access. A narrow token therefore sees a subset, and a provider acting on it
+would treat invisible applications as absent. Two consequences:
+
+- The account needs full visibility — in this fleet a service account in a
+group with `is_superuser = true`; authentik derives superuser status from group
+membership, and the user serializer exposes the field read-only (ADR-038).
+- The provider proves completeness: it compares `pagination.count` with the
+number of applications it received and fails the observation with a config
+error naming the requirement. A filtered list is never a smaller world.
+
+The table above documents what the provider touches. A narrower account can
+manage groups and users; applications need the full view.
 
 ## Scope and limits
 

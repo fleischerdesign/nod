@@ -155,6 +155,10 @@ struct UserPage {
 struct Pagination {
     #[serde(default)]
     next: Option<u64>,
+    /// Total number of objects the paginator counted, before any per-object
+    /// filtering. Used to detect a filtered page (ADR-038).
+    #[serde(default)]
+    count: Option<u64>,
 }
 
 /// The Authentik API client, scoped to the endpoints this provider owns.
@@ -223,6 +227,7 @@ impl Authentik {
     /// Reads the complete application list, following pagination to the end.
     pub fn applications(&self) -> Result<Vec<Application>, ApiError> {
         let mut applications = Vec::new();
+        let mut total = None;
         let mut page = 1u64;
         loop {
             // Authentik filters this list by policy for every non-superuser and
@@ -234,12 +239,27 @@ impl Authentik {
                 self.base, page, self.page_size
             );
             let body: ApplicationPage = self.get(&url)?;
+            total = body.pagination.count.or(total);
             applications.extend(body.results);
             match body.pagination.next {
                 Some(next) if next > page => page = next,
                 _ => break,
             }
         }
+
+        // The paginator counts before authentik filters the page, so a total above
+        // the number of returned objects means the account sees only a subset. That
+        // is a configuration error, never a smaller world: acting on it would plan
+        // a create for every application the account cannot see (ADR-038).
+        if let Some(total) = total {
+            let visible = applications.len() as u64;
+            if visible < total {
+                return Err(ApiError::Config(format!(
+                    "the application list is filtered: {visible} of {total} visible; the account must be a superuser or every application must grant it access"
+                )));
+            }
+        }
+
         Ok(applications)
     }
 
@@ -551,6 +571,36 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[1].name, "b");
         assert!(groups[1].is_superuser);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_filtered_application_list_is_refused() {
+        let (base, handle) = server(vec![(
+            200,
+            r#"{"pagination":{"count":22,"next":null},"results":[{"slug":"esphome"},{"slug":"ldap"}]}"#,
+        )]);
+
+        let error = client(&base).applications().unwrap_err();
+
+        assert!(
+            error.message().contains("filtered"),
+            "the total above the visible count must be loud: {}",
+            error.message()
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn an_unfiltered_application_list_is_accepted() {
+        let (base, handle) = server(vec![(
+            200,
+            r#"{"pagination":{"count":2,"next":null},"results":[{"slug":"esphome"},{"slug":"ldap"}]}"#,
+        )]);
+
+        let applications = client(&base).applications().expect("count matches");
+
+        assert_eq!(applications.len(), 2);
         handle.join().unwrap();
     }
 

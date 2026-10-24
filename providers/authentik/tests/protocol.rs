@@ -8,24 +8,29 @@ use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::thread;
 
-/// Serves one Authentik groups page, then stops.
+/// Serves one page per endpoint the provider reads: groups, users, applications.
 fn fake_authentik() -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 4096];
-        let _ = stream.read(&mut buffer);
-
-        let body = r#"{"pagination":{"next":null},"results":[
-            {"pk":"1","name":"admins","is_superuser":true,"attributes":{"vyrx":"owned"}},
-            {"pk":"2","name":"media","is_superuser":false,"attributes":{}}
-        ]}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(response.as_bytes()).unwrap();
+        let bodies = [
+            r#"{"pagination":{"count":2,"next":null},"results":[
+                {"pk":"1","name":"admins","is_superuser":true,"attributes":{"vyrx":"owned"}},
+                {"pk":"2","name":"media","is_superuser":false,"attributes":{}}
+            ]}"#,
+            r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+        ];
+        for body in bodies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
     });
     (format!("http://{address}"), handle)
 }
