@@ -133,6 +133,37 @@ struct BindingPage {
     pagination: Pagination,
 }
 
+/// An outpost as the instances endpoint returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Outpost {
+    /// Outpost uuid.
+    pub pk: String,
+    /// Unique name; the outpost's stable id.
+    pub name: String,
+    /// `proxy`, `ldap`, `radius` or `rac`.
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    /// authentik's own marker for a managed outpost; the embedded one is
+    /// recreated on startup and must not be deleted.
+    #[serde(default)]
+    pub managed: Option<String>,
+    /// Provider primary keys this outpost serves.
+    #[serde(default)]
+    pub providers: Vec<i64>,
+    /// The outpost's configuration object.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// One page of the outpost list.
+#[derive(Debug, Default, Deserialize)]
+struct OutpostPage {
+    #[serde(default)]
+    results: Vec<Outpost>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
 /// A proxy provider as the proxy endpoint returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyProvider {
@@ -311,6 +342,43 @@ impl Authentik {
             }
         }
         Ok(users)
+    }
+
+    /// Reads the complete outpost list.
+    pub fn outposts(&self) -> Result<Vec<Outpost>, ApiError> {
+        let mut outposts = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/outposts/instances/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: OutpostPage = self.get(&url)?;
+            outposts.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(outposts)
+    }
+
+    /// Creates an outpost; the body holds only declared fields.
+    pub fn create_outpost(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/outposts/instances/", self.base);
+        self.write("POST", &url, body.clone())
+    }
+
+    /// Updates the declared fields of an outpost.
+    pub fn update_outpost(&self, pk: &str, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/outposts/instances/{}/", self.base, pk);
+        self.write("PATCH", &url, body.clone())
+    }
+
+    /// Deletes an outpost.
+    pub fn delete_outpost(&self, pk: &str) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/outposts/instances/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
     }
 
     /// Reads the complete proxy provider list.

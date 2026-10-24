@@ -26,7 +26,7 @@ const PROTOCOL: u32 = 1;
 /// reported with the change that needed it. Applications are fully managed —
 /// created and deleted by the fleet — so their deletion permission is part of
 /// the required set.
-const REQUIRED_PERMISSIONS: [&str; 16] = [
+const REQUIRED_PERMISSIONS: [&str; 20] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.view_application",
@@ -43,6 +43,10 @@ const REQUIRED_PERMISSIONS: [&str; 16] = [
     "authentik_providers_proxy.change_proxyprovider",
     "authentik_providers_proxy.delete_proxyprovider",
     "authentik_flows.view_flow",
+    "authentik_outposts.view_outpost",
+    "authentik_outposts.add_outpost",
+    "authentik_outposts.change_outpost",
+    "authentik_outposts.delete_outpost",
 ];
 
 fn main() {
@@ -101,6 +105,7 @@ fn handshake() -> Value {
             "authentik.user",
             "authentik.application",
             "authentik.provider.proxy",
+            "authentik.outpost",
         ],
         "operations": ["adopt"],
         "required_permissions": REQUIRED_PERMISSIONS,
@@ -288,6 +293,18 @@ fn observe(request: &Value) -> Value {
         Err(error) => return api_error(&error),
     };
 
+    // The outpost's provider list is what makes a provider reachable. The list
+    // carries provider primary keys; the names come from the same provider list
+    // the application resolution uses.
+    let providers = match client.providers() {
+        Ok(providers) => providers,
+        Err(error) => return api_error(&error),
+    };
+    let outposts = match client.outposts() {
+        Ok(outposts) => outposts,
+        Err(error) => return api_error(&error),
+    };
+
     let marker = Marker {
         key: settings.marker_key,
         value: settings.marker_value,
@@ -337,6 +354,15 @@ fn observe(request: &Value) -> Value {
         }))
         .chain(proxy_providers.iter().map(|provider| {
             let resource = model::proxy_provider_resource(provider, &flows);
+            json!({
+                "kind": resource.kind,
+                "id": resource.id,
+                "attributes": resource.attributes,
+                "owned": resource.owned,
+            })
+        }))
+        .chain(outposts.iter().map(|outpost| {
+            let resource = model::outpost_resource(outpost, &providers);
             json!({
                 "kind": resource.kind,
                 "id": resource.id,
@@ -432,6 +458,7 @@ fn apply(request: &Value) -> Value {
     let mut applications: Option<Vec<api::Application>> = None;
     let mut proxy_providers: Option<Vec<api::ProxyProvider>> = None;
     let mut flows: Option<Vec<api::Flow>> = None;
+    let mut outposts: Option<Vec<api::Outpost>> = None;
 
     for change in &changes {
         let id = change.resource.id.clone();
@@ -846,6 +873,128 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
+            (kind @ ("create" | "update"), model::KIND_OUTPOST) => {
+                if providers.is_none() {
+                    match client.providers() {
+                        Ok(list) => providers = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_core.view_provider"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let known = providers.as_deref().unwrap_or(&[]);
+
+                if kind == "create" {
+                    let body = match outpost_body(&id, &change.resource.attributes, known, None) {
+                        Ok(body) => body,
+                        Err(message) => {
+                            applied.push(failed(&id, &message, "config"));
+                            continue;
+                        }
+                    };
+                    match client.create_outpost(&body) {
+                        Ok(()) => applied.push(ok(&id)),
+                        Err(error) => applied.push(failed(
+                            &id,
+                            &failure_message(&error, "authentik_outposts.add_outpost"),
+                            error.kind(),
+                        )),
+                    }
+                    continue;
+                }
+
+                if outposts.is_none() {
+                    match client.outposts() {
+                        Ok(list) => outposts = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_outposts.view_outpost"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let observed = outposts
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|outpost| outpost.name == id);
+                let Some(observed) = observed else {
+                    applied.push(failed(&id, "outpost not found after the update", "config"));
+                    continue;
+                };
+                let body = match outpost_body(
+                    &id,
+                    &change.resource.attributes,
+                    known,
+                    Some(&observed.config),
+                ) {
+                    Ok(body) => body,
+                    Err(message) => {
+                        applied.push(failed(&id, &message, "config"));
+                        continue;
+                    }
+                };
+                match client.update_outpost(&observed.pk, &body) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_outposts.change_outpost"),
+                        error.kind(),
+                    )),
+                }
+            }
+            ("delete", model::KIND_OUTPOST) => {
+                if outposts.is_none() {
+                    match client.outposts() {
+                        Ok(list) => outposts = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_outposts.view_outpost"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let found = outposts
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|outpost| outpost.name == id);
+                let Some(found) = found else {
+                    applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
+                    continue;
+                };
+                if found
+                    .managed
+                    .as_deref()
+                    .is_some_and(|managed| !managed.is_empty())
+                {
+                    applied.push(failed(
+                        &id,
+                        "the embedded outpost is recreated by authentik; remove its providers instead",
+                        "config",
+                    ));
+                    continue;
+                }
+                match client.delete_outpost(&found.pk) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_outposts.delete_outpost"),
+                        error.kind(),
+                    )),
+                }
+            }
             (other, _) => applied.push(failed(
                 &id,
                 &format!("unsupported change kind: {other}"),
@@ -1083,6 +1232,61 @@ fn proxy_provider_body(id: &str, attributes: &Value, flows: &[api::Flow]) -> Res
     Ok(Value::Object(body))
 }
 
+/// Builds an outpost's create or patch body from the declared attributes.
+///
+/// `providers` is a list of names; the API expects primary keys. A PATCH replaces
+/// the whole `_config` object, so the observed one is merged to keep the keys the
+/// declaration does not name.
+fn outpost_body(
+    id: &str,
+    attributes: &Value,
+    providers: &[api::ProviderSummary],
+    observed_config: Option<&Value>,
+) -> Result<Value, String> {
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_string(), json!(id));
+
+    if let Some(kind) = attributes.get("type") {
+        let Some(kind) = kind.as_str() else {
+            return Err("`type` must be a string".to_string());
+        };
+        body.insert("type".to_string(), json!(kind));
+    }
+
+    if let Some(list) = attributes.get("providers") {
+        let Some(items) = list.as_array() else {
+            return Err("`providers` must be a list of provider names".to_string());
+        };
+        let mut pks = Vec::new();
+        for item in items {
+            let Some(name) = item.as_str() else {
+                return Err("`providers` must be a list of provider names".to_string());
+            };
+            let Some(provider) = providers.iter().find(|provider| provider.name == name) else {
+                return Err(format!("unknown provider `{name}` in `providers`"));
+            };
+            pks.push(json!(provider.pk));
+        }
+        body.insert("providers".to_string(), Value::Array(pks));
+    }
+
+    if let Some(config) = attributes.get("config") {
+        let Some(declared) = config.as_object() else {
+            return Err("`config` must be an object".to_string());
+        };
+        let mut merged = observed_config
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (key, value) in declared {
+            merged.insert(key.clone(), value.clone());
+        }
+        body.insert("config".to_string(), Value::Object(merged));
+    }
+
+    Ok(Value::Object(body))
+}
+
 /// Resolves the declared member usernames to primary keys.
 ///
 /// `Ok(None)` means the declaration does not name membership (`members = null`),
@@ -1147,6 +1351,10 @@ fn adopt(request: &Value) -> Value {
     };
     let proxy_providers = match client.proxy_providers() {
         Ok(providers) => providers,
+        Err(error) => return api_error(&error),
+    };
+    let outposts = match client.outposts() {
+        Ok(outposts) => outposts,
         Err(error) => return api_error(&error),
     };
 
@@ -1218,6 +1426,22 @@ fn adopt(request: &Value) -> Value {
                             "retry_after_secs": error.retry_after()
                         }
                     })),
+                }
+            }
+            model::KIND_OUTPOST => {
+                if outposts.iter().any(|outpost| outpost.name == resource.id) {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": ""
+                    }));
+                } else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "outpost not found",
+                        "error": { "kind": "config", "message": "outpost not found" }
+                    }));
                 }
             }
             model::KIND_PROVIDER_PROXY => {

@@ -27,6 +27,13 @@ pub const KIND_APPLICATION: &str = "authentik.application";
 /// A provider has no free-form field either; the core's record owns it.
 pub const KIND_PROVIDER_PROXY: &str = "authentik.provider.proxy";
 
+/// Resource kind for an Authentik outpost.
+///
+/// The outpost is what serves a provider; its `providers` list is the reason a
+/// provider migration cannot stand alone (ADR-041). It has no free-form field
+/// either; the core's record owns it.
+pub const KIND_OUTPOST: &str = "authentik.outpost";
+
 /// A user as the group serializer's `users_obj` returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartialUser {
@@ -217,6 +224,51 @@ pub fn application_resource(
     }
 }
 
+/// Maps an outpost to the resource the core sees.
+///
+/// The name is the id; the type, the provider names and the three host keys of
+/// the config are the attributes. The provider list is sorted, so a comparison
+/// against a declaration is stable.
+pub fn outpost_resource(
+    outpost: &crate::api::Outpost,
+    providers: &[crate::api::ProviderSummary],
+) -> ObservedResource {
+    let mut names: Vec<&str> = outpost
+        .providers
+        .iter()
+        .filter_map(|pk| {
+            providers
+                .iter()
+                .find(|provider| provider.pk == *pk)
+                .map(|provider| provider.name.as_str())
+        })
+        .collect();
+    names.sort_unstable();
+
+    let config = outpost.config.as_object();
+    let host = |key: &str| {
+        config
+            .and_then(|config| config.get(key))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+
+    ObservedResource {
+        kind: KIND_OUTPOST.to_string(),
+        id: outpost.name.clone(),
+        attributes: json!({
+            "type": outpost.kind,
+            "providers": names,
+            "config": {
+                "authentik_host": host("authentik_host"),
+                "authentik_host_browser": host("authentik_host_browser"),
+                "authentik_host_insecure": host("authentik_host_insecure"),
+            },
+        }),
+        owned: false,
+    }
+}
+
 /// Maps a proxy provider to the resource the core sees.
 ///
 /// The name is the id; the mode, the hosts and the two flow *slugs* are the
@@ -307,7 +359,12 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
     // application that names it, a group before either. Deletions run in the
     // opposite order: an application before its provider, so the provider is
     // unreferenced when it goes.
-    const CREATE_ORDER: [&str; 3] = [KIND_GROUP, KIND_PROVIDER_PROXY, KIND_APPLICATION];
+    const CREATE_ORDER: [&str; 4] = [
+        KIND_GROUP,
+        KIND_PROVIDER_PROXY,
+        KIND_OUTPOST,
+        KIND_APPLICATION,
+    ];
     for kind in CREATE_ORDER {
         for want in desired
             .iter()
@@ -337,7 +394,12 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
         }
     }
 
-    for kind in [KIND_APPLICATION, KIND_GROUP, KIND_PROVIDER_PROXY] {
+    for kind in [
+        KIND_APPLICATION,
+        KIND_OUTPOST,
+        KIND_GROUP,
+        KIND_PROVIDER_PROXY,
+    ] {
         for current in observed
             .iter()
             .filter(|resource| resource.kind.as_str() == kind && resource.owned)
@@ -842,11 +904,118 @@ mod tests {
         assert_eq!(changes[1].resource.kind, KIND_PROVIDER_PROXY);
     }
 
+    fn provider_summary(name: &str, pk: i64) -> crate::api::ProviderSummary {
+        crate::api::ProviderSummary {
+            pk,
+            name: name.to_string(),
+        }
+    }
+
+    fn outpost(name: &str, managed: Option<&str>) -> crate::api::Outpost {
+        crate::api::Outpost {
+            pk: "outpost-uuid".to_string(),
+            name: name.to_string(),
+            kind: "proxy".to_string(),
+            managed: managed.map(str::to_string),
+            providers: vec![7],
+            config: json!({
+                "authentik_host": "https://auth.vyrx.de",
+                "authentik_host_browser": "https://auth.vyrx.de",
+                "authentik_host_insecure": false,
+            }),
+        }
+    }
+
+    #[test]
+    fn an_outpost_maps_provider_pks_to_names_and_keeps_the_host_keys() {
+        let providers = vec![provider_summary("Provider for Bazarr", 7)];
+        let mapped = outpost_resource(
+            &outpost(
+                "authentik Embedded Outpost",
+                Some("goauthentik.io/outposts/embedded"),
+            ),
+            &providers,
+        );
+
+        assert_eq!(mapped.kind, KIND_OUTPOST);
+        assert_eq!(mapped.id, "authentik Embedded Outpost");
+        assert_eq!(mapped.attributes["type"], json!("proxy"));
+        assert_eq!(
+            mapped.attributes["providers"],
+            json!(["Provider for Bazarr"])
+        );
+        assert_eq!(
+            mapped.attributes["config"]["authentik_host"],
+            json!("https://auth.vyrx.de")
+        );
+        assert!(
+            !mapped.owned,
+            "an outpost has no marker; the record owns it"
+        );
+    }
+
+    #[test]
+    fn an_outpost_orders_providers_before_it_and_applications_after() {
+        let desired = vec![
+            Resource {
+                kind: KIND_APPLICATION.to_string(),
+                id: "app".to_string(),
+                attributes: json!({}),
+            },
+            Resource {
+                kind: KIND_OUTPOST.to_string(),
+                id: "outpost".to_string(),
+                attributes: json!({}),
+            },
+            Resource {
+                kind: KIND_PROVIDER_PROXY.to_string(),
+                id: "provider".to_string(),
+                attributes: json!({}),
+            },
+        ];
+
+        let changes = plan(&desired, &[]);
+
+        assert_eq!(changes[0].resource.kind, KIND_PROVIDER_PROXY);
+        assert_eq!(changes[1].resource.kind, KIND_OUTPOST);
+        assert_eq!(changes[2].resource.kind, KIND_APPLICATION);
+    }
+
+    #[test]
+    fn an_application_is_deleted_before_its_outpost_and_provider() {
+        let observed = vec![
+            ObservedResource {
+                kind: KIND_PROVIDER_PROXY.to_string(),
+                id: "p".to_string(),
+                attributes: json!({}),
+                owned: true,
+            },
+            ObservedResource {
+                kind: KIND_OUTPOST.to_string(),
+                id: "o".to_string(),
+                attributes: json!({}),
+                owned: true,
+            },
+            ObservedResource {
+                kind: KIND_APPLICATION.to_string(),
+                id: "a".to_string(),
+                attributes: json!({}),
+                owned: true,
+            },
+        ];
+
+        let changes = plan(&[], &observed);
+
+        assert_eq!(changes[0].resource.kind, KIND_APPLICATION);
+        assert_eq!(changes[1].resource.kind, KIND_OUTPOST);
+        assert_eq!(changes[2].resource.kind, KIND_PROVIDER_PROXY);
+    }
+
     #[test]
     fn other_kinds_are_ignored() {
         let desired = vec![Resource {
-            kind: "authentik.outpost".to_string(),
-            id: "outpost".to_string(),
+            kind: "authentik.flow".to_string(),
+            id: "flow".to_string(),
             attributes: json!({}),
         }];
         assert!(plan(&desired, &[]).is_empty());
