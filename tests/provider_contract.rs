@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use nod::application::use_cases::adopt::{execute as adopt, AdoptOptions};
 use nod::application::use_cases::reconcile::{execute, rollback, Desired, ReconcileOptions};
+use nod::domain::derivation::Derivations;
 use nod::domain::policy::Policy;
 use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, RollbackPlan};
 
@@ -73,6 +74,7 @@ async fn a_half_applied_plan_records_only_what_happened() {
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a", "b"]),
+        &Derivations::default(),
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -126,6 +128,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a"]),
+        &Derivations::default(),
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -392,6 +395,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a"]),
+        &Derivations::default(),
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -425,6 +429,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a"]),
+        &Derivations::default(),
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],

@@ -188,6 +188,7 @@ async fn summarise(name: &str, declaration: &TomlProvider) -> Entry {
         &declaration.command,
         &settings,
         &desired,
+        &crate::domain::derivation::Derivations::default(),
         ReconcileOptions { apply: false },
         &policy,
         &declaration.env,

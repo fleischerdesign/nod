@@ -27,6 +27,7 @@ use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::state::provider_lock::ProviderLock;
+use crate::infrastructure::storage::provider_derivations::ProviderDerivationStore;
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs reconciliation cycles until the process is stopped.
@@ -272,10 +273,17 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
             continue;
         };
 
+        let derivations = ProviderDerivationStore::new(state_dir);
+        let record = derivations
+            .load(&entry.name)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let result = reconcile::execute(
             &entry.command,
             &entry.settings,
             &entry.desired,
+            &record,
             ReconcileOptions { apply: entry.apply },
             &entry.policy,
             &entry.env,
@@ -308,6 +316,21 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
                 };
                 crate::commands::reconcile::record_audit(&entry.name, outcome).await;
                 entry.schedule.succeeded(Instant::now());
+
+                // The derived set is the next run's deletion budget. A write
+                // failure only degrades to implicit deletes, which the global
+                // cap guards, so it is a warning, not a cycle failure.
+                if let Err(error) = {
+                    let mut record = report.derivations.clone();
+                    record.provider = entry.name.clone();
+                    derivations.save(&record)
+                } {
+                    tracing::warn!(
+                        provider = %entry.name,
+                        %error,
+                        "cannot record the derived set"
+                    );
+                }
 
                 // Record the inverse only for runs that actually changed the
                 // world; a dry run has nothing to undo.

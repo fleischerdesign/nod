@@ -39,6 +39,8 @@ pub struct ReconcileReport {
     pub desired: usize,
     /// Resources materialised by a declared derivation.
     pub derived: usize,
+    /// The derived set this run declared, for the next run's budget.
+    pub derivations: crate::domain::derivation::Derivations,
     /// Changes the provider proposed.
     pub planned: usize,
     /// Changes the policy approved.
@@ -82,8 +84,9 @@ fn merge_conditions(into: &mut Vec<Condition>, from: &[Condition]) {
 /// 3. A delete of a protected id is refused even when owned.
 /// 4. A plan that would delete more **undeclared** resources than the cap is
 ///    refused as a whole, so nothing half-applies. A deletion the declaration
-///    names in `absent` is authorized by that declaration and does not consume
-///    the cap; the cap exists to bound a declaration bug, not an intention.
+///    names in `absent`, or one a derivation rule produced and its own budget
+///    allows, is authorized and does not consume the global cap; the cap exists
+///    to bound a declaration bug, not an intention.
 pub fn approve(
     handshake: &Handshake,
     changes: &[Change],
@@ -125,26 +128,49 @@ pub fn approve_declared(
         approved.push(change.clone());
     }
 
-    let implicit = approved
+    let mut implicit = 0usize;
+    let mut explicit = 0usize;
+    let mut derived: std::collections::BTreeMap<&str, (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for change in &approved {
+        if change.kind != ChangeKind::Delete {
+            continue;
+        }
+        if declared.is_explicit(&change.resource.kind, &change.resource.id) {
+            explicit += 1;
+        } else if let Some((rule, budget)) =
+            declared.derived_budget(&change.resource.kind, &change.resource.id)
+        {
+            let entry = derived.entry(rule).or_insert((0, budget));
+            entry.0 += 1;
+        } else {
+            implicit += 1;
+        }
+    }
+
+    let over: Vec<String> = derived
         .iter()
-        .filter(|change| {
-            change.kind == ChangeKind::Delete
-                && !declared.contains(&change.resource.kind, &change.resource.id)
+        .filter(|(_, (count, budget))| count > budget)
+        .map(|(rule, (count, budget))| {
+            format!("derivation `{rule}` would remove {count} resources, the cap is {budget}")
         })
-        .count();
-    let explicit = approved
-        .iter()
-        .filter(|change| {
-            change.kind == ChangeKind::Delete
-                && declared.contains(&change.resource.kind, &change.resource.id)
-        })
-        .count();
+        .collect();
+    if !over.is_empty() {
+        let mut all_refused = refused;
+        for message in over {
+            all_refused.insert(0, message);
+        }
+        all_refused.push("nothing was applied".to_string());
+        return (Vec::new(), all_refused);
+    }
+
+    let declared_total = explicit + derived.values().map(|(count, _)| count).sum::<usize>();
     if implicit > policy.max_deletions {
         let mut all_refused = refused;
         all_refused.insert(
             0,
             format!(
-                "plan would delete {implicit} undeclared resources ({explicit} declared), the cap is {}; nothing was applied",
+                "plan would delete {implicit} undeclared resources ({declared_total} declared), the cap is {}; nothing was applied",
                 policy.max_deletions
             ),
         );
@@ -194,10 +220,12 @@ fn check_absent(
 }
 
 /// Runs one reconcile cycle against one provider.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     command: &Path,
     settings: &serde_json::Value,
     desired: &Desired,
+    record: &crate::domain::derivation::Derivations,
     options: ReconcileOptions,
     policy: &Policy,
     env: &[String],
@@ -215,6 +243,21 @@ pub async fn execute(
     let mut effective = desired.resources.clone();
     effective.extend(derived.iter().map(|entry| entry.resource.clone()));
 
+    // What this declaration derives, for the next run's deletion budget. It is
+    // the declared set, not the applied one: a failed create has no delete to
+    // authorize, and the record must follow the rule, not the API's answer.
+    let mut derivations = crate::domain::derivation::Derivations {
+        provider: handshake.provider.clone(),
+        ..Default::default()
+    };
+    for entry in &derived {
+        derivations
+            .rules
+            .entry(entry.rule.clone())
+            .or_default()
+            .push(entry.resource.id.clone());
+    }
+
     let plan = provider
         .plan(settings, &effective, &observed.resources)
         .await?;
@@ -226,7 +269,7 @@ pub async fn execute(
         .map(|change| (change.resource.kind.clone(), change.resource.id.clone()))
         .collect();
 
-    let declared = desired.declared();
+    let declared = desired.declared(record);
     check_absent(&desired.absent, &observed.resources, &plan.changes)?;
     let (approved, refused) = approve_declared(&handshake, &plan.changes, policy, &declared);
 
@@ -282,7 +325,7 @@ pub async fn execute(
         .iter()
         .filter(|change| {
             change.kind == ChangeKind::Delete
-                && declared.contains(&change.resource.kind, &change.resource.id)
+                && declared.authorizes(&change.resource.kind, &change.resource.id)
         })
         .count();
     let implicit_deletions = plan
@@ -290,7 +333,7 @@ pub async fn execute(
         .iter()
         .filter(|change| {
             change.kind == ChangeKind::Delete
-                && !declared.contains(&change.resource.kind, &change.resource.id)
+                && !declared.authorizes(&change.resource.kind, &change.resource.id)
         })
         .count();
 
@@ -301,6 +344,7 @@ pub async fn execute(
         unowned: crate::domain::adoption::unowned(&observed.resources, &effective, &changed_before),
         desired: effective.len(),
         derived: derived.len(),
+        derivations,
         planned: plan.changes.len(),
         approved,
         refused,
@@ -490,10 +534,20 @@ pub struct Desired {
 }
 
 impl Desired {
-    /// The deletions this declaration authorizes.
-    fn declared(&self) -> Declared {
+    /// The deletions this declaration authorizes, explicit and derived.
+    fn declared(&self, record: &crate::domain::derivation::Derivations) -> Declared {
         Declared {
             entries: self.absent.clone(),
+            derived: self
+                .derive
+                .iter()
+                .map(|rule| DerivedBudget {
+                    rule: rule.id.clone(),
+                    kind: rule.template.kind.clone(),
+                    ids: record.rule(&rule.id).to_vec(),
+                    max_deletions: rule.max_deletions,
+                })
+                .collect(),
         }
     }
 }
@@ -501,15 +555,40 @@ impl Desired {
 /// The deletions a declaration authorizes.
 #[derive(Debug, Clone, Default)]
 pub struct Declared {
+    /// Explicit tombstones.
     entries: Vec<DesiredResource>,
+    /// What each rule produced last time, and how many of those it may remove.
+    derived: Vec<DerivedBudget>,
+}
+
+/// One rule's derived set and its removal budget.
+#[derive(Debug, Clone)]
+struct DerivedBudget {
+    rule: String,
+    kind: String,
+    ids: Vec<String>,
+    max_deletions: usize,
 }
 
 impl Declared {
-    /// Whether `kind`/`id` is an authorized deletion.
-    pub fn contains(&self, kind: &str, id: &str) -> bool {
+    /// Whether `kind`/`id` is an explicit tombstone.
+    fn is_explicit(&self, kind: &str, id: &str) -> bool {
         self.entries
             .iter()
             .any(|entry| entry.kind == kind && entry.id == id)
+    }
+
+    /// The rule that produced `kind`/`id` last time, with its budget.
+    fn derived_budget(&self, kind: &str, id: &str) -> Option<(&str, usize)> {
+        self.derived
+            .iter()
+            .find(|budget| budget.kind == kind && budget.ids.iter().any(|known| known == id))
+            .map(|budget| (budget.rule.as_str(), budget.max_deletions))
+    }
+
+    /// Whether the declaration authorizes this deletion, explicitly or by rule.
+    fn authorizes(&self, kind: &str, id: &str) -> bool {
+        self.is_explicit(kind, id) || self.derived_budget(kind, id).is_some()
     }
 }
 
@@ -798,6 +877,98 @@ mod tests {
         assert!(refused.is_empty());
     }
 
+    fn derived_declared(rule: &str, kind: &str, id: &str, max_deletions: usize) -> Declared {
+        Declared {
+            entries: Vec::new(),
+            derived: vec![DerivedBudget {
+                rule: rule.to_string(),
+                kind: kind.to_string(),
+                ids: vec![id.to_string()],
+                max_deletions,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_derived_deletion_within_its_budget_is_approved() {
+        let changes = vec![change_named(ChangeKind::Delete, "old", true, true)];
+        let (approved, refused) = approve_declared(
+            &handshake(OwnershipMode::Marker),
+            &changes,
+            &allows(0, &[]),
+            &derived_declared("per-member", "dns.record", "old", 1),
+        );
+        assert_eq!(approved.len(), 1);
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn a_derived_deletion_over_its_budget_refuses_the_plan() {
+        let changes = vec![change_named(ChangeKind::Delete, "old", true, true)];
+        let (approved, refused) = approve_declared(
+            &handshake(OwnershipMode::Marker),
+            &changes,
+            &allows(0, &[]),
+            &derived_declared("per-member", "dns.record", "old", 0),
+        );
+        assert!(approved.is_empty(), "a refused plan must apply nothing");
+        assert!(
+            refused[0].contains("derivation `per-member`"),
+            "{}",
+            refused[0]
+        );
+    }
+
+    #[test]
+    fn a_delete_outside_the_derived_set_still_uses_the_global_cap() {
+        let changes = vec![change_named(ChangeKind::Delete, "other", true, true)];
+        let (approved, refused) = approve_declared(
+            &handshake(OwnershipMode::Marker),
+            &changes,
+            &allows(0, &[]),
+            &derived_declared("per-member", "dns.record", "old", 1),
+        );
+        assert!(approved.is_empty());
+        assert!(
+            refused[0].contains("undeclared resources"),
+            "{}",
+            refused[0]
+        );
+    }
+
+    #[test]
+    fn the_declaration_builds_its_derived_budget_from_the_record() {
+        let desired = Desired {
+            resources: Vec::new(),
+            absent: Vec::new(),
+            derive: vec![derive::DeriveRule {
+                id: "per-member".to_string(),
+                from: derive::Source {
+                    kind: "authentik.group".to_string(),
+                    id: "ai".to_string(),
+                    attribute: "users".to_string(),
+                },
+                template: derive::Template {
+                    kind: "dns.record".to_string(),
+                    id: "{member}".to_string(),
+                    attributes: serde_json::json!({}),
+                },
+                max_deletions: 1,
+            }],
+        };
+        let mut record = crate::domain::derivation::Derivations::default();
+        record
+            .rules
+            .insert("per-member".to_string(), vec!["old".to_string()]);
+
+        let declared = desired.declared(&record);
+        assert!(!declared.is_explicit("dns.record", "old"));
+        assert_eq!(
+            declared.derived_budget("dns.record", "old"),
+            Some(("per-member", 1))
+        );
+    }
+
     fn declared(entries: &[(&str, &str)]) -> Declared {
         Declared {
             entries: entries
@@ -808,6 +979,7 @@ mod tests {
                     attributes: serde_json::json!({}),
                 })
                 .collect(),
+            derived: Vec::new(),
         }
     }
 

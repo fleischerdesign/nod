@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use crate::application::use_cases::reconcile::{self, ReconcileOptions};
 use crate::domain::config::CliOverrides;
+use crate::domain::derivation::Derivations;
 use crate::domain::errors::NodError;
 use crate::domain::policy::Policy;
 use crate::domain::provider::RollbackPlan;
 use crate::domain::sync::now_secs;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::state::provider_lock::ProviderLock;
+use crate::infrastructure::storage::provider_derivations::ProviderDerivationStore;
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs one reconcile cycle or one rollback, and renders the result.
@@ -146,16 +148,29 @@ pub async fn execute(
     })?;
     let desired = reconcile::parse_desired(&raw)?;
 
+    let derivations = ProviderDerivationStore::new(state_dir);
+    let record = match provider {
+        Some(name) => derivations.load(name).ok().flatten().unwrap_or_default(),
+        None => Derivations::default(),
+    };
+
     let report = reconcile::execute(
         command_path,
         &settings,
         &desired,
+        &record,
         ReconcileOptions { apply },
         &policy,
         &environment,
         timeout,
     )
     .await?;
+
+    if let Some(name) = provider {
+        let mut record = report.derivations.clone();
+        record.provider = name.to_string();
+        derivations.save(&record)?;
+    }
 
     // Record what would undo this run, so `--rollback` has something to apply.
     if apply && !report.inverse.is_empty() {

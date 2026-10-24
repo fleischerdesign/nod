@@ -7,6 +7,7 @@ pub mod adoption;
 pub mod audit;
 pub mod cache;
 pub mod config;
+pub mod derivation;
 pub mod errors;
 pub mod eval;
 pub mod flake;
