@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::derive;
 use crate::domain::errors::NodError;
 use crate::domain::policy::Policy;
 use crate::domain::provider::{
@@ -36,6 +37,8 @@ pub struct ReconcileReport {
     pub unowned: usize,
     /// Resources the declaration asks for.
     pub desired: usize,
+    /// Resources materialised by a declared derivation.
+    pub derived: usize,
     /// Changes the provider proposed.
     pub planned: usize,
     /// Changes the policy approved.
@@ -206,8 +209,14 @@ pub async fn execute(
     check_capabilities(&handshake, &observed.resources, &[])?;
     let mut conditions = Vec::new();
     merge_conditions(&mut conditions, &observed.conditions);
+    // A derivation reads a successful observation. A source or attribute that
+    // is missing is a configuration error, never an empty set (ADR-036).
+    let derived = derive::expand(&desired.derive, &observed.resources, &desired.resources)?;
+    let mut effective = desired.resources.clone();
+    effective.extend(derived.iter().map(|entry| entry.resource.clone()));
+
     let plan = provider
-        .plan(settings, &desired.resources, &observed.resources)
+        .plan(settings, &effective, &observed.resources)
         .await?;
     check_capabilities(&handshake, &[], &plan.changes)?;
     merge_conditions(&mut conditions, &plan.conditions);
@@ -247,8 +256,7 @@ pub async fn execute(
         crate::domain::provider::invert(&succeeded, &observed.resources, &after.resources)
     };
 
-    let verified = desired
-        .resources
+    let verified = effective
         .iter()
         .filter(|want| {
             after
@@ -279,8 +287,9 @@ pub async fn execute(
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
         observed: observed.resources.len(),
-        unowned: crate::domain::adoption::unowned(&observed.resources, &desired.resources),
-        desired: desired.resources.len(),
+        unowned: crate::domain::adoption::unowned(&observed.resources, &effective),
+        desired: effective.len(),
+        derived: derived.len(),
         planned: plan.changes.len(),
         approved,
         refused,
@@ -463,6 +472,10 @@ pub struct Desired {
     /// reclassified by the core. A separate list keeps an old provider from
     /// mistaking a tombstone for something to create.
     pub absent: Vec<DesiredResource>,
+    /// Declared derivations: rules that materialise a set from an observed fact
+    /// (ADR-036). The provider never sees them; the core expands them into
+    /// `resources` before planning.
+    pub derive: Vec<derive::DeriveRule>,
 }
 
 impl Desired {
@@ -498,8 +511,26 @@ pub fn parse_desired(raw: &str) -> Result<Desired, NodError> {
         serde_json::Value::Array(items) => Ok(Desired {
             resources: parse_resources(items)?,
             absent: Vec::new(),
+            derive: Vec::new(),
         }),
         serde_json::Value::Object(mut map) => {
+            let schema = match map.remove("schema") {
+                None | Some(serde_json::Value::Null) => 1,
+                Some(serde_json::Value::Number(number)) => number.as_u64().ok_or_else(|| {
+                    NodError::config("desired state `schema` must be a positive integer")
+                })?,
+                Some(_) => {
+                    return Err(NodError::config(
+                        "desired state `schema` must be a positive integer",
+                    ))
+                }
+            };
+            if schema > derive::SCHEMA {
+                return Err(NodError::config(format!(
+                    "desired state declares schema {schema}, this core understands {}",
+                    derive::SCHEMA
+                )));
+            }
             let resources = match map.remove("resources") {
                 Some(serde_json::Value::Array(items)) => items,
                 _ => {
@@ -513,9 +544,21 @@ pub fn parse_desired(raw: &str) -> Result<Desired, NodError> {
                 None | Some(serde_json::Value::Null) => Vec::new(),
                 Some(_) => return Err(NodError::config("desired state `absent` must be an array")),
             };
+            let derive = match map.remove("derive") {
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(value) => {
+                    if schema < 2 {
+                        return Err(NodError::config(
+                            "desired state uses `derive`, which requires schema 2",
+                        ));
+                    }
+                    derive::parse(&value)?
+                }
+            };
             Ok(Desired {
                 resources: parse_resources(resources)?,
                 absent,
+                derive,
             })
         }
         _ => Err(NodError::config(
@@ -943,5 +986,22 @@ mod tests {
         assert_eq!(desired.absent.len(), 1);
         assert_eq!(desired.absent[0].id, "old");
         assert!(parse_desired(r#"{"resources":[],"absent":{}}"#).is_err());
+    }
+
+    #[test]
+    fn derive_requires_schema_two_and_a_known_schema() {
+        let valid = r#"{"schema":2,"resources":[],"derive":[{"id":"r","from":{"kind":"k","id":"i","attribute":"a"},"template":{"kind":"t","id":"{member}"}}]}"#;
+        assert_eq!(parse_desired(valid).unwrap().derive.len(), 1);
+
+        let without_schema = r#"{"resources":[],"derive":[{"id":"r","from":{"kind":"k","id":"i","attribute":"a"},"template":{"kind":"t","id":"{member}"}}]}"#;
+        assert!(
+            parse_desired(without_schema).is_err(),
+            "derive requires schema 2"
+        );
+
+        assert!(
+            parse_desired(r#"{"schema":3,"resources":[]}"#).is_err(),
+            "a schema this core does not know must be refused"
+        );
     }
 }

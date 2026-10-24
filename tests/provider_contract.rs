@@ -40,6 +40,7 @@ fn desired(ids: &[&str]) -> Desired {
             })
             .collect(),
         absent: Vec::new(),
+        derive: Vec::new(),
     }
 }
 

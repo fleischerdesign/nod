@@ -8,6 +8,7 @@ pub mod check_secrets;
 pub mod collect_garbage;
 pub mod copy_closure;
 pub mod deploy_fleet;
+pub mod derive;
 pub mod detect_drift;
 pub mod eval_fleet;
 pub mod exec_fleet;
