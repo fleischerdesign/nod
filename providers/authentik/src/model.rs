@@ -13,6 +13,13 @@ pub const KIND_GROUP: &str = "authentik.group";
 /// Resource kind for an Authentik user.
 pub const KIND_USER: &str = "authentik.user";
 
+/// Resource kind for an Authentik application.
+///
+/// An application has no free-form field, so it never carries a marker: the
+/// core owns it through its record (ADR-037) and the provider always reports
+/// `owned: false` here.
+pub const KIND_APPLICATION: &str = "authentik.application";
+
 /// A user as the group serializer's `users_obj` returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartialUser {
@@ -140,6 +147,34 @@ pub fn to_resource(group: &Group, marker: &Marker) -> ObservedResource {
     }
 }
 
+/// Maps an application to the resource the core sees.
+///
+/// The slug is the id; the display name, the provider's *name* (never its pk),
+/// the launch URL and the tile metadata are the attributes. A declaration can
+/// therefore name a provider the way a human knows it.
+pub fn application_resource(app: &crate::api::Application) -> ObservedResource {
+    ObservedResource {
+        kind: KIND_APPLICATION.to_string(),
+        id: app.slug.clone(),
+        attributes: json!({
+            "name": app.name,
+            "provider": app
+                .provider_obj
+                .as_ref()
+                .map(|provider| provider.name.clone())
+                .unwrap_or_default(),
+            "meta_launch_url": app.meta_launch_url,
+            "meta_description": app.meta_description,
+            "meta_publisher": app.meta_publisher,
+            "open_in_new_tab": app.open_in_new_tab,
+            "policy_engine_mode": app.policy_engine_mode,
+            "group": app.group,
+            "meta_hide": app.meta_hide,
+        }),
+        owned: false,
+    }
+}
+
 /// Whether the declaration asks for anything the observation does not show.
 ///
 /// Only the keys the declaration names are compared. `members = null` in the
@@ -197,9 +232,14 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
         }
     }
 
+    // Groups and applications are managed the same way: created when missing,
+    // updated when a declared attribute differs, left alone when foreign. A
+    // group carries its marker; an application is owned through the core's
+    // record, so the provider only reports what it sees (ADR-037).
+    const MANAGED: [&str; 2] = [KIND_GROUP, KIND_APPLICATION];
     for want in desired
         .iter()
-        .filter(|resource| resource.kind == KIND_GROUP)
+        .filter(|resource| MANAGED.contains(&resource.kind.as_str()))
     {
         match observed
             .iter()
@@ -226,7 +266,7 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
 
     for current in observed
         .iter()
-        .filter(|resource| resource.kind == KIND_GROUP && resource.owned)
+        .filter(|resource| MANAGED.contains(&resource.kind.as_str()) && resource.owned)
     {
         let declared = desired
             .iter()
@@ -499,11 +539,92 @@ mod tests {
         assert_eq!(marker().stamp(&Value::Null), json!({ "nod": "owned" }));
     }
 
+    fn application(slug: &str, provider: Option<&str>) -> crate::api::Application {
+        crate::api::Application {
+            slug: slug.to_string(),
+            name: format!("App {slug}"),
+            provider_obj: provider.map(|name| crate::api::ProviderSummary {
+                pk: 7,
+                name: name.to_string(),
+            }),
+            open_in_new_tab: false,
+            meta_launch_url: "https://app.example.test".to_string(),
+            meta_description: String::new(),
+            meta_publisher: String::new(),
+            policy_engine_mode: "any".to_string(),
+            group: String::new(),
+            meta_hide: false,
+        }
+    }
+
+    fn desired_application(slug: &str, name: &str) -> Resource {
+        Resource {
+            kind: KIND_APPLICATION.to_string(),
+            id: slug.to_string(),
+            attributes: json!({ "name": name }),
+        }
+    }
+
+    #[test]
+    fn an_application_maps_slug_to_id_and_provider_name() {
+        let mapped = application_resource(&application("grafana", Some("grafana-oauth")));
+        assert_eq!(mapped.id, "grafana");
+        assert_eq!(mapped.attributes["provider"], json!("grafana-oauth"));
+        assert!(
+            !mapped.owned,
+            "an application has no marker; the core's record owns it"
+        );
+    }
+
+    #[test]
+    fn an_application_without_a_provider_maps_to_an_empty_name() {
+        let mapped = application_resource(&application("bookmark", None));
+        assert_eq!(mapped.attributes["provider"], json!(""));
+    }
+
+    #[test]
+    fn a_missing_application_is_created() {
+        let changes = plan(&[desired_application("grafana", "App grafana")], &[]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "create");
+        assert_eq!(changes[0].resource.kind, KIND_APPLICATION);
+        assert!(changes[0].owned);
+    }
+
+    #[test]
+    fn an_owned_application_with_a_different_name_is_updated() {
+        let mut observed = application_resource(&application("grafana", None));
+        observed.owned = true;
+        let changes = plan(&[desired_application("grafana", "Grafana")], &[observed]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "update");
+    }
+
+    #[test]
+    fn an_unowned_application_is_left_alone() {
+        let observed = application_resource(&application("grafana", None));
+        let changes = plan(&[desired_application("grafana", "Grafana")], &[observed]);
+        assert!(
+            changes.is_empty(),
+            "a foreign application is never modified (ADR-037)"
+        );
+    }
+
+    #[test]
+    fn an_owned_undeclared_application_is_deleted() {
+        let mut observed = application_resource(&application("grafana", None));
+        observed.owned = true;
+        let changes = plan(&[], &[observed]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "delete");
+        assert!(changes[0].destructive);
+    }
+
     #[test]
     fn other_kinds_are_ignored() {
         let desired = vec![Resource {
-            kind: "authentik.application".to_string(),
-            id: "app".to_string(),
+            kind: "authentik.outpost".to_string(),
+            id: "outpost".to_string(),
             attributes: json!({}),
         }];
         assert!(plan(&desired, &[]).is_empty());

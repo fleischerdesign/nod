@@ -21,16 +21,23 @@ const PROTOCOL: u32 = 1;
 
 /// What the token must be allowed to do, in Authentik's own vocabulary.
 ///
-/// Deletion is not listed: `apply` only deletes when the core's policy allows
-/// it, and then the missing `authentik_core.delete_group` is reported with the
-/// change that needed it.
-const REQUIRED_PERMISSIONS: [&str; 6] = [
+/// Deletion of a group is not listed: `apply` only deletes when the core's
+/// policy allows it, and then the missing `authentik_core.delete_group` is
+/// reported with the change that needed it. Applications are fully managed —
+/// created and deleted by the fleet — so their deletion permission is part of
+/// the required set.
+const REQUIRED_PERMISSIONS: [&str; 11] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
+    "authentik_core.view_application",
+    "authentik_core.view_provider",
     "authentik_core.change_group",
     "authentik_core.add_group",
     "authentik_core.add_user",
     "authentik_core.change_user",
+    "authentik_core.add_application",
+    "authentik_core.change_application",
+    "authentik_core.delete_application",
 ];
 
 fn main() {
@@ -84,7 +91,7 @@ fn handshake() -> Value {
         "provider": "authentik",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
-        "capabilities": ["authentik.group", "authentik.user"],
+        "capabilities": ["authentik.group", "authentik.user", "authentik.application"],
         "operations": ["adopt"],
         "required_permissions": REQUIRED_PERMISSIONS,
         "ownership": "marker",
@@ -242,6 +249,20 @@ fn observe(request: &Value) -> Value {
         }
     };
 
+    // Applications have no marker field; the core owns them through its record
+    // (ADR-037). A token without the permission can still reconcile groups, so
+    // the gap is a condition, never a failed run.
+    let applications = match client.applications() {
+        Ok(applications) => applications,
+        Err(error) => {
+            conditions.push(json!({
+                "kind": if matches!(error, ApiError::Auth) { "permission" } else { error.kind() },
+                "message": failure_message(&error, "authentik_core.view_application"),
+            }));
+            Vec::new()
+        }
+    };
+
     let marker = Marker {
         key: settings.marker_key,
         value: settings.marker_value,
@@ -259,6 +280,15 @@ fn observe(request: &Value) -> Value {
         })
         .chain(users.iter().map(|user| {
             let resource = model::user_resource(user, &marker);
+            json!({
+                "kind": resource.kind,
+                "id": resource.id,
+                "attributes": resource.attributes,
+                "owned": resource.owned,
+            })
+        }))
+        .chain(applications.iter().map(|application| {
+            let resource = model::application_resource(application);
             json!({
                 "kind": resource.kind,
                 "id": resource.id,
@@ -349,6 +379,7 @@ fn apply(request: &Value) -> Value {
         value: settings.marker_value,
     };
     let mut applied = Vec::new();
+    let mut providers: Option<Vec<api::ProviderSummary>> = None;
 
     for change in &changes {
         let id = change.resource.id.clone();
@@ -391,7 +422,7 @@ fn apply(request: &Value) -> Value {
                 "a user is never deleted by the provider",
                 "config",
             )),
-            ("create", _) => {
+            ("create", model::KIND_GROUP) => {
                 let user_pks = match resolve_users(&change.resource.attributes, &users) {
                     Ok(pks) => pks,
                     Err(()) => {
@@ -415,7 +446,7 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
-            ("update", _) => {
+            ("update", model::KIND_GROUP) => {
                 let Some(group) = groups.iter().find(|group| group.name == id) else {
                     applied.push(failed(&id, "group not found", "config"));
                     continue;
@@ -442,7 +473,7 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
-            ("delete", _) => {
+            ("delete", model::KIND_GROUP) => {
                 let Some(group) = groups.iter().find(|group| group.name == id) else {
                     applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
                     continue;
@@ -456,6 +487,64 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
+            (kind @ ("create" | "update"), model::KIND_APPLICATION) => {
+                if kind == "create" && attribute_str(&change.resource.attributes, "name").is_empty()
+                {
+                    applied.push(failed(&id, "an application needs a `name`", "config"));
+                    continue;
+                }
+
+                // Provider names resolve to primary keys; the declaration never
+                // carries a uuid, and an unknown name is a declaration error.
+                if providers.is_none() {
+                    match client.providers() {
+                        Ok(list) => providers = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_core.view_provider"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let known = providers.as_deref().unwrap_or(&[]);
+                let body = match application_body(&change.resource.attributes, known) {
+                    Ok(body) => body,
+                    Err(message) => {
+                        applied.push(failed(&id, &message, "config"));
+                        continue;
+                    }
+                };
+
+                let result = if kind == "create" {
+                    client.create_application(&body)
+                } else {
+                    client.update_application(&id, &body)
+                };
+                let permission = if kind == "create" {
+                    "authentik_core.add_application"
+                } else {
+                    "authentik_core.change_application"
+                };
+                match result {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, permission),
+                        error.kind(),
+                    )),
+                }
+            }
+            ("delete", model::KIND_APPLICATION) => match client.delete_application(&id) {
+                Ok(()) => applied.push(ok(&id)),
+                Err(error) => applied.push(failed(
+                    &id,
+                    &failure_message(&error, "authentik_core.delete_application"),
+                    error.kind(),
+                )),
+            },
             (other, _) => applied.push(failed(
                 &id,
                 &format!("unsupported change kind: {other}"),
@@ -515,6 +604,58 @@ fn merged_attributes(observed: &Value, declared: &Value) -> Value {
         object.insert(key, value);
     }
     Value::Object(object)
+}
+
+/// Builds an application's create or patch body from the declared attributes.
+///
+/// Only declared keys are sent: a partial declaration must not reset a field it
+/// does not name. `provider` names a provider the way a human knows it and is
+/// resolved to the pk the API expects; an empty name detaches it.
+fn application_body(
+    attributes: &Value,
+    providers: &[api::ProviderSummary],
+) -> Result<Value, String> {
+    let mut body = serde_json::Map::new();
+
+    for key in [
+        "name",
+        "meta_launch_url",
+        "meta_description",
+        "meta_publisher",
+        "group",
+        "policy_engine_mode",
+    ] {
+        if let Some(value) = attributes.get(key) {
+            if !value.is_string() {
+                return Err(format!("`{key}` must be a string"));
+            }
+            body.insert(key.to_string(), value.clone());
+        }
+    }
+
+    for key in ["open_in_new_tab", "meta_hide"] {
+        if let Some(value) = attributes.get(key) {
+            let Some(flag) = value.as_bool() else {
+                return Err(format!("`{key}` must be a boolean"));
+            };
+            body.insert(key.to_string(), json!(flag));
+        }
+    }
+
+    if let Some(value) = attributes.get("provider") {
+        if value.is_null() || value.as_str() == Some("") {
+            body.insert("provider".to_string(), Value::Null);
+        } else if let Some(name) = value.as_str() {
+            let Some(provider) = providers.iter().find(|provider| provider.name == name) else {
+                return Err(format!("unknown provider `{name}`"));
+            };
+            body.insert("provider".to_string(), json!(provider.pk));
+        } else {
+            return Err("`provider` must be a string or null".to_string());
+        }
+    }
+
+    Ok(Value::Object(body))
 }
 
 /// Resolves the declared member usernames to primary keys.
@@ -643,6 +784,15 @@ fn adopt(request: &Value) -> Value {
                     })),
                 }
             }
+            model::KIND_APPLICATION => adopted.push(json!({
+                "id": resource.id,
+                "ok": false,
+                "message": "an application has no marker field; it is owned through the reconciler's record",
+                "error": {
+                    "kind": "config",
+                    "message": "an application has no marker field; it is owned through the reconciler's record"
+                }
+            })),
             other => adopted.push(json!({
                 "id": resource.id,
                 "ok": false,
@@ -663,8 +813,49 @@ mod tests {
     fn the_handshake_declares_the_group_capability() {
         let handshake = handshake();
         assert_eq!(handshake["capabilities"][0], json!("authentik.group"));
+        assert!(handshake["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("authentik.application")));
         assert_eq!(handshake["ownership"], json!("marker"));
         assert_eq!(handshake["operations"][0], json!("adopt"));
+    }
+
+    fn provider(name: &str, pk: i64) -> api::ProviderSummary {
+        api::ProviderSummary {
+            pk,
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_application_body_resolves_a_provider_name_to_its_pk() {
+        let body = application_body(
+            &json!({ "name": "Grafana", "provider": "grafana-oauth" }),
+            &[provider("grafana-oauth", 7)],
+        )
+        .expect("a known provider resolves");
+        assert_eq!(body["provider"], json!(7));
+        assert_eq!(body["name"], json!("Grafana"));
+    }
+
+    #[test]
+    fn an_application_body_rejects_an_unknown_provider() {
+        let error = application_body(&json!({ "provider": "missing" }), &[]).unwrap_err();
+        assert!(error.contains("unknown provider"), "{error}");
+    }
+
+    #[test]
+    fn an_application_body_detaches_on_an_empty_provider() {
+        let body = application_body(&json!({ "provider": "" }), &[]).expect("detach");
+        assert_eq!(body["provider"], Value::Null);
+    }
+
+    #[test]
+    fn an_application_body_sends_only_declared_keys() {
+        let body = application_body(&json!({ "name": "Grafana" }), &[]).expect("body");
+        assert_eq!(body.as_object().unwrap().len(), 1);
+        assert!(body.get("meta_launch_url").is_none());
     }
 
     #[test]

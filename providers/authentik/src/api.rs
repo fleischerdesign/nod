@@ -50,6 +50,70 @@ impl ApiError {
     }
 }
 
+/// An application as the applications endpoint returns it.
+///
+/// The slug is the id nod addresses; `provider_obj` carries the provider's
+/// *name*, so a declaration can name it without knowing a uuid.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Application {
+    /// Unique slug; the provider's stable id and the API's lookup field.
+    pub slug: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// The assigned provider, when one is set.
+    #[serde(default)]
+    pub provider_obj: Option<ProviderSummary>,
+    /// Whether the launch URL opens in a new tab.
+    #[serde(default)]
+    pub open_in_new_tab: bool,
+    /// Launch URL.
+    #[serde(default)]
+    pub meta_launch_url: String,
+    /// Description shown under the tile.
+    #[serde(default)]
+    pub meta_description: String,
+    /// Publisher shown under the tile.
+    #[serde(default)]
+    pub meta_publisher: String,
+    /// `any` or `all`.
+    #[serde(default)]
+    pub policy_engine_mode: String,
+    /// Application group, a UI label.
+    #[serde(default)]
+    pub group: String,
+    /// Whether the tile is hidden from "My applications".
+    #[serde(default)]
+    pub meta_hide: bool,
+}
+
+/// A provider as the list endpoints return it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderSummary {
+    /// Primary key the application's `provider` field expects.
+    pub pk: i64,
+    /// Unique provider name.
+    pub name: String,
+}
+
+/// One page of the Authentik application list response.
+#[derive(Debug, Default, Deserialize)]
+struct ApplicationPage {
+    #[serde(default)]
+    results: Vec<Application>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
+/// One page of the Authentik provider list response.
+#[derive(Debug, Default, Deserialize)]
+struct ProviderPage {
+    #[serde(default)]
+    results: Vec<ProviderSummary>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
 /// One page of the Authentik list response.
 #[derive(Debug, Default, Deserialize)]
 struct Page {
@@ -154,6 +218,62 @@ impl Authentik {
             }
         }
         Ok(users)
+    }
+
+    /// Reads the complete application list, following pagination to the end.
+    pub fn applications(&self) -> Result<Vec<Application>, ApiError> {
+        let mut applications = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/core/applications/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: ApplicationPage = self.get(&url)?;
+            applications.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(applications)
+    }
+
+    /// Reads the complete provider list, for name-to-pk resolution.
+    pub fn providers(&self) -> Result<Vec<ProviderSummary>, ApiError> {
+        let mut providers = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/providers/all/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: ProviderPage = self.get(&url)?;
+            providers.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(providers)
+    }
+
+    /// Creates an application; the body holds only declared fields.
+    pub fn create_application(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/applications/", self.base);
+        self.write("POST", &url, body.clone())
+    }
+
+    /// Updates the declared fields of an application, addressed by slug.
+    pub fn update_application(&self, slug: &str, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/applications/{}/", self.base, slug);
+        self.write("PATCH", &url, body.clone())
+    }
+
+    /// Deletes an application, addressed by slug.
+    pub fn delete_application(&self, slug: &str) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/applications/{}/", self.base, slug);
+        self.write("DELETE", &url, serde_json::Value::Null)
     }
 
     /// Writes the group's `attributes` object; the caller merges the marker.
