@@ -270,6 +270,19 @@ fn observe(request: &Value) -> Value {
         key: settings.marker_key,
         value: settings.marker_value,
     };
+
+    // Access groups come from the policy bindings. Without them the audience of
+    // an application is unknown, so a failure here is fatal once applications
+    // exist — an empty list would read as "no group has access".
+    let bindings = if applications.is_empty() {
+        Vec::new()
+    } else {
+        match client.bindings() {
+            Ok(bindings) => bindings,
+            Err(error) => return api_error(&error),
+        }
+    };
+
     let resources: Vec<Value> = groups
         .iter()
         .map(|group| {
@@ -291,7 +304,8 @@ fn observe(request: &Value) -> Value {
             })
         }))
         .chain(applications.iter().map(|application| {
-            let resource = model::application_resource(application);
+            let access = model::access_groups(&bindings, &application.pk, &groups);
+            let resource = model::application_resource(application, access);
             json!({
                 "kind": resource.kind,
                 "id": resource.id,
@@ -383,6 +397,8 @@ fn apply(request: &Value) -> Value {
     };
     let mut applied = Vec::new();
     let mut providers: Option<Vec<api::ProviderSummary>> = None;
+    let mut bindings: Option<Vec<api::Binding>> = None;
+    let mut applications: Option<Vec<api::Application>> = None;
 
     for change in &changes {
         let id = change.resource.id.clone();
@@ -521,21 +537,111 @@ fn apply(request: &Value) -> Value {
                     }
                 };
 
-                let result = if kind == "create" {
-                    client.create_application(&body)
-                } else {
-                    client.update_application(&id, &body)
+                let access = match declared_access_groups(&change.resource.attributes) {
+                    Ok(access) => access,
+                    Err(message) => {
+                        applied.push(failed(&id, &message, "config"));
+                        continue;
+                    }
                 };
-                let permission = if kind == "create" {
-                    "authentik_core.add_application"
-                } else {
-                    "authentik_core.change_application"
-                };
-                match result {
-                    Ok(()) => applied.push(ok(&id)),
+
+                if kind == "create" {
+                    match client.create_application(&body) {
+                        Ok(created) => {
+                            if let Some(declared) = &access {
+                                if let Err(message) =
+                                    reconcile_bindings(&client, &created.pk, declared, &groups, &[])
+                                {
+                                    // An application without its audience is open to
+                                    // everyone (`core_default_app_access`). Remove it
+                                    // rather than leave an unowned, open object behind.
+                                    let removed = client.delete_application(&id).is_ok();
+                                    let note = if removed {
+                                        message
+                                    } else {
+                                        format!(
+                                            "{message}; the compensating delete also failed, the application stays unowned and open"
+                                        )
+                                    };
+                                    applied.push(failed(&id, &note, "config"));
+                                    continue;
+                                }
+                            }
+                            applied.push(ok(&id));
+                        }
+                        Err(error) => applied.push(failed(
+                            &id,
+                            &failure_message(&error, "authentik_core.add_application"),
+                            error.kind(),
+                        )),
+                    }
+                    continue;
+                }
+
+                match client.update_application(&id, &body) {
+                    Ok(()) => {
+                        if let Some(declared) = &access {
+                            // The binding target is the application's pk, which the
+                            // declaration never carries; look it up once.
+                            if applications.is_none() {
+                                match client.applications() {
+                                    Ok(list) => applications = Some(list),
+                                    Err(error) => {
+                                        applied.push(failed(
+                                            &id,
+                                            &failure_message(
+                                                &error,
+                                                "authentik_core.view_application",
+                                            ),
+                                            error.kind(),
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                            let target = applications
+                                .as_deref()
+                                .unwrap_or(&[])
+                                .iter()
+                                .find(|application| application.slug == id)
+                                .map(|application| application.pk.clone());
+                            let Some(target) = target else {
+                                applied.push(failed(
+                                    &id,
+                                    "application not found after the update",
+                                    "config",
+                                ));
+                                continue;
+                            };
+                            if bindings.is_none() {
+                                match client.bindings() {
+                                    Ok(list) => bindings = Some(list),
+                                    Err(error) => {
+                                        applied.push(failed(
+                                            &id,
+                                            &failure_message(
+                                                &error,
+                                                "authentik_policies.view_policybinding",
+                                            ),
+                                            error.kind(),
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                            let known = bindings.as_deref().unwrap_or(&[]);
+                            if let Err(message) =
+                                reconcile_bindings(&client, &target, declared, &groups, known)
+                            {
+                                applied.push(failed(&id, &message, "config"));
+                                continue;
+                            }
+                        }
+                        applied.push(ok(&id));
+                    }
                     Err(error) => applied.push(failed(
                         &id,
-                        &failure_message(&error, permission),
+                        &failure_message(&error, "authentik_core.change_application"),
                         error.kind(),
                     )),
                 }
@@ -659,6 +765,98 @@ fn application_body(
     }
 
     Ok(Value::Object(body))
+}
+
+/// The declared access groups, or `None` when the declaration does not manage
+/// them. A wrong type is a configuration error, never an empty set.
+fn declared_access_groups(attributes: &Value) -> Result<Option<Vec<String>>, String> {
+    match attributes.get("access_groups") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "`access_groups` must be a list of group names".to_string())
+            })
+            .collect::<Result<Vec<String>, String>>()
+            .map(Some),
+        Some(_) => Err("`access_groups` must be a list of group names".to_string()),
+    }
+}
+
+/// Reconciles the group bindings of one application against the declaration.
+///
+/// The declared list is the complete set of group bindings; user and policy
+/// bindings belong to someone else and are never touched. Grants are made
+/// before removals, so a failure never leaves the application less accessible
+/// than either state, and a duplicate or disabled binding for a declared group
+/// is removed once its enabled replacement exists.
+fn reconcile_bindings(
+    client: &Authentik,
+    target: &str,
+    declared: &[String],
+    groups: &[model::Group],
+    bindings: &[api::Binding],
+) -> Result<(), String> {
+    let mut wanted: Vec<&str> = Vec::new();
+    for name in declared {
+        let Some(group) = groups.iter().find(|group| &group.name == name) else {
+            return Err(format!("unknown group `{name}` in `access_groups`"));
+        };
+        wanted.push(group.pk.as_str());
+    }
+
+    let existing: Vec<&api::Binding> = bindings
+        .iter()
+        .filter(|binding| binding.target.as_deref() == Some(target))
+        .filter(|binding| {
+            binding.group.is_some() && binding.user.is_none() && binding.policy.is_none()
+        })
+        .collect();
+
+    let mut created: Vec<String> = Vec::new();
+    for pk in &wanted {
+        let satisfied = existing
+            .iter()
+            .any(|binding| binding.enabled && binding.group.as_deref() == Some(pk));
+        if satisfied {
+            continue;
+        }
+        match client.create_binding(target, pk) {
+            Ok(binding) => created.push(binding.pk),
+            Err(error) => {
+                for binding in &created {
+                    let _ = client.delete_binding(binding);
+                }
+                return Err(format!(
+                    "cannot grant group access: {}",
+                    failure_message(&error, "authentik_policies.add_policybinding")
+                ));
+            }
+        }
+    }
+
+    let mut kept: Vec<&str> = Vec::new();
+    for binding in &existing {
+        let Some(pk) = binding.group.as_deref() else {
+            continue;
+        };
+        let declared_group = wanted.contains(&pk);
+        let duplicate = kept.contains(&pk);
+        if declared_group && binding.enabled && !duplicate {
+            kept.push(pk);
+            continue;
+        }
+        if let Err(error) = client.delete_binding(&binding.pk) {
+            return Err(format!(
+                "cannot remove group access: {}",
+                failure_message(&error, "authentik_policies.delete_policybinding")
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolves the declared member usernames to primary keys.

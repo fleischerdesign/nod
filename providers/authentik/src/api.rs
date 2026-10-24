@@ -56,6 +56,8 @@ impl ApiError {
 /// *name*, so a declaration can name it without knowing a uuid.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Application {
+    /// Policy-binding uuid; the value a `PolicyBinding.target` expects.
+    pub pk: String,
     /// Unique slug; the provider's stable id and the API's lookup field.
     pub slug: String,
     /// Display name.
@@ -94,6 +96,41 @@ pub struct ProviderSummary {
     pub pk: i64,
     /// Unique provider name.
     pub name: String,
+}
+
+/// A policy binding as the bindings endpoint returns it.
+///
+/// Only the fields the provider decides on: a group binding grants access to a
+/// group, a user or policy binding is a different decision, and `enabled` says
+/// whether the binding is evaluated at all.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Binding {
+    /// Binding primary key, used to delete it.
+    pub pk: String,
+    /// The bound object's policy-binding uuid.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Group primary key, when this is a group binding.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// User primary key, when this is a user binding.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Policy primary key, when this is a policy binding.
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// Whether the binding is evaluated.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// One page of the Authentik binding list response.
+#[derive(Debug, Default, Deserialize)]
+struct BindingPage {
+    #[serde(default)]
+    results: Vec<Binding>,
+    #[serde(default)]
+    pagination: Pagination,
 }
 
 /// One page of the Authentik application list response.
@@ -282,10 +319,55 @@ impl Authentik {
         Ok(providers)
     }
 
-    /// Creates an application; the body holds only declared fields.
-    pub fn create_application(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+    /// Reads the complete binding list, for access-group reconciliation.
+    ///
+    /// One paginated call, not one per application: a binding carries its
+    /// target, so the caller can group them without N+1 requests.
+    pub fn bindings(&self) -> Result<Vec<Binding>, ApiError> {
+        let mut bindings = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/policies/bindings/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: BindingPage = self.get(&url)?;
+            bindings.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(bindings)
+    }
+
+    /// Grants a group access to an application; returns the created binding.
+    pub fn create_binding(&self, target: &str, group: &str) -> Result<Binding, ApiError> {
+        let url = format!("{}/api/v3/policies/bindings/", self.base);
+        self.write_json(
+            "POST",
+            &url,
+            serde_json::json!({
+                "target": target,
+                "group": group,
+                "order": 0,
+                "negate": false,
+                "enabled": true,
+            }),
+        )
+    }
+
+    /// Removes one binding.
+    pub fn delete_binding(&self, pk: &str) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/policies/bindings/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
+    }
+
+    /// Creates an application and returns the object, whose `pk` is the target
+    /// the bindings need.
+    pub fn create_application(&self, body: &serde_json::Value) -> Result<Application, ApiError> {
         let url = format!("{}/api/v3/core/applications/", self.base);
-        self.write("POST", &url, body.clone())
+        self.write_json("POST", &url, body.clone())
     }
 
     /// Updates the declared fields of an application, addressed by slug.
@@ -578,7 +660,7 @@ mod tests {
     fn a_filtered_application_list_is_refused() {
         let (base, handle) = server(vec![(
             200,
-            r#"{"pagination":{"count":22,"next":null},"results":[{"slug":"esphome"},{"slug":"ldap"}]}"#,
+            r#"{"pagination":{"count":22,"next":null},"results":[{"pk":"pbm-esphome","slug":"esphome"},{"pk":"pbm-ldap","slug":"ldap"}]}"#,
         )]);
 
         let error = client(&base).applications().unwrap_err();
@@ -595,7 +677,7 @@ mod tests {
     fn an_unfiltered_application_list_is_accepted() {
         let (base, handle) = server(vec![(
             200,
-            r#"{"pagination":{"count":2,"next":null},"results":[{"slug":"esphome"},{"slug":"ldap"}]}"#,
+            r#"{"pagination":{"count":2,"next":null},"results":[{"pk":"pbm-esphome","slug":"esphome"},{"pk":"pbm-ldap","slug":"ldap"}]}"#,
         )]);
 
         let applications = client(&base).applications().expect("count matches");

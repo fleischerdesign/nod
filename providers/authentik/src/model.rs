@@ -147,12 +147,46 @@ pub fn to_resource(group: &Group, marker: &Marker) -> ObservedResource {
     }
 }
 
+/// The enabled group bindings that grant access to `target`, by group name.
+///
+/// Only enabled group bindings count: a user or policy binding is a different
+/// decision, and a disabled binding grants nothing. Sorted, so a comparison
+/// against a declaration is stable.
+pub fn access_groups(
+    bindings: &[crate::api::Binding],
+    target: &str,
+    groups: &[Group],
+) -> Vec<String> {
+    let mut names: Vec<&str> = bindings
+        .iter()
+        .filter(|binding| binding.target.as_deref() == Some(target))
+        .filter(|binding| binding.enabled)
+        .filter(|binding| {
+            binding.group.is_some() && binding.user.is_none() && binding.policy.is_none()
+        })
+        .filter_map(|binding| {
+            let pk = binding.group.as_deref()?;
+            groups
+                .iter()
+                .find(|group| group.pk == pk)
+                .map(|group| group.name.as_str())
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names.into_iter().map(str::to_string).collect()
+}
+
 /// Maps an application to the resource the core sees.
 ///
 /// The slug is the id; the display name, the provider's *name* (never its pk),
-/// the launch URL and the tile metadata are the attributes. A declaration can
-/// therefore name a provider the way a human knows it.
-pub fn application_resource(app: &crate::api::Application) -> ObservedResource {
+/// the launch URL, the tile metadata and the groups that grant access are the
+/// attributes. A declaration can therefore name a provider and its audience the
+/// way a human knows them.
+pub fn application_resource(
+    app: &crate::api::Application,
+    access_groups: Vec<String>,
+) -> ObservedResource {
     ObservedResource {
         kind: KIND_APPLICATION.to_string(),
         id: app.slug.clone(),
@@ -170,6 +204,7 @@ pub fn application_resource(app: &crate::api::Application) -> ObservedResource {
             "policy_engine_mode": app.policy_engine_mode,
             "group": app.group,
             "meta_hide": app.meta_hide,
+            "access_groups": access_groups,
         }),
         owned: false,
     }
@@ -541,6 +576,7 @@ mod tests {
 
     fn application(slug: &str, provider: Option<&str>) -> crate::api::Application {
         crate::api::Application {
+            pk: format!("pbm-{slug}"),
             slug: slug.to_string(),
             name: format!("App {slug}"),
             provider_obj: provider.map(|name| crate::api::ProviderSummary {
@@ -567,7 +603,8 @@ mod tests {
 
     #[test]
     fn an_application_maps_slug_to_id_and_provider_name() {
-        let mapped = application_resource(&application("grafana", Some("grafana-oauth")));
+        let mapped =
+            application_resource(&application("grafana", Some("grafana-oauth")), Vec::new());
         assert_eq!(mapped.id, "grafana");
         assert_eq!(mapped.attributes["provider"], json!("grafana-oauth"));
         assert!(
@@ -578,7 +615,7 @@ mod tests {
 
     #[test]
     fn an_application_without_a_provider_maps_to_an_empty_name() {
-        let mapped = application_resource(&application("bookmark", None));
+        let mapped = application_resource(&application("bookmark", None), Vec::new());
         assert_eq!(mapped.attributes["provider"], json!(""));
     }
 
@@ -593,7 +630,7 @@ mod tests {
 
     #[test]
     fn an_owned_application_with_a_different_name_is_updated() {
-        let mut observed = application_resource(&application("grafana", None));
+        let mut observed = application_resource(&application("grafana", None), Vec::new());
         observed.owned = true;
         let changes = plan(&[desired_application("grafana", "Grafana")], &[observed]);
         assert_eq!(changes.len(), 1);
@@ -602,7 +639,7 @@ mod tests {
 
     #[test]
     fn an_unowned_application_is_left_alone() {
-        let observed = application_resource(&application("grafana", None));
+        let observed = application_resource(&application("grafana", None), Vec::new());
         let changes = plan(&[desired_application("grafana", "Grafana")], &[observed]);
         assert!(
             changes.is_empty(),
@@ -612,12 +649,70 @@ mod tests {
 
     #[test]
     fn an_owned_undeclared_application_is_deleted() {
-        let mut observed = application_resource(&application("grafana", None));
+        let mut observed = application_resource(&application("grafana", None), Vec::new());
         observed.owned = true;
         let changes = plan(&[], &[observed]);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, "delete");
         assert!(changes[0].destructive);
+    }
+
+    fn binding(target: &str, group: &str, enabled: bool, policy: bool) -> crate::api::Binding {
+        crate::api::Binding {
+            pk: format!("binding-{group}-{policy}"),
+            target: Some(target.to_string()),
+            group: Some(group.to_string()),
+            user: None,
+            policy: policy.then(|| "policy".to_string()),
+            enabled,
+        }
+    }
+
+    #[test]
+    fn access_groups_are_the_enabled_group_bindings() {
+        let groups = vec![
+            group("infra", false, json!({})),
+            group("media", false, json!({})),
+        ];
+        let bindings = vec![
+            binding("pbm-app", "pk-infra", true, false),
+            binding("pbm-app", "pk-media", false, false),
+            binding("pbm-other", "pk-infra", true, false),
+        ];
+
+        assert_eq!(access_groups(&bindings, "pbm-app", &groups), vec!["infra"]);
+    }
+
+    #[test]
+    fn a_policy_binding_is_not_an_access_group() {
+        let groups = vec![group("infra", false, json!({}))];
+        let bindings = vec![binding("pbm-app", "pk-infra", true, true)];
+
+        assert!(access_groups(&bindings, "pbm-app", &groups).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_group_in_a_binding_is_ignored() {
+        let bindings = vec![binding("pbm-app", "pk-missing", true, false)];
+
+        assert!(access_groups(&bindings, "pbm-app", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_different_audience_is_an_update() {
+        let mut observed =
+            application_resource(&application("grafana", None), vec!["media".to_string()]);
+        observed.owned = true;
+        let want = Resource {
+            kind: KIND_APPLICATION.to_string(),
+            id: "grafana".to_string(),
+            attributes: json!({ "name": "App grafana", "access_groups": ["infra"] }),
+        };
+
+        let changes = plan(&[want], &[observed]);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "update");
     }
 
     #[test]

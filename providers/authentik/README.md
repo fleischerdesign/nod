@@ -14,7 +14,7 @@ bindings stay outside its scope.
 |---|---|---|
 | `authentik.group` | group name (unique in Authentik) | `is_superuser`, `description`, `users` |
 | `authentik.user` | username | `name`, `email` |
-| `authentik.application` | slug (unique in Authentik) | `name`, `provider`, `meta_launch_url`, `meta_description`, `meta_publisher`, `open_in_new_tab`, `policy_engine_mode`, `group`, `meta_hide` |
+| `authentik.application` | slug (unique in Authentik) | `name`, `provider`, `meta_launch_url`, `meta_description`, `meta_publisher`, `open_in_new_tab`, `policy_engine_mode`, `group`, `meta_hide`, `access_groups` |
 
 `users` lists login names. `description` and `users` are written into the group's
 free-form `attributes` and membership respectively; `is_superuser` is the group's
@@ -25,6 +25,15 @@ own flag.
 and fails the change when the name is unknown. An empty string detaches it.
 `meta_icon` and the backchannel providers are not managed: the first is a file
 upload, the second a relation this provider does not own.
+
+`access_groups` names the groups that may launch the application. The declared
+list is the complete set of **group** bindings: a group binding outside it is
+removed, while user and policy bindings are left alone. An absent list leaves
+the bindings untouched; an empty list removes every group binding, which makes
+the application fall back to authentik's `core_default_app_access` — open to
+every authenticated user unless another binding restricts it. Grants are made
+before removals, so a failure never cuts access; a create whose bindings fail
+is deleted again rather than left open.
 
 ## Settings
 
