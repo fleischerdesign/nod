@@ -1034,6 +1034,9 @@ pub enum ProviderCommands {
         /// Environment variable the provider inherits (repeatable)
         #[arg(long)]
         env: Vec<String>,
+        /// Directory holding the reconciler state (ownership record)
+        #[arg(long, default_value = "/var/lib/nod")]
+        state_dir: PathBuf,
         /// Print the report as JSON
         #[arg(long)]
         json: bool,

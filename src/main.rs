@@ -528,12 +528,14 @@ async fn run(cli: Cli) -> Result<()> {
                 force,
                 apply,
                 env,
+                state_dir,
                 json,
                 flake,
                 config,
             } => {
                 nod::commands::adopt::execute(
                     provider.as_deref(),
+                    &state_dir,
                     command.as_deref(),
                     settings.as_deref(),
                     desired.as_deref(),

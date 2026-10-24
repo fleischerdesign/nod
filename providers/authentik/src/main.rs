@@ -914,6 +914,13 @@ fn adopt(request: &Value) -> Value {
         Ok(users) => users,
         Err(error) => return api_error(&error),
     };
+    // Adoption of an application writes nothing; the object must exist, and the
+    // core records the operator's decision. The list also proves the account
+    // sees every application (ADR-038).
+    let applications = match client.applications() {
+        Ok(applications) => applications,
+        Err(error) => return api_error(&error),
+    };
 
     let marker = Marker {
         key: settings.marker_key,
@@ -985,15 +992,25 @@ fn adopt(request: &Value) -> Value {
                     })),
                 }
             }
-            model::KIND_APPLICATION => adopted.push(json!({
-                "id": resource.id,
-                "ok": false,
-                "message": "an application has no marker field; it is owned through the reconciler's record",
-                "error": {
-                    "kind": "config",
-                    "message": "an application has no marker field; it is owned through the reconciler's record"
+            model::KIND_APPLICATION => {
+                if applications
+                    .iter()
+                    .any(|application| application.slug == resource.id)
+                {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": "no marker field; the core records ownership"
+                    }));
+                } else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "application not found",
+                        "error": { "kind": "config", "message": "application not found" }
+                    }));
                 }
-            })),
+            }
             other => adopted.push(json!({
                 "id": resource.id,
                 "ok": false,

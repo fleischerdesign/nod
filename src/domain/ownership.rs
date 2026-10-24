@@ -51,6 +51,14 @@ pub struct Ownership {
     /// declaration manage such a kind at all.
     #[serde(default)]
     pub created: Vec<OwnedId>,
+    /// Resources an operator explicitly took over (ADR-040).
+    ///
+    /// Adoption of a marker-less kind writes nothing into the object; this
+    /// entry is the whole evidence, and it exists only because a human asked
+    /// for it. A marker-carrying kind is recorded here as well, so the fleet
+    /// keeps one ownership model.
+    #[serde(default)]
+    pub adopted: Vec<OwnedId>,
 }
 
 impl Ownership {
@@ -66,10 +74,12 @@ impl Ownership {
             .any(|known| known.kind == kind && known.id == id)
     }
 
-    /// Whether the record proves ownership of `kind`/`id`, by rule or creation.
+    /// Whether the record proves ownership of `kind`/`id`, by rule, creation or
+    /// an operator's adoption.
     pub fn owns(&self, kind: &str, id: &str) -> bool {
         self.created
             .iter()
+            .chain(&self.adopted)
             .chain(self.rules.values().flatten())
             .any(|known| known.kind == kind && known.id == id)
     }
@@ -83,6 +93,15 @@ impl Ownership {
         self.created.push(OwnedId::new(kind, id));
     }
 
+    /// Records an explicit adoption; idempotent, and never shadows a rule's
+    /// provenance.
+    pub fn adopt(&mut self, kind: &str, id: &str) {
+        if self.owns(kind, id) {
+            return;
+        }
+        self.adopted.push(OwnedId::new(kind, id));
+    }
+
     /// Drops `created` entries that are neither observed nor created in this
     /// run.
     ///
@@ -92,17 +111,21 @@ impl Ownership {
     /// not touched: they follow the declaration, not the observation, so a dry
     /// run cannot wipe the next run's deletion budget (ADR-036).
     pub fn prune(&mut self, exists: impl Fn(&str, &str) -> bool, keep: &[OwnedId]) {
-        self.created.retain(|entry| {
-            exists(&entry.kind, &entry.id)
-                || keep
-                    .iter()
-                    .any(|fresh| fresh.kind == entry.kind && fresh.id == entry.id)
-        });
+        let prune = |list: &mut Vec<OwnedId>| {
+            list.retain(|entry| {
+                exists(&entry.kind, &entry.id)
+                    || keep
+                        .iter()
+                        .any(|fresh| fresh.kind == entry.kind && fresh.id == entry.id)
+            });
+        };
+        prune(&mut self.created);
+        prune(&mut self.adopted);
     }
 
     /// Whether the record knows nothing at all.
     pub fn is_empty(&self) -> bool {
-        self.created.is_empty() && self.rules.values().all(Vec::is_empty)
+        self.created.is_empty() && self.adopted.is_empty() && self.rules.values().all(Vec::is_empty)
     }
 }
 
@@ -150,6 +173,16 @@ mod tests {
         record.learn("app", "ada");
         record.learn("app", "ada");
         assert!(record.created.is_empty(), "a rule already owns it");
+    }
+
+    #[test]
+    fn an_adopted_resource_is_owned_without_a_marker_or_a_rule() {
+        let mut record = Ownership::default();
+        record.adopt("app", "bazarr");
+        record.adopt("app", "bazarr");
+        assert!(record.owns("app", "bazarr"));
+        assert_eq!(record.adopted.len(), 1, "adoption is idempotent");
+        assert!(record.created.is_empty());
     }
 
     #[test]

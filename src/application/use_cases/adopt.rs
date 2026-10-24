@@ -42,6 +42,8 @@ pub struct AdoptReport {
     pub skipped: usize,
     /// Resources the provider confirmed as stamped.
     pub adopted: usize,
+    /// The adopted resources, as `(kind, id)`, for the ownership record.
+    pub adopted_resources: Vec<(String, String)>,
     /// Resources the provider could not stamp, with its classification.
     pub failed: Vec<String>,
 }
@@ -116,12 +118,16 @@ pub async fn execute(
     }
 
     let mut adopted = 0;
+    let mut adopted_resources = Vec::new();
     let mut failed = Vec::new();
     if options.apply && !eligible.is_empty() {
         let result = provider.adopt(settings, &eligible).await?;
         for resource in &eligible {
             match result.adopted.iter().find(|entry| entry.id == resource.id) {
-                Some(entry) if entry.ok => adopted += 1,
+                Some(entry) if entry.ok => {
+                    adopted += 1;
+                    adopted_resources.push((resource.kind.clone(), resource.id.clone()));
+                }
                 Some(entry) => failed.push(format!("{}: {}", resource.id, describe_failure(entry))),
                 None => failed.push(format!("{}: the provider reported no result", resource.id)),
             }
@@ -137,6 +143,7 @@ pub async fn execute(
         conflicts,
         skipped,
         adopted,
+        adopted_resources,
         failed,
     })
 }

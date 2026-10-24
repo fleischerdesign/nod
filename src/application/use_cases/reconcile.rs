@@ -1011,6 +1011,22 @@ mod tests {
     }
 
     #[test]
+    fn an_adopted_resource_is_marked_owned_before_planning() {
+        let mut record = crate::domain::ownership::Ownership::default();
+        record.adopt("authentik.application", "bazarr");
+        let mut observed = vec![ObservedResource {
+            kind: "authentik.application".to_string(),
+            id: "bazarr".to_string(),
+            attributes: serde_json::json!({}),
+            owned: false,
+        }];
+
+        mark_owned(&record, &mut observed);
+
+        assert!(observed[0].owned, "the record is the evidence (ADR-040)");
+    }
+
+    #[test]
     fn a_derived_deletion_within_its_budget_is_approved() {
         let changes = vec![change_named(ChangeKind::Delete, "old", true, true)];
         let (approved, refused) = approve_declared(

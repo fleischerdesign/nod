@@ -12,11 +12,14 @@ use crate::application::use_cases::adopt::{self, AdoptOptions};
 use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
+use crate::infrastructure::state::provider_lock::ProviderLock;
+use crate::infrastructure::storage::provider_ownership::ProviderOwnershipStore;
 
 /// Runs one adoption pass and renders the report.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     provider: Option<&str>,
+    state_dir: &Path,
     command: Option<&Path>,
     settings_path: Option<&Path>,
     desired_path: Option<&Path>,
@@ -98,6 +101,14 @@ pub async fn execute(
             .unwrap_or(60),
     );
 
+    // A reconcile may run while an operator adopts; the lock keeps the two from
+    // rewriting the ownership record from different snapshots. An ad-hoc
+    // `--command` has no configured name to lock on, and is documented as such.
+    let _lock = match provider {
+        Some(name) => Some(ProviderLock::acquire(state_dir, name)?),
+        None => None,
+    };
+
     let report = adopt::execute(
         command_path,
         &settings,
@@ -110,6 +121,19 @@ pub async fn execute(
         timeout,
     )
     .await?;
+
+    // Adoption is evidence: the marker (where the kind has one) and the record.
+    // A corrupt record is a hard error — overwriting it would lose what the
+    // daemon recorded.
+    if apply && !report.adopted_resources.is_empty() {
+        let store = ProviderOwnershipStore::new(state_dir);
+        let mut record = store.load(&report.provider)?.unwrap_or_default();
+        record.provider = report.provider.clone();
+        for (kind, id) in &report.adopted_resources {
+            record.adopt(kind, id);
+        }
+        store.save(&record)?;
+    }
 
     let outcome = if !report.failed.is_empty() {
         "failed"
