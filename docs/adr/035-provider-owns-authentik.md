@@ -123,6 +123,20 @@ Each step removes its objects from the blueprint renderer, adds the kind to the
 provider's capabilities and to the fresh-database check. The blueprint set
 shrinks until only the credential is left.
 
+### 9. Seeds coexist with runtime accounts
+
+A user is a seed, not an inventory. The declaration decides which accounts the
+fleet **creates**; it never decides which accounts may exist. An account made in
+the interface, by enrollment, by an LDAP sync or as a service account is
+foreign: observed, never written, never deleted. A declared user that already
+exists is left alone and shows as unowned until `adopt` stamps the marker —
+adoption writes the marker and nothing else.
+
+Membership follows the same rule at the group level: `members = null` leaves a
+group's membership to the interface, an explicit list is enforced exactly. An
+operator who wants to add runtime accounts to a declared group chooses the
+first; choosing the second means the declaration owns the member set.
+
 ## Consequences
 
 - The directory blueprint (`01-rbac/users.yaml`) disappears; `enrollment.yaml`

@@ -340,6 +340,18 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_user_that_was_created_at_runtime_is_left_alone() {
+        // The declaration decides which accounts the fleet *creates*, never
+        // which accounts may exist: an account made in the interface, by
+        // enrollment or by an LDAP sync is foreign and is not re-created.
+        let observed = vec![user_resource(
+            &api_user("ada", "Ada", "ada@example.test", json!({})),
+            &marker(),
+        )];
+        assert!(plan(&[desired_user("ada")], &observed).is_empty());
+    }
+
+    #[test]
     fn users_are_planned_before_groups() {
         let mut group = resource("media", false);
         group.attributes["users"] = json!(["ada"]);
