@@ -567,6 +567,10 @@ fn adopt(request: &Value) -> Value {
         Ok(groups) => groups,
         Err(error) => return api_error(&error),
     };
+    let users = match client.users() {
+        Ok(users) => users,
+        Err(error) => return api_error(&error),
+    };
 
     let marker = Marker {
         key: settings.marker_key,
@@ -574,36 +578,75 @@ fn adopt(request: &Value) -> Value {
     };
     let mut adopted = Vec::new();
 
-    for resource in resources
-        .iter()
-        .filter(|resource| resource.kind == model::KIND_GROUP)
-    {
-        let Some(group) = groups.iter().find(|group| group.name == resource.id) else {
-            adopted.push(json!({
-                "id": resource.id,
-                "ok": false,
-                "message": "group not found",
-                "error": { "kind": "config", "message": "group not found" }
-            }));
-            continue;
-        };
+    for resource in &resources {
+        match resource.kind.as_str() {
+            model::KIND_GROUP => {
+                let Some(group) = groups.iter().find(|group| group.name == resource.id) else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "group not found",
+                        "error": { "kind": "config", "message": "group not found" }
+                    }));
+                    continue;
+                };
 
-        let attributes = marker.stamp(&group.attributes);
-        match client.patch_group(&group.pk, &attributes) {
-            Ok(()) => adopted.push(json!({
-                "id": resource.id,
-                "ok": true,
-                "message": ""
-            })),
-            Err(error) => adopted.push(json!({
+                let attributes = marker.stamp(&group.attributes);
+                match client.patch_group(&group.pk, &attributes) {
+                    Ok(()) => adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": ""
+                    })),
+                    Err(error) => adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": error.message(),
+                        "error": {
+                            "kind": error.kind(),
+                            "message": error.message(),
+                            "retry_after_secs": error.retry_after()
+                        }
+                    })),
+                }
+            }
+            model::KIND_USER => {
+                let Some(user) = users.iter().find(|user| user.username == resource.id) else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "user not found",
+                        "error": { "kind": "config", "message": "user not found" }
+                    }));
+                    continue;
+                };
+
+                // Adoption stamps the marker and nothing else: the profile and
+                // every other attribute stay exactly as the API returned them.
+                let attributes = marker.stamp(&user.attributes);
+                match client.patch_user(user.pk, &attributes) {
+                    Ok(()) => adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": ""
+                    })),
+                    Err(error) => adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": error.message(),
+                        "error": {
+                            "kind": error.kind(),
+                            "message": error.message(),
+                            "retry_after_secs": error.retry_after()
+                        }
+                    })),
+                }
+            }
+            other => adopted.push(json!({
                 "id": resource.id,
                 "ok": false,
-                "message": error.message(),
-                "error": {
-                    "kind": error.kind(),
-                    "message": error.message(),
-                    "retry_after_secs": error.retry_after()
-                }
+                "message": format!("unsupported kind: {other}"),
+                "error": { "kind": "protocol", "message": format!("unsupported kind: {other}") }
             })),
         }
     }

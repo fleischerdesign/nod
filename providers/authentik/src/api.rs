@@ -213,6 +213,16 @@ impl Authentik {
         self.write("DELETE", &url, serde_json::Value::Null)
     }
 
+    /// Writes the user's `attributes` object; the caller merges the marker.
+    pub fn patch_user(&self, pk: i64, attributes: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/core/users/{}/", self.base, pk);
+        self.write(
+            "PATCH",
+            &url,
+            serde_json::json!({ "attributes": attributes }),
+        )
+    }
+
     /// Creates a user with the seed profile and the ownership marker.
     pub fn create_user(
         &self,
