@@ -13,6 +13,7 @@ use crate::domain::config::CliOverrides;
 use crate::domain::errors::NodError;
 use crate::domain::provider::Condition;
 use crate::infrastructure::config::toml_config::{TomlConfigStore, TomlProvider};
+use crate::infrastructure::storage::provider_ownership::ProviderOwnershipStore;
 
 /// One provider's summary, or why it could not be summarised.
 struct Entry {
@@ -75,6 +76,7 @@ impl Entry {
 /// Summarises every declared provider, or one by name.
 pub async fn execute(
     provider: Option<&str>,
+    state_dir: &Path,
     json: bool,
     flake: &str,
     config: Option<&Path>,
@@ -90,7 +92,7 @@ pub async fn execute(
         if provider.is_some_and(|wanted| wanted != name.as_str()) {
             continue;
         }
-        entries.push(summarise(name, declaration).await);
+        entries.push(summarise(name, declaration, state_dir).await);
     }
 
     if entries.is_empty() {
@@ -158,7 +160,7 @@ pub async fn execute(
 }
 
 /// Runs one read-only reconcile and maps it to a summary line.
-async fn summarise(name: &str, declaration: &TomlProvider) -> Entry {
+async fn summarise(name: &str, declaration: &TomlProvider, state_dir: &Path) -> Entry {
     let Some(desired_path) = &declaration.desired else {
         return Entry::skipped(name, "no desired file declared; not scheduled");
     };
@@ -184,11 +186,18 @@ async fn summarise(name: &str, declaration: &TomlProvider) -> Entry {
     let policy = declaration.policy.clone().unwrap_or_default();
     let timeout = Duration::from_secs(declaration.timeout_secs.unwrap_or(60));
 
+    // Status is a read-only reconcile, and ownership is part of what it reports:
+    // without the record an adopted resource would read as unowned forever.
+    let ownership = match ProviderOwnershipStore::new(state_dir).load(name) {
+        Ok(record) => record.unwrap_or_default(),
+        Err(error) => return Entry::failed(name, error.to_string()),
+    };
+
     match reconcile::execute(
         &declaration.command,
         &settings,
         &desired,
-        &crate::domain::ownership::Ownership::default(),
+        &ownership,
         ReconcileOptions { apply: false },
         &policy,
         &declaration.env,

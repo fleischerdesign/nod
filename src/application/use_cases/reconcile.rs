@@ -336,6 +336,9 @@ pub async fn execute(
     // later run claim a foreign resource that happens to carry the id.
     let mut ownership = crate::domain::ownership::Ownership {
         provider: handshake.provider.clone(),
+        // An adoption is evidence that outlives this run: carry it over and let
+        // `prune` drop only what the provider no longer reports (ADR-040).
+        adopted: record.adopted.clone(),
         ..Default::default()
     };
     for entry in &derived {

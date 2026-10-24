@@ -550,12 +550,14 @@ async fn run(cli: Cli) -> Result<()> {
             }
             nod::config::options::ProviderCommands::Status {
                 provider,
+                state_dir,
                 json,
                 flake,
                 config,
             } => {
                 nod::commands::provider_status::execute(
                     provider.as_deref(),
+                    &state_dir,
                     json,
                     &flake,
                     config.as_deref(),
