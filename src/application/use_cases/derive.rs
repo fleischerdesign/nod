@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::domain::errors::NodError;
 use crate::domain::provider::{DesiredResource, ObservedResource};
 
-pub use crate::domain::desired::{parse_derive, DeriveRule, SCHEMA, Source, Template};
+pub use crate::domain::desired::{parse_derive, DeriveRule, Source, Template, SCHEMA};
 
 /// One expanded resource and where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -216,7 +216,8 @@ mod tests {
 
     #[test]
     fn an_inline_desired_state_is_a_value() {
-        let raw = r#"{"schema": 2, "providers": {"p": {"command": "/x", "desired": {"resources": []}}}}"#;
+        let raw =
+            r#"{"schema": 2, "providers": {"p": {"command": "/x", "desired": {"resources": []}}}}"#;
         let parsed: FlakeFleet = serde_json::from_str(raw).unwrap();
         assert!(matches!(
             parsed.providers.get("p").unwrap().desired,
@@ -264,7 +265,9 @@ mod tests {
         let mut providers = BTreeMap::new();
         let mut provider = provider();
         provider.command = PathBuf::from("/nix/store/x/bin/provider");
-        provider.desired = Some(DesiredSource::Path(PathBuf::from("/nix/store/y/desired.json")));
+        provider.desired = Some(DesiredSource::Path(PathBuf::from(
+            "/nix/store/y/desired.json",
+        )));
         providers.insert("example".to_string(), provider);
 
         let resolved = resolve_relative(providers, Some(Path::new("/etc/nod")));
@@ -272,7 +275,9 @@ mod tests {
         assert_eq!(provider.command, PathBuf::from("/nix/store/x/bin/provider"));
         assert_eq!(
             provider.desired,
-            Some(DesiredSource::Path(PathBuf::from("/nix/store/y/desired.json")))
+            Some(DesiredSource::Path(PathBuf::from(
+                "/nix/store/y/desired.json"
+            )))
         );
     }
 }

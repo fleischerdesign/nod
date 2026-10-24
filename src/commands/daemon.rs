@@ -218,9 +218,8 @@ async fn load_providers(
             continue;
         };
 
-        let desired = crate::infrastructure::config::fleet::resolve_desired(source).map_err(
-            |error| NodError::config(format!("{error} (provider {name})")),
-        )?;
+        let desired = crate::infrastructure::config::fleet::resolve_desired(source)
+            .map_err(|error| NodError::config(format!("{error} (provider {name})")))?;
 
         let settings = match &provider.settings {
             Some(value) => value.clone(),

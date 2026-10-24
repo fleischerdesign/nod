@@ -127,9 +127,9 @@ pub fn parse_value(value: Value) -> Result<Desired, NodError> {
         Value::Object(mut map) => {
             let schema = match map.remove("schema") {
                 None | Some(Value::Null) => 1,
-                Some(Value::Number(number)) => number
-                    .as_u64()
-                    .ok_or_else(|| NodError::config("desired state `schema` must be a positive integer"))?,
+                Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+                    NodError::config("desired state `schema` must be a positive integer")
+                })?,
                 Some(_) => {
                     return Err(NodError::config(
                         "desired state `schema` must be a positive integer",
@@ -201,8 +201,9 @@ impl Desired {
         map.insert("schema".to_string(), Value::from(SCHEMA));
         map.insert(
             "resources".to_string(),
-            serde_json::to_value(&self.resources)
-                .map_err(|error| NodError::config(format!("cannot serialise resources: {error}")))?,
+            serde_json::to_value(&self.resources).map_err(|error| {
+                NodError::config(format!("cannot serialise resources: {error}"))
+            })?,
         );
         map.insert(
             "absent".to_string(),
@@ -227,6 +228,8 @@ impl Serialize for Desired {
     where
         S: serde::Serializer,
     {
-        self.to_json().map_err(serde::ser::Error::custom)?.serialize(serializer)
+        self.to_json()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
     }
 }
