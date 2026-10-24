@@ -5,7 +5,7 @@
 //! provider only writes its own marker. Nothing is inferred from comments,
 //! labels or names: the declaration and the observed attributes decide.
 
-use crate::domain::provider::{matches_expected, DesiredResource, ObservedResource};
+use crate::domain::provider::{DesiredResource, ObservedResource};
 
 /// What the core decided about one observed resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,20 +58,36 @@ pub fn differences(current: &ObservedResource, want: &DesiredResource) -> Vec<St
 
 /// Decides what may happen to every observed resource.
 ///
-/// Order matters: ownership first, then the declaration, then the comparison.
-pub fn decide(observed: &[ObservedResource], desired: &[DesiredResource]) -> Vec<Candidate> {
+/// The provider's plan is the authority on whether a declaration is already
+/// satisfied: a resource the provider would not change is eligible even when
+/// its attributes differ, because a seed's profile is history and not state.
+/// Ownership and the declaration decide the rest.
+pub fn decide(
+    observed: &[ObservedResource],
+    desired: &[DesiredResource],
+    changed: &[(String, String)],
+) -> Vec<Candidate> {
     observed
         .iter()
         .map(|resource| {
             let decision = if resource.owned {
                 Decision::AlreadyOwned
             } else {
-                match desired.iter().find(|want| want.id == resource.id) {
+                match desired
+                    .iter()
+                    .find(|want| want.kind == resource.kind && want.id == resource.id)
+                {
                     None => Decision::Undeclared,
-                    Some(want) if matches_expected(resource, want) => Decision::Eligible,
-                    Some(want) => Decision::Conflict {
-                        differences: differences(resource, want),
-                    },
+                    Some(want)
+                        if changed
+                            .iter()
+                            .any(|(kind, id)| kind == &want.kind && id == &want.id) =>
+                    {
+                        Decision::Conflict {
+                            differences: differences(resource, want),
+                        }
+                    }
+                    Some(_) => Decision::Eligible,
                 }
             };
             Candidate {
@@ -82,19 +98,27 @@ pub fn decide(observed: &[ObservedResource], desired: &[DesiredResource]) -> Vec
         .collect()
 }
 
-/// Declared resources that exist and match but do not carry the marker.
+/// Declared resources that exist, match and do not carry the marker.
 ///
 /// This is the number an operator needs during onboarding: `0` means the zone
 /// is both correct and owned; anything else means drift correction is not
 /// active for those records yet.
-pub fn unowned(observed: &[ObservedResource], desired: &[DesiredResource]) -> usize {
+pub fn unowned(
+    observed: &[ObservedResource],
+    desired: &[DesiredResource],
+    changed: &[(String, String)],
+) -> usize {
     observed
         .iter()
         .filter(|resource| {
             !resource.owned
-                && desired
-                    .iter()
-                    .any(|want| want.id == resource.id && matches_expected(resource, want))
+                && desired.iter().any(|want| {
+                    want.kind == resource.kind
+                        && want.id == resource.id
+                        && !changed
+                            .iter()
+                            .any(|(kind, id)| kind == &want.kind && id == &want.id)
+                })
         })
         .count()
 }
@@ -126,6 +150,7 @@ mod tests {
         let candidates = decide(
             &[observed("A:web", "1.2.3.4", true)],
             &[desired("A:web", "1.2.3.4")],
+            &[],
         );
         assert_eq!(candidates[0].decision, Decision::AlreadyOwned);
     }
@@ -135,15 +160,28 @@ mod tests {
         let candidates = decide(
             &[observed("A:web", "1.2.3.4", false)],
             &[desired("A:web", "1.2.3.4")],
+            &[],
         );
         assert_eq!(candidates[0].decision, Decision::Eligible);
     }
 
     #[test]
-    fn a_declared_different_resource_is_a_conflict_with_its_diff() {
+    fn a_resource_the_provider_would_not_change_is_eligible_even_when_attributes_differ() {
+        // A seed's profile is history, not state: the plan is the authority.
         let candidates = decide(
             &[observed("A:web", "1.2.3.4", false)],
             &[desired("A:web", "5.6.7.8")],
+            &[],
+        );
+        assert_eq!(candidates[0].decision, Decision::Eligible);
+    }
+
+    #[test]
+    fn a_resource_the_provider_would_change_is_a_conflict_with_its_diff() {
+        let candidates = decide(
+            &[observed("A:web", "1.2.3.4", false)],
+            &[desired("A:web", "5.6.7.8")],
+            &[("dns.record".to_string(), "A:web".to_string())],
         );
         let Decision::Conflict { differences } = &candidates[0].decision else {
             panic!("expected a conflict, got {:?}", candidates[0].decision);
@@ -156,12 +194,12 @@ mod tests {
 
     #[test]
     fn an_undeclared_resource_is_never_touched() {
-        let candidates = decide(&[observed("A:other", "1.2.3.4", false)], &[]);
+        let candidates = decide(&[observed("A:other", "1.2.3.4", false)], &[], &[]);
         assert_eq!(candidates[0].decision, Decision::Undeclared);
     }
 
     #[test]
-    fn unowned_counts_only_declared_matching_foreign_resources() {
+    fn unowned_counts_only_declared_foreign_resources_the_provider_would_not_change() {
         let observed = vec![
             observed("A:web", "1.2.3.4", false),
             observed("A:owned", "1.2.3.4", true),
@@ -173,7 +211,8 @@ mod tests {
             desired("A:owned", "1.2.3.4"),
             desired("A:drift", "2.2.2.2"),
         ];
-        assert_eq!(unowned(&observed, &desired), 1);
+        let changed = [("dns.record".to_string(), "A:drift".to_string())];
+        assert_eq!(unowned(&observed, &desired, &changed), 1);
     }
 
     #[test]

@@ -86,7 +86,17 @@ pub async fn execute(
 
     let observed = provider.observe(settings).await?;
     check_capabilities(&handshake, &observed.resources, &[])?;
-    let candidates = decide(&observed.resources, desired);
+    // The provider's plan is the authority on whether a declaration is already
+    // satisfied; attribute equality is not, because a seed's profile is history.
+    let plan = provider
+        .plan(settings, desired, &observed.resources)
+        .await?;
+    let changed: Vec<(String, String)> = plan
+        .changes
+        .iter()
+        .map(|change| (change.resource.kind.clone(), change.resource.id.clone()))
+        .collect();
+    let candidates = decide(&observed.resources, desired, &changed);
 
     let mut eligible = Vec::new();
     let mut conflicts = Vec::new();
@@ -122,7 +132,7 @@ pub async fn execute(
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
         observed: observed.resources.len(),
-        unowned: crate::domain::adoption::unowned(&observed.resources, desired),
+        unowned: crate::domain::adoption::unowned(&observed.resources, desired, &changed),
         eligible: eligible.len(),
         conflicts,
         skipped,

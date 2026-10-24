@@ -218,6 +218,9 @@ while IFS= read -r line; do
     *'"op":"observe"'*)
       echo '{"resources":[{"kind":"dns.record","id":"a","attributes":{"content":"1","record_id":"cf-1"},"owned":false}],"conditions":[]}'
       ;;
+    *'"op":"plan"'*)
+      echo '{"changes":[],"conditions":[]}'
+      ;;
     *'"op":"adopt"'*)
       touch @MARKER@
       echo '{"adopted":[{"id":"a","ok":true}],"conditions":[]}'
@@ -283,6 +286,9 @@ while IFS= read -r line; do
       ;;
     *'"op":"observe"'*)
       echo '{"resources":[{"kind":"dns.record","id":"a","attributes":{"content":"2","record_id":"cf-1"},"owned":false}],"conditions":[]}'
+      ;;
+    *'"op":"plan"'*)
+      echo '{"changes":[{"kind":"update","owned":true,"destructive":false,"resource":{"kind":"dns.record","id":"a"}}],"conditions":[]}'
       ;;
     *'"op":"adopt"'*)
       touch @MARKER@

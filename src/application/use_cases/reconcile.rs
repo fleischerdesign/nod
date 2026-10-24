@@ -12,8 +12,8 @@ use super::derive;
 use crate::domain::errors::NodError;
 use crate::domain::policy::Policy;
 use crate::domain::provider::{
-    matches_expected, AppliedChange, Change, ChangeKind, Condition, DesiredResource, Handshake,
-    InverseChange, ObservedResource,
+    AppliedChange, Change, ChangeKind, Condition, DesiredResource, Handshake, InverseChange,
+    ObservedResource,
 };
 use crate::infrastructure::provider::process::ProcessProvider;
 
@@ -220,6 +220,11 @@ pub async fn execute(
         .await?;
     check_capabilities(&handshake, &[], &plan.changes)?;
     merge_conditions(&mut conditions, &plan.conditions);
+    let changed_before: Vec<(String, String)> = plan
+        .changes
+        .iter()
+        .map(|change| (change.resource.kind.clone(), change.resource.id.clone()))
+        .collect();
 
     let declared = desired.declared();
     check_absent(&desired.absent, &observed.resources, &plan.changes)?;
@@ -256,13 +261,19 @@ pub async fn execute(
         crate::domain::provider::invert(&succeeded, &observed.resources, &after.resources)
     };
 
+    // Verification is the provider's own plan against the post-activation
+    // observation, not an attribute comparison in the core: a seed's profile is
+    // history, and only the provider knows what its declaration enforces.
+    let after_plan = provider
+        .plan(settings, &effective, &after.resources)
+        .await?;
     let verified = effective
         .iter()
         .filter(|want| {
-            after
-                .resources
+            !after_plan
+                .changes
                 .iter()
-                .any(|resource| resource.id == want.id && matches_expected(resource, want))
+                .any(|change| change.resource.kind == want.kind && change.resource.id == want.id)
         })
         .count();
 
@@ -287,7 +298,7 @@ pub async fn execute(
         provider: handshake.provider.clone(),
         version: handshake.version.clone(),
         observed: observed.resources.len(),
-        unowned: crate::domain::adoption::unowned(&observed.resources, &effective),
+        unowned: crate::domain::adoption::unowned(&observed.resources, &effective, &changed_before),
         desired: effective.len(),
         derived: derived.len(),
         planned: plan.changes.len(),
