@@ -24,12 +24,13 @@ const PROTOCOL: u32 = 1;
 /// Deletion is not listed: `apply` only deletes when the core's policy allows
 /// it, and then the missing `authentik_core.delete_group` is reported with the
 /// change that needed it.
-const REQUIRED_PERMISSIONS: [&str; 5] = [
+const REQUIRED_PERMISSIONS: [&str; 6] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.change_group",
     "authentik_core.add_group",
     "authentik_core.add_user",
+    "authentik_core.change_user",
 ];
 
 fn main() {

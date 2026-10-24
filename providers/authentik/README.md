@@ -99,6 +99,7 @@ The manifest and the handshake name what the token must be allowed to do:
 | `authentik_core.change_group` | `update`, `adopt` |
 | `authentik_core.add_group` | `create` |
 | `authentik_core.add_user` | `create` of a user |
+| `authentik_core.change_user` | `adopt` of a user (the marker) |
 | `authentik_core.delete_group` | `delete`, only when the core's policy allows it |
 
 `observe` checks the two read permissions by using them: a token without

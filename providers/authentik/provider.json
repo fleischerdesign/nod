@@ -9,7 +9,8 @@
     "authentik_core.view_user",
     "authentik_core.change_group",
     "authentik_core.add_group",
-    "authentik_core.add_user"
+    "authentik_core.add_user",
+    "authentik_core.change_user"
   ],
   "ownership": "marker",
   "description": "Authentik directory: users and groups, bounded by the core's deletion policy"
