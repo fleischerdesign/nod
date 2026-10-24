@@ -42,7 +42,7 @@ pub struct ReconcileReport {
     /// The derived resources with their origin, for the plan display.
     pub derived_resources: Vec<derive::Derived>,
     /// The derived set this run declared, for the next run's budget.
-    pub derivations: crate::domain::derivation::Derivations,
+    pub ownership: crate::domain::ownership::Ownership,
     /// Changes the provider proposed.
     pub planned: usize,
     /// Changes the policy approved.
@@ -182,6 +182,43 @@ pub fn approve_declared(
     (approved, refused)
 }
 
+/// Marks recorded derivations as owned (ADR-037).
+///
+/// A provider reports the marker it can see; a kind without one reports
+/// `owned: false` even for a resource this fleet created. The record is the
+/// core's evidence, so the core applies it before planning — where the provider
+/// needs it to permit an update or a delete — and before reporting `unowned`.
+fn mark_owned(record: &crate::domain::ownership::Ownership, observed: &mut [ObservedResource]) {
+    for resource in observed {
+        if record.owns(&resource.kind, &resource.id) {
+            resource.owned = true;
+        }
+    }
+}
+
+/// Rejects a resource that is both derived and declared absent.
+///
+/// The two instructions contradict each other: the rule asks for the resource
+/// on every run, the tombstone asks the provider to remove it. Failing here is
+/// the only honest answer.
+fn check_not_also_absent(
+    absent: &[DesiredResource],
+    derived: &[derive::Derived],
+) -> Result<(), NodError> {
+    for entry in derived {
+        if absent
+            .iter()
+            .any(|want| want.kind == entry.resource.kind && want.id == entry.resource.id)
+        {
+            return Err(NodError::config(format!(
+                "derivation `{}` produces {} {}, which the declaration also marks absent",
+                entry.rule, entry.resource.kind, entry.resource.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Verifies that every declared absence is satisfiable.
 ///
 /// A foreign resource cannot be deleted by this fleet, and a provider that
@@ -227,7 +264,7 @@ pub async fn execute(
     command: &Path,
     settings: &serde_json::Value,
     desired: &Desired,
-    record: &crate::domain::derivation::Derivations,
+    record: &crate::domain::ownership::Ownership,
     options: ReconcileOptions,
     policy: &Policy,
     env: &[String],
@@ -235,30 +272,20 @@ pub async fn execute(
 ) -> Result<ReconcileReport, NodError> {
     let (mut provider, handshake) = ProcessProvider::open(command, timeout, env).await?;
 
-    let observed = provider.observe(settings).await?;
+    let mut observed = provider.observe(settings).await?;
     check_capabilities(&handshake, &observed.resources, &[])?;
+    // A kind without a marker reports `owned: false` even for a resource this
+    // fleet created. The record is the core's evidence, and it applies before
+    // planning so the provider sees the resource as owned (ADR-037).
+    mark_owned(record, &mut observed.resources);
     let mut conditions = Vec::new();
     merge_conditions(&mut conditions, &observed.conditions);
     // A derivation reads a successful observation. A source or attribute that
     // is missing is a configuration error, never an empty set (ADR-036).
     let derived = derive::expand(&desired.derive, &observed.resources, &desired.resources)?;
+    check_not_also_absent(&desired.absent, &derived)?;
     let mut effective = desired.resources.clone();
     effective.extend(derived.iter().map(|entry| entry.resource.clone()));
-
-    // What this declaration derives, for the next run's deletion budget. It is
-    // the declared set, not the applied one: a failed create has no delete to
-    // authorize, and the record must follow the rule, not the API's answer.
-    let mut derivations = crate::domain::derivation::Derivations {
-        provider: handshake.provider.clone(),
-        ..Default::default()
-    };
-    for entry in &derived {
-        derivations
-            .rules
-            .entry(entry.rule.clone())
-            .or_default()
-            .push(entry.resource.id.clone());
-    }
 
     let plan = provider
         .plan(settings, &effective, &observed.resources)
@@ -277,6 +304,7 @@ pub async fn execute(
 
     let mut applied = 0;
     let mut failed = Vec::new();
+    let mut failed_resources: Vec<(String, String)> = Vec::new();
     let mut succeeded: Vec<Change> = Vec::new();
     if options.apply && !approved.is_empty() {
         let result = provider.apply(settings, &approved).await?;
@@ -286,20 +314,105 @@ pub async fn execute(
         // A change with no result at all is unproven, and unproven is not done.
         for change in &approved {
             let id = &change.resource.id;
+            let key = (change.resource.kind.clone(), id.clone());
             match result.applied.iter().find(|entry| &entry.id == id) {
                 Some(entry) if entry.ok => succeeded.push(change.clone()),
-                Some(entry) => failed.push(format!("{id}: {}", describe_failure(entry))),
-                None => failed.push(format!("{id}: the provider reported no result")),
+                Some(entry) => {
+                    failed.push(format!("{id}: {}", describe_failure(entry)));
+                    failed_resources.push(key);
+                }
+                None => {
+                    failed.push(format!("{id}: the provider reported no result"));
+                    failed_resources.push(key);
+                }
             }
         }
         applied = succeeded.len();
     }
 
+    // The record is the next run's budget and this fleet's ownership evidence, so
+    // it holds what exists: the declared set minus every change that failed. A
+    // failed create is not evidence of ownership, and recording it would let a
+    // later run claim a foreign resource that happens to carry the id.
+    let mut ownership = crate::domain::ownership::Ownership {
+        provider: handshake.provider.clone(),
+        ..Default::default()
+    };
+    for entry in &derived {
+        if failed_resources
+            .iter()
+            .any(|(kind, id)| kind == &entry.resource.kind && id == &entry.resource.id)
+        {
+            continue;
+        }
+        ownership.rules.entry(entry.rule.clone()).or_default().push(
+            crate::domain::ownership::OwnedId {
+                kind: entry.resource.kind.clone(),
+                id: entry.resource.id.clone(),
+            },
+        );
+    }
+
+    // A create proves ownership even without a rule: a marker-less kind cannot
+    // carry that proof itself (ADR-037). An update is no evidence — it touched a
+    // resource the fleet already owned.
+    let created: Vec<crate::domain::ownership::OwnedId> = succeeded
+        .iter()
+        .filter(|change| change.kind == ChangeKind::Create)
+        .map(|change| {
+            crate::domain::ownership::OwnedId::new(&change.resource.kind, &change.resource.id)
+        })
+        .collect();
+    for entry in &created {
+        let derived_entry = derived.iter().any(|candidate| {
+            candidate.resource.kind == entry.kind && candidate.resource.id == entry.id
+        });
+        if !derived_entry {
+            ownership.learn(&entry.kind, &entry.id);
+        }
+    }
+
     // Verification is a second observation, never "the API said 200". It is
     // also the only place that sees the provider's own id for a created
     // resource, which the recorded undo needs.
-    let after = provider.observe(settings).await?;
+    let mut after = provider.observe(settings).await?;
+    mark_owned(&ownership, &mut after.resources);
     merge_conditions(&mut conditions, &after.conditions);
+
+    // A rule that disappeared keeps its entries while the provider still reports
+    // the resource: dropping them would make its orphans foreign and therefore
+    // undeletable, which is the one state no operator can repair (ADR-037 §3).
+    for (rule, known) in &record.rules {
+        if desired.derive.iter().any(|current| &current.id == rule) {
+            continue;
+        }
+        let kept: Vec<_> = known
+            .iter()
+            .filter(|entry| {
+                after
+                    .resources
+                    .iter()
+                    .any(|resource| resource.kind == entry.kind && resource.id == entry.id)
+            })
+            .cloned()
+            .collect();
+        if !kept.is_empty() {
+            ownership.rules.insert(rule.clone(), kept);
+        }
+    }
+
+    // The ledger follows reality in one direction only: what the provider no
+    // longer reports is not owned any more. A create from this run stays even
+    // before the API lists it — pruning it would make the resource foreign.
+    ownership.prune(
+        |kind, id| {
+            after
+                .resources
+                .iter()
+                .any(|resource| resource.kind == kind && resource.id == id)
+        },
+        &created,
+    );
     let inverse = if succeeded.is_empty() {
         Vec::new()
     } else {
@@ -347,7 +460,7 @@ pub async fn execute(
         desired: effective.len(),
         derived: derived.len(),
         derived_resources: derived.clone(),
-        derivations,
+        ownership,
         planned: plan.changes.len(),
         approved,
         refused,
@@ -538,7 +651,7 @@ pub struct Desired {
 
 impl Desired {
     /// The deletions this declaration authorizes, explicit and derived.
-    fn declared(&self, record: &crate::domain::derivation::Derivations) -> Declared {
+    fn declared(&self, record: &crate::domain::ownership::Ownership) -> Declared {
         Declared {
             entries: self.absent.clone(),
             derived: self
@@ -546,7 +659,6 @@ impl Desired {
                 .iter()
                 .map(|rule| DerivedBudget {
                     rule: rule.id.clone(),
-                    kind: rule.template.kind.clone(),
                     ids: record.rule(&rule.id).to_vec(),
                     max_deletions: rule.max_deletions,
                 })
@@ -568,8 +680,7 @@ pub struct Declared {
 #[derive(Debug, Clone)]
 struct DerivedBudget {
     rule: String,
-    kind: String,
-    ids: Vec<String>,
+    ids: Vec<crate::domain::ownership::OwnedId>,
     max_deletions: usize,
 }
 
@@ -585,7 +696,12 @@ impl Declared {
     fn derived_budget(&self, kind: &str, id: &str) -> Option<(&str, usize)> {
         self.derived
             .iter()
-            .find(|budget| budget.kind == kind && budget.ids.iter().any(|known| known == id))
+            .find(|budget| {
+                budget
+                    .ids
+                    .iter()
+                    .any(|known| known.kind == kind && known.id == id)
+            })
             .map(|budget| (budget.rule.as_str(), budget.max_deletions))
     }
 
@@ -885,8 +1001,10 @@ mod tests {
             entries: Vec::new(),
             derived: vec![DerivedBudget {
                 rule: rule.to_string(),
-                kind: kind.to_string(),
-                ids: vec![id.to_string()],
+                ids: vec![crate::domain::ownership::OwnedId {
+                    kind: kind.to_string(),
+                    id: id.to_string(),
+                }],
                 max_deletions,
             }],
         }
@@ -959,10 +1077,14 @@ mod tests {
                 max_deletions: 1,
             }],
         };
-        let mut record = crate::domain::derivation::Derivations::default();
-        record
-            .rules
-            .insert("per-member".to_string(), vec!["old".to_string()]);
+        let mut record = crate::domain::ownership::Ownership::default();
+        record.rules.insert(
+            "per-member".to_string(),
+            vec![crate::domain::ownership::OwnedId {
+                kind: "dns.record".to_string(),
+                id: "old".to_string(),
+            }],
+        );
 
         let declared = desired.declared(&record);
         assert!(!declared.is_explicit("dns.record", "old"));

@@ -1,20 +1,21 @@
-//! JSON storage for derived-resource records (ADR-036).
+//! JSON storage for the ownership record (ADR-037).
 //!
 //! The record lives next to the rollback plan under the reconciler's state
 //! directory. It is not a second declaration: if it is missing or unreadable,
-//! derived deletions degrade to implicit ones, which the global cap guards.
+//! marker-less resources become foreign and are reported as unowned, which is
+//! the safe direction.
 
 use std::path::{Path, PathBuf};
 
-use crate::domain::derivation::Derivations;
 use crate::domain::errors::NodError;
+use crate::domain::ownership::Ownership;
 
 /// Stores one record per provider under `<state_dir>/providers/`.
-pub struct ProviderDerivationStore {
+pub struct ProviderOwnershipStore {
     root: PathBuf,
 }
 
-impl ProviderDerivationStore {
+impl ProviderOwnershipStore {
     /// Builds a store rooted at `state_dir`.
     pub fn new(state_dir: &Path) -> Self {
         Self {
@@ -30,19 +31,19 @@ impl ProviderDerivationStore {
             });
         if !valid {
             return Err(NodError::config(format!(
-                "invalid provider name `{provider}` for the derivation store"
+                "invalid provider name `{provider}` for the ownership store"
             )));
         }
-        Ok(self.root.join(format!("{provider}.derivations.json")))
+        Ok(self.root.join(format!("{provider}.ownership.json")))
     }
 
-    /// Records `derivations`, replacing any previous record for the provider.
-    pub fn save(&self, derivations: &Derivations) -> Result<(), NodError> {
-        let path = self.path(&derivations.provider)?;
+    /// Records `ownership`, replacing any previous record for the provider.
+    pub fn save(&self, ownership: &Ownership) -> Result<(), NodError> {
+        let path = self.path(&ownership.provider)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 NodError::config(format!(
-                    "cannot create derivation directory {}: {error}",
+                    "cannot create ownership directory {}: {error}",
                     parent.display()
                 ))
             })?;
@@ -53,11 +54,11 @@ impl ProviderDerivationStore {
             }
         }
 
-        let raw = serde_json::to_vec_pretty(derivations)
-            .map_err(|error| NodError::config(format!("cannot serialise derivations: {error}")))?;
+        let raw = serde_json::to_vec_pretty(ownership)
+            .map_err(|error| NodError::config(format!("cannot serialise ownership: {error}")))?;
         std::fs::write(&path, raw).map_err(|error| {
             NodError::config(format!(
-                "cannot write derivations {}: {error}",
+                "cannot write ownership {}: {error}",
                 path.display()
             ))
         })?;
@@ -72,22 +73,22 @@ impl ProviderDerivationStore {
     }
 
     /// Reads the record for `provider`, when one was written.
-    pub fn load(&self, provider: &str) -> Result<Option<Derivations>, NodError> {
+    pub fn load(&self, provider: &str) -> Result<Option<Ownership>, NodError> {
         let path = self.path(provider)?;
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(NodError::config(format!(
-                    "cannot read derivations {}: {error}",
+                    "cannot read ownership {}: {error}",
                     path.display()
                 )))
             }
         };
-        let derivations: Derivations = serde_json::from_str(&raw).map_err(|error| {
-            NodError::config(format!("invalid derivations {}: {error}", path.display()))
+        let ownership: Ownership = serde_json::from_str(&raw).map_err(|error| {
+            NodError::config(format!("invalid ownership {}: {error}", path.display()))
         })?;
-        Ok(Some(derivations))
+        Ok(Some(ownership))
     }
 
     /// Removes the record for `provider`.
@@ -97,7 +98,7 @@ impl ProviderDerivationStore {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(NodError::config(format!(
-                "cannot remove derivations {}: {error}",
+                "cannot remove ownership {}: {error}",
                 path.display()
             ))),
         }
@@ -107,27 +108,32 @@ impl ProviderDerivationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ownership::OwnedId;
 
-    fn record(provider: &str) -> Derivations {
-        let mut record = Derivations {
+    fn record(provider: &str) -> Ownership {
+        let mut record = Ownership {
             provider: provider.to_string(),
-            ..Derivations::default()
+            ..Ownership::default()
         };
-        record
-            .rules
-            .insert("per-member".to_string(), vec!["ada".to_string()]);
+        record.rules.insert(
+            "per-member".to_string(),
+            vec![OwnedId::new("authentik.group", "ada")],
+        );
+        record.learn("authentik.application", "static");
         record
     }
 
     #[test]
     fn a_record_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ProviderDerivationStore::new(dir.path());
+        let store = ProviderOwnershipStore::new(dir.path());
         store.save(&record("authentik")).unwrap();
 
         let loaded = store.load("authentik").unwrap().expect("recorded");
         assert_eq!(loaded.provider, "authentik");
-        assert!(loaded.contains("per-member", "ada"));
+        assert!(loaded.contains("per-member", "authentik.group", "ada"));
+        assert!(!loaded.contains("per-member", "authentik.group", "zoe"));
+        assert!(loaded.owns("authentik.application", "static"));
 
         store.clear("authentik").unwrap();
         assert!(store.load("authentik").unwrap().is_none());
@@ -136,7 +142,7 @@ mod tests {
     #[test]
     fn a_name_that_could_escape_the_root_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ProviderDerivationStore::new(dir.path());
+        let store = ProviderOwnershipStore::new(dir.path());
         assert!(store.load("../etc/passwd").is_err());
         assert!(store.load("").is_err());
     }

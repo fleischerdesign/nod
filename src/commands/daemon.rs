@@ -27,7 +27,7 @@ use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::state::provider_lock::ProviderLock;
-use crate::infrastructure::storage::provider_derivations::ProviderDerivationStore;
+use crate::infrastructure::storage::provider_ownership::ProviderOwnershipStore;
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs reconciliation cycles until the process is stopped.
@@ -273,8 +273,8 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
             continue;
         };
 
-        let derivations = ProviderDerivationStore::new(state_dir);
-        let record = derivations
+        let ownership = ProviderOwnershipStore::new(state_dir);
+        let record = ownership
             .load(&entry.name)
             .ok()
             .flatten()
@@ -322,9 +322,9 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
                 // failure only degrades to implicit deletes, which the global
                 // cap guards, so it is a warning, not a cycle failure.
                 if let Err(error) = {
-                    let mut record = report.derivations.clone();
+                    let mut record = report.ownership.clone();
                     record.provider = entry.name.clone();
-                    derivations.save(&record)
+                    ownership.save(&record)
                 } {
                     tracing::warn!(
                         provider = %entry.name,

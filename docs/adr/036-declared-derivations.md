@@ -116,11 +116,13 @@ by the rule — but it was not reviewed individually, so it is bounded:
 - The core records the derived set per provider and rule in its state after a
   successful apply. A delete whose id is in that record is a derived deletion;
   every other delete stays **implicit** and counts against the global cap
-  (ADR-034).
+  (ADR-034). The same record also carries ownership for kinds without a marker
+  (ADR-037).
 - Removing a rule from the declaration does not delete its resources: they stop
   being derived and become implicit deletions under the global cap.
-- A lost or corrupt derivation record degrades to "implicit" — safe and
-  cap-protected — never to "delete everything".
+- A lost or corrupt record degrades to "implicit" and "foreign": derived
+  deletions become cap-protected, and a marker-less resource is no longer owned
+  — safe and loud, never "delete everything" and never an unproven claim.
 
 ### 6. Schema version, so skew is loud
 

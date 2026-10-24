@@ -11,7 +11,7 @@ use std::time::Duration;
 use nod::application::use_cases::adopt::{execute as adopt, AdoptOptions};
 use nod::application::use_cases::derive::{DeriveRule, Source, Template};
 use nod::application::use_cases::reconcile::{execute, rollback, Desired, ReconcileOptions};
-use nod::domain::derivation::Derivations;
+use nod::domain::ownership::{OwnedId, Ownership};
 use nod::domain::policy::Policy;
 use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, RollbackPlan};
 
@@ -75,7 +75,7 @@ async fn a_half_applied_plan_records_only_what_happened() {
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a", "b"]),
-        &Derivations::default(),
+        &Ownership::default(),
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -129,7 +129,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a"]),
-        &Derivations::default(),
+        &Ownership::default(),
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -396,7 +396,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a"]),
-        &Derivations::default(),
+        &Ownership::default(),
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -430,7 +430,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &desired(&["a"]),
-        &Derivations::default(),
+        &Ownership::default(),
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -494,7 +494,7 @@ done
         Path::new(&path),
         &serde_json::json!({}),
         &declaration,
-        &Derivations::default(),
+        &Ownership::default(),
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -507,7 +507,7 @@ done
     assert!(request.contains("per-ada"), "{request}");
     assert!(request.contains("per-zoe"), "{request}");
     assert_eq!(report.derived, 2, "both members materialise");
-    assert_eq!(report.derivations.rule("per-member").len(), 2);
+    assert_eq!(report.ownership.rule("per-member").len(), 2);
     assert!(
         report
             .derived_resources
@@ -516,6 +516,98 @@ done
         "{:?}",
         report.derived_resources
     );
+}
+
+/// ADR-037: a kind without a marker is owned by the record, not by the object.
+///
+/// The provider reports `owned: false` because it has no marker to show. The
+/// core must still hand it an owned resource: an unowned update is refused by
+/// the core itself, so without the record a derived kind could never converge.
+#[tokio::test]
+async fn a_recorded_derivation_is_owned_without_a_marker() {
+    let _guard = SERIAL.lock().await;
+    let work = tempfile::tempdir().unwrap();
+    let requests = work.path().join("plan.json");
+    let (_dir, path) = script(
+        r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":[],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[{"kind":"authentik.group","id":"ai-users","attributes":{"users":["ada"]},"owned":true},{"kind":"authentik.application","id":"app-ada","attributes":{},"owned":false}],"conditions":[]}'
+      ;;
+    *'"op":"plan"'*)
+      printf '%s\n' "$line" > @REQUESTS@
+      case "$line" in
+        *'"kind":"authentik.application","id":"app-ada","attributes":{},"owned":true'*)
+          echo '{"changes":[],"conditions":[]}'
+          ;;
+        *)
+          # No marker and no record: the core must not be able to get here.
+          echo '{"changes":[{"kind":"update","owned":false,"destructive":false,"resource":{"kind":"authentik.application","id":"app-ada","attributes":{}}}],"conditions":[]}'
+          ;;
+      esac
+      ;;
+  esac
+done
+"#
+        .replace("@REQUESTS@", requests.to_str().unwrap()),
+    );
+
+    let declaration = Desired {
+        resources: Vec::new(),
+        absent: Vec::new(),
+        derive: vec![DeriveRule {
+            id: "per-member".to_string(),
+            from: Source {
+                kind: "authentik.group".to_string(),
+                id: "ai-users".to_string(),
+                attribute: "users".to_string(),
+            },
+            template: Template {
+                kind: "authentik.application".to_string(),
+                id: "app-{member}".to_string(),
+                attributes: serde_json::json!({}),
+            },
+            max_deletions: 0,
+        }],
+    };
+    let mut record = Ownership::default();
+    record.rules.insert(
+        "per-member".to_string(),
+        vec![OwnedId {
+            kind: "authentik.application".to_string(),
+            id: "app-ada".to_string(),
+        }],
+    );
+
+    let report = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &declaration,
+        &record,
+        ReconcileOptions { apply: false },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a recorded derivation must reconcile");
+
+    assert_eq!(report.planned, 0, "the provider must see a satisfied set");
+    assert_eq!(report.unowned, 0, "the record is the ownership evidence");
+    assert_eq!(report.verified, 1);
+
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&requests).unwrap()).unwrap();
+    let observed = request["observed"].as_array().expect("observed list");
+    let application = observed
+        .iter()
+        .find(|resource| resource["id"] == "app-ada")
+        .expect("the application is observed");
+    assert_eq!(application["owned"], true, "the core owns the record");
 }
 
 #[tokio::test]
@@ -544,10 +636,14 @@ done
         absent: Vec::new(),
         derive: vec![deriving_rule(0)],
     };
-    let mut record = Derivations::default();
-    record
-        .rules
-        .insert("per-member".to_string(), vec!["per-ada".to_string()]);
+    let mut record = Ownership::default();
+    record.rules.insert(
+        "per-member".to_string(),
+        vec![nod::domain::ownership::OwnedId {
+            kind: "authentik.group".to_string(),
+            id: "per-ada".to_string(),
+        }],
+    );
 
     let report = execute(
         Path::new(&path),
