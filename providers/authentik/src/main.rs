@@ -26,7 +26,7 @@ const PROTOCOL: u32 = 1;
 /// reported with the change that needed it. Applications are fully managed —
 /// created and deleted by the fleet — so their deletion permission is part of
 /// the required set.
-const REQUIRED_PERMISSIONS: [&str; 11] = [
+const REQUIRED_PERMISSIONS: [&str; 16] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.view_application",
@@ -38,6 +38,11 @@ const REQUIRED_PERMISSIONS: [&str; 11] = [
     "authentik_core.add_application",
     "authentik_core.change_application",
     "authentik_core.delete_application",
+    "authentik_providers_proxy.view_proxyprovider",
+    "authentik_providers_proxy.add_proxyprovider",
+    "authentik_providers_proxy.change_proxyprovider",
+    "authentik_providers_proxy.delete_proxyprovider",
+    "authentik_flows.view_flow",
 ];
 
 fn main() {
@@ -91,7 +96,12 @@ fn handshake() -> Value {
         "provider": "authentik",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
-        "capabilities": ["authentik.group", "authentik.user", "authentik.application"],
+        "capabilities": [
+            "authentik.group",
+            "authentik.user",
+            "authentik.application",
+            "authentik.provider.proxy",
+        ],
         "operations": ["adopt"],
         "required_permissions": REQUIRED_PERMISSIONS,
         "ownership": "marker",
@@ -266,6 +276,18 @@ fn observe(request: &Value) -> Value {
         Err(error) => return api_error(&error),
     };
 
+    // Proxy providers and their flows. A declaration names a flow by slug; the
+    // uuid is the provider's business. A failure here is fatal: an application's
+    // provider reference could not be resolved either.
+    let proxy_providers = match client.proxy_providers() {
+        Ok(providers) => providers,
+        Err(error) => return api_error(&error),
+    };
+    let flows = match client.flows() {
+        Ok(flows) => flows,
+        Err(error) => return api_error(&error),
+    };
+
     let marker = Marker {
         key: settings.marker_key,
         value: settings.marker_value,
@@ -306,6 +328,15 @@ fn observe(request: &Value) -> Value {
         .chain(applications.iter().map(|application| {
             let access = model::access_groups(&bindings, &application.pk, &groups);
             let resource = model::application_resource(application, access);
+            json!({
+                "kind": resource.kind,
+                "id": resource.id,
+                "attributes": resource.attributes,
+                "owned": resource.owned,
+            })
+        }))
+        .chain(proxy_providers.iter().map(|provider| {
+            let resource = model::proxy_provider_resource(provider, &flows);
             json!({
                 "kind": resource.kind,
                 "id": resource.id,
@@ -399,6 +430,8 @@ fn apply(request: &Value) -> Value {
     let mut providers: Option<Vec<api::ProviderSummary>> = None;
     let mut bindings: Option<Vec<api::Binding>> = None;
     let mut applications: Option<Vec<api::Application>> = None;
+    let mut proxy_providers: Option<Vec<api::ProxyProvider>> = None;
+    let mut flows: Option<Vec<api::Flow>> = None;
 
     for change in &changes {
         let id = change.resource.id.clone();
@@ -660,6 +693,159 @@ fn apply(request: &Value) -> Value {
                     error.kind(),
                 )),
             },
+            (kind @ ("create" | "update"), model::KIND_PROVIDER_PROXY) => {
+                if flows.is_none() {
+                    match client.flows() {
+                        Ok(list) => flows = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_flows.view_flow"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let known_flows = flows.as_deref().unwrap_or(&[]);
+                let body = match proxy_provider_body(&id, &change.resource.attributes, known_flows)
+                {
+                    Ok(body) => body,
+                    Err(message) => {
+                        applied.push(failed(&id, &message, "config"));
+                        continue;
+                    }
+                };
+
+                if kind == "create" {
+                    match client.create_proxy_provider(&body) {
+                        Ok(()) => applied.push(ok(&id)),
+                        Err(error) => applied.push(failed(
+                            &id,
+                            &failure_message(&error, "authentik_providers_proxy.add_proxyprovider"),
+                            error.kind(),
+                        )),
+                    }
+                    continue;
+                }
+
+                if proxy_providers.is_none() {
+                    match client.proxy_providers() {
+                        Ok(list) => proxy_providers = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_proxy.view_proxyprovider",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = proxy_providers
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|provider| provider.name == id)
+                    .map(|provider| provider.pk);
+                let Some(pk) = pk else {
+                    applied.push(failed(
+                        &id,
+                        "proxy provider not found after the update",
+                        "config",
+                    ));
+                    continue;
+                };
+                match client.update_proxy_provider(pk, &body) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_providers_proxy.change_proxyprovider"),
+                        error.kind(),
+                    )),
+                }
+            }
+            ("delete", model::KIND_PROVIDER_PROXY) => {
+                if proxy_providers.is_none() {
+                    match client.proxy_providers() {
+                        Ok(list) => proxy_providers = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(
+                                    &error,
+                                    "authentik_providers_proxy.view_proxyprovider",
+                                ),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let pk = proxy_providers
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .find(|provider| provider.name == id)
+                    .map(|provider| provider.pk);
+                let Some(pk) = pk else {
+                    applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
+                    continue;
+                };
+
+                // A provider may only go once no application references it. An
+                // application deleted in the same plan does not count: it goes
+                // first (the plan orders application deletes before providers).
+                if applications.is_none() {
+                    match client.applications() {
+                        Ok(list) => applications = Some(list),
+                        Err(error) => {
+                            applied.push(failed(
+                                &id,
+                                &failure_message(&error, "authentik_core.view_application"),
+                                error.kind(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let deleting: Vec<&str> = changes
+                    .iter()
+                    .filter(|change| {
+                        change.kind == "delete" && change.resource.kind == model::KIND_APPLICATION
+                    })
+                    .map(|change| change.resource.id.as_str())
+                    .collect();
+                let referenced = applications
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|application| {
+                        application.provider_obj.as_ref().map(|p| p.name.as_str())
+                            == Some(id.as_str())
+                            && !deleting.contains(&application.slug.as_str())
+                    });
+                if referenced {
+                    applied.push(failed(
+                        &id,
+                        "still referenced by an application; delete the application first",
+                        "config",
+                    ));
+                    continue;
+                }
+
+                match client.delete_proxy_provider(pk) {
+                    Ok(()) => applied.push(ok(&id)),
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_providers_proxy.delete_proxyprovider"),
+                        error.kind(),
+                    )),
+                }
+            }
             (other, _) => applied.push(failed(
                 &id,
                 &format!("unsupported change kind: {other}"),
@@ -865,6 +1051,38 @@ fn reconcile_bindings(
     Ok(())
 }
 
+/// Builds a proxy provider's create or patch body from the declared attributes.
+///
+/// Only declared keys are sent. The two flows are declared by slug and resolved
+/// to the uuid the API expects; an unknown slug is a declaration error.
+fn proxy_provider_body(id: &str, attributes: &Value, flows: &[api::Flow]) -> Result<Value, String> {
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_string(), json!(id));
+
+    for key in ["mode", "external_host", "cookie_domain"] {
+        if let Some(value) = attributes.get(key) {
+            if !value.is_string() {
+                return Err(format!("`{key}` must be a string"));
+            }
+            body.insert(key.to_string(), value.clone());
+        }
+    }
+
+    for key in ["authorization_flow", "invalidation_flow"] {
+        if let Some(value) = attributes.get(key) {
+            let Some(slug) = value.as_str() else {
+                return Err(format!("`{key}` must be a flow slug"));
+            };
+            let Some(flow) = flows.iter().find(|flow| flow.slug == slug) else {
+                return Err(format!("unknown flow `{slug}` in `{key}`"));
+            };
+            body.insert(key.to_string(), json!(flow.pk));
+        }
+    }
+
+    Ok(Value::Object(body))
+}
+
 /// Resolves the declared member usernames to primary keys.
 ///
 /// `Ok(None)` means the declaration does not name membership (`members = null`),
@@ -925,6 +1143,10 @@ fn adopt(request: &Value) -> Value {
     // sees every application (ADR-038).
     let applications = match client.applications() {
         Ok(applications) => applications,
+        Err(error) => return api_error(&error),
+    };
+    let proxy_providers = match client.proxy_providers() {
+        Ok(providers) => providers,
         Err(error) => return api_error(&error),
     };
 
@@ -996,6 +1218,25 @@ fn adopt(request: &Value) -> Value {
                             "retry_after_secs": error.retry_after()
                         }
                     })),
+                }
+            }
+            model::KIND_PROVIDER_PROXY => {
+                if proxy_providers
+                    .iter()
+                    .any(|provider| provider.name == resource.id)
+                {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": true,
+                        "message": ""
+                    }));
+                } else {
+                    adopted.push(json!({
+                        "id": resource.id,
+                        "ok": false,
+                        "message": "proxy provider not found",
+                        "error": { "kind": "config", "message": "proxy provider not found" }
+                    }));
                 }
             }
             model::KIND_APPLICATION => {

@@ -14,10 +14,14 @@ fn fake_authentik() -> (String, thread::JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
         let bodies = [
+            // groups
             r#"{"pagination":{"count":2,"next":null},"results":[
                 {"pk":"1","name":"admins","is_superuser":true,"attributes":{"vyrx":"owned"}},
                 {"pk":"2","name":"media","is_superuser":false,"attributes":{}}
             ]}"#,
+            // users, applications, proxy providers, flows
+            r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
+            r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
             r#"{"pagination":{"count":0,"next":null},"results":[]}"#,
         ];

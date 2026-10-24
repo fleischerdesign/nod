@@ -15,6 +15,7 @@ bindings stay outside its scope.
 | `authentik.group` | group name (unique in Authentik) | `is_superuser`, `description`, `users` |
 | `authentik.user` | username | `name`, `email` |
 | `authentik.application` | slug (unique in Authentik) | `name`, `provider`, `meta_launch_url`, `meta_description`, `meta_publisher`, `open_in_new_tab`, `policy_engine_mode`, `group`, `meta_hide`, `access_groups` |
+| `authentik.provider.proxy` | provider name (unique in Authentik) | `mode`, `external_host`, `cookie_domain`, `authorization_flow`, `invalidation_flow` |
 
 `users` lists login names. `description` and `users` are written into the group's
 free-form `attributes` and membership respectively; `is_superuser` is the group's
@@ -34,6 +35,12 @@ the application fall back to authentik's `core_default_app_access` — open to
 every authenticated user unless another binding restricts it. Grants are made
 before removals, so a failure never cuts access; a create whose bindings fail
 is deleted again rather than left open.
+
+`authorization_flow` and `invalidation_flow` name flows by **slug**; the
+provider resolves them to the uuids the API expects. A proxy provider is
+created before the application that names it and deleted after it; a provider
+still referenced by an application that is not deleted in the same plan is
+refused instead of silently detaching it.
 
 ## Settings
 
@@ -127,6 +134,11 @@ The manifest and the handshake name what the token must be allowed to do:
 | `authentik_core.add_application` | `create` of an application |
 | `authentik_core.change_application` | `update` of an application |
 | `authentik_core.delete_application` | `delete` of an application |
+| `authentik_providers_proxy.view_proxyprovider` | `observe`, `plan`, `apply` of a proxy provider |
+| `authentik_providers_proxy.add_proxyprovider` | `create` of a proxy provider |
+| `authentik_providers_proxy.change_proxyprovider` | `update` of a proxy provider |
+| `authentik_providers_proxy.delete_proxyprovider` | `delete` of a proxy provider |
+| `authentik_flows.view_flow` | resolving a flow slug to its uuid |
 | `authentik_core.delete_group` | `delete`, only when the core's policy allows it |
 
 `observe` checks the read permissions by using them: a token without
@@ -155,15 +167,20 @@ manage groups and users; applications need the full view.
 
 ## Scope and limits
 
-- Groups, users and applications. Roles, parents, policy bindings, providers
-  and outposts are not managed here.
+- Groups, users, applications and proxy providers. Roles, parents, policy
+  bindings and outposts are not managed here.
 - A user is a **seed**: created when missing, never updated and never deleted.
   The profile, the credentials and the account belong to the person, so a
   reconcile must not turn a UI edit into drift.
 - An application is fully managed: created, updated and deleted. Its ownership
   comes from the core's record, never from a marker (ADR-037).
-- The API is `/api/v3/core/` for groups, users and applications and
-  `/api/v3/providers/all/` for the provider-name resolution; pagination follows
+- A proxy provider is fully managed as well, but only while the embedded
+  outpost's provider list is declared elsewhere: authentik only serves a
+  provider the outpost lists, and that list is currently a blueprint entry.
+- The API is `/api/v3/core/` for groups, users and applications,
+  `/api/v3/providers/all/` for the provider-name resolution,
+  `/api/v3/providers/proxy/` for proxy providers and
+  `/api/v3/flows/instances/` for flow slugs; pagination follows
   `pagination.next` to the end. The provider was written against Authentik
   2026.5.6 and speaks API v3.
 - A declared username or provider name that does not exist fails the change

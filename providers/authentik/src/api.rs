@@ -133,6 +133,58 @@ struct BindingPage {
     pagination: Pagination,
 }
 
+/// A proxy provider as the proxy endpoint returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxyProvider {
+    /// Primary key the API addresses.
+    pub pk: i64,
+    /// Unique provider name; the provider's stable id.
+    pub name: String,
+    /// `forward_single` or `forward_domain`.
+    #[serde(default)]
+    pub mode: String,
+    /// The public host the outpost proxies.
+    #[serde(default)]
+    pub external_host: String,
+    /// Cookie domain, empty for a single host.
+    #[serde(default)]
+    pub cookie_domain: String,
+    /// Authorization flow uuid.
+    #[serde(default)]
+    pub authorization_flow: Option<String>,
+    /// Invalidation flow uuid.
+    #[serde(default)]
+    pub invalidation_flow: Option<String>,
+}
+
+/// A flow as the instances endpoint returns it; the declaration names flows by
+/// slug, the API expects the uuid.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Flow {
+    /// Flow uuid.
+    pub pk: String,
+    /// Stable slug.
+    pub slug: String,
+}
+
+/// One page of the proxy provider list.
+#[derive(Debug, Default, Deserialize)]
+struct ProxyProviderPage {
+    #[serde(default)]
+    results: Vec<ProxyProvider>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
+/// One page of the flow list.
+#[derive(Debug, Default, Deserialize)]
+struct FlowPage {
+    #[serde(default)]
+    results: Vec<Flow>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
 /// One page of the Authentik application list response.
 #[derive(Debug, Default, Deserialize)]
 struct ApplicationPage {
@@ -259,6 +311,62 @@ impl Authentik {
             }
         }
         Ok(users)
+    }
+
+    /// Reads the complete proxy provider list.
+    pub fn proxy_providers(&self) -> Result<Vec<ProxyProvider>, ApiError> {
+        let mut providers = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/providers/proxy/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: ProxyProviderPage = self.get(&url)?;
+            providers.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(providers)
+    }
+
+    /// Reads the complete flow list, for slug-to-uuid resolution.
+    pub fn flows(&self) -> Result<Vec<Flow>, ApiError> {
+        let mut flows = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let url = format!(
+                "{}/api/v3/flows/instances/?page={}&page_size={}",
+                self.base, page, self.page_size
+            );
+            let body: FlowPage = self.get(&url)?;
+            flows.extend(body.results);
+            match body.pagination.next {
+                Some(next) if next > page => page = next,
+                _ => break,
+            }
+        }
+        Ok(flows)
+    }
+
+    /// Creates a proxy provider; the body holds only declared fields.
+    pub fn create_proxy_provider(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/providers/proxy/", self.base);
+        self.write("POST", &url, body.clone())
+    }
+
+    /// Updates the declared fields of a proxy provider.
+    pub fn update_proxy_provider(&self, pk: i64, body: &serde_json::Value) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/providers/proxy/{}/", self.base, pk);
+        self.write("PATCH", &url, body.clone())
+    }
+
+    /// Deletes a proxy provider.
+    pub fn delete_proxy_provider(&self, pk: i64) -> Result<(), ApiError> {
+        let url = format!("{}/api/v3/providers/proxy/{}/", self.base, pk);
+        self.write("DELETE", &url, serde_json::Value::Null)
     }
 
     /// Reads the complete application list, following pagination to the end.

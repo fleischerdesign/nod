@@ -20,6 +20,13 @@ pub const KIND_USER: &str = "authentik.user";
 /// `owned: false` here.
 pub const KIND_APPLICATION: &str = "authentik.application";
 
+/// Resource kind for an Authentik proxy provider.
+///
+/// The kind names the family and the variant (`authentik.provider.proxy`), so
+/// the other provider types can join as `authentik.provider.oauth2` and so on.
+/// A provider has no free-form field either; the core's record owns it.
+pub const KIND_PROVIDER_PROXY: &str = "authentik.provider.proxy";
+
 /// A user as the group serializer's `users_obj` returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartialUser {
@@ -210,6 +217,35 @@ pub fn application_resource(
     }
 }
 
+/// Maps a proxy provider to the resource the core sees.
+///
+/// The name is the id; the mode, the hosts and the two flow *slugs* are the
+/// attributes. A declaration names flows by slug, never by uuid.
+pub fn proxy_provider_resource(
+    provider: &crate::api::ProxyProvider,
+    flows: &[crate::api::Flow],
+) -> ObservedResource {
+    let slug = |pk: &Option<String>| {
+        pk.as_deref()
+            .and_then(|pk| flows.iter().find(|flow| flow.pk == pk))
+            .map(|flow| flow.slug.clone())
+            .unwrap_or_default()
+    };
+
+    ObservedResource {
+        kind: KIND_PROVIDER_PROXY.to_string(),
+        id: provider.name.clone(),
+        attributes: json!({
+            "mode": provider.mode,
+            "external_host": provider.external_host,
+            "cookie_domain": provider.cookie_domain,
+            "authorization_flow": slug(&provider.authorization_flow),
+            "invalidation_flow": slug(&provider.invalidation_flow),
+        }),
+        owned: false,
+    }
+}
+
 /// Whether the declaration asks for anything the observation does not show.
 ///
 /// Only the keys the declaration names are compared. `members = null` in the
@@ -267,56 +303,60 @@ pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> 
         }
     }
 
-    // Groups and applications are managed the same way: created when missing,
-    // updated when a declared attribute differs, left alone when foreign. A
-    // group carries its marker; an application is owned through the core's
-    // record, so the provider only reports what it sees (ADR-037).
-    const MANAGED: [&str; 2] = [KIND_GROUP, KIND_APPLICATION];
-    for want in desired
-        .iter()
-        .filter(|resource| MANAGED.contains(&resource.kind.as_str()))
-    {
-        match observed
+    // Creations and updates run in dependency order: a provider before the
+    // application that names it, a group before either. Deletions run in the
+    // opposite order: an application before its provider, so the provider is
+    // unreferenced when it goes.
+    const CREATE_ORDER: [&str; 3] = [KIND_GROUP, KIND_PROVIDER_PROXY, KIND_APPLICATION];
+    for kind in CREATE_ORDER {
+        for want in desired
             .iter()
-            .find(|current| current.kind == want.kind && current.id == want.id)
+            .filter(|resource| resource.kind.as_str() == kind)
         {
-            None => changes.push(Change {
-                kind: "create".to_string(),
-                owned: true,
-                destructive: false,
-                resource: want.clone(),
-            }),
-            Some(current) if !current.owned => {}
-            Some(current) if differs(&want.attributes, &current.attributes) => {
-                changes.push(Change {
-                    kind: "update".to_string(),
+            match observed
+                .iter()
+                .find(|current| current.kind == want.kind && current.id == want.id)
+            {
+                None => changes.push(Change {
+                    kind: "create".to_string(),
                     owned: true,
                     destructive: false,
                     resource: want.clone(),
-                })
+                }),
+                Some(current) if !current.owned => {}
+                Some(current) if differs(&want.attributes, &current.attributes) => {
+                    changes.push(Change {
+                        kind: "update".to_string(),
+                        owned: true,
+                        destructive: false,
+                        resource: want.clone(),
+                    })
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
         }
     }
 
-    for current in observed
-        .iter()
-        .filter(|resource| MANAGED.contains(&resource.kind.as_str()) && resource.owned)
-    {
-        let declared = desired
+    for kind in [KIND_APPLICATION, KIND_GROUP, KIND_PROVIDER_PROXY] {
+        for current in observed
             .iter()
-            .any(|want| want.kind == current.kind && want.id == current.id);
-        if !declared {
-            changes.push(Change {
-                kind: "delete".to_string(),
-                owned: true,
-                destructive: true,
-                resource: Resource {
-                    kind: current.kind.clone(),
-                    id: current.id.clone(),
-                    attributes: current.attributes.clone(),
-                },
-            });
+            .filter(|resource| resource.kind.as_str() == kind && resource.owned)
+        {
+            let declared = desired
+                .iter()
+                .any(|want| want.kind == current.kind && want.id == current.id);
+            if !declared {
+                changes.push(Change {
+                    kind: "delete".to_string(),
+                    owned: true,
+                    destructive: true,
+                    resource: Resource {
+                        kind: current.kind.clone(),
+                        id: current.id.clone(),
+                        attributes: current.attributes.clone(),
+                    },
+                });
+            }
         }
     }
 
@@ -713,6 +753,93 @@ mod tests {
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, "update");
+    }
+
+    fn proxy_provider(name: &str, mode: &str) -> crate::api::ProxyProvider {
+        crate::api::ProxyProvider {
+            pk: 7,
+            name: name.to_string(),
+            mode: mode.to_string(),
+            external_host: "https://bazarr.lan.vyrx.de".to_string(),
+            cookie_domain: String::new(),
+            authorization_flow: Some("flow-auth".to_string()),
+            invalidation_flow: Some("flow-inval".to_string()),
+        }
+    }
+
+    fn flow(pk: &str, slug: &str) -> crate::api::Flow {
+        crate::api::Flow {
+            pk: pk.to_string(),
+            slug: slug.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_proxy_provider_maps_flow_uuids_to_slugs() {
+        let flows = vec![flow("flow-auth", "auth"), flow("flow-inval", "inval")];
+        let mapped = proxy_provider_resource(
+            &proxy_provider("Provider for Bazarr", "forward_single"),
+            &flows,
+        );
+
+        assert_eq!(mapped.kind, KIND_PROVIDER_PROXY);
+        assert_eq!(mapped.id, "Provider for Bazarr");
+        assert_eq!(mapped.attributes["authorization_flow"], json!("auth"));
+        assert_eq!(mapped.attributes["invalidation_flow"], json!("inval"));
+        assert!(
+            !mapped.owned,
+            "a provider has no marker; the record owns it"
+        );
+    }
+
+    #[test]
+    fn a_missing_flow_maps_to_an_empty_slug() {
+        let mapped = proxy_provider_resource(&proxy_provider("p", "forward_single"), &[]);
+        assert_eq!(mapped.attributes["authorization_flow"], json!(""));
+    }
+
+    #[test]
+    fn a_provider_is_created_before_the_application_that_names_it() {
+        let desired = vec![
+            Resource {
+                kind: KIND_APPLICATION.to_string(),
+                id: "app".to_string(),
+                attributes: json!({ "provider": "p" }),
+            },
+            Resource {
+                kind: KIND_PROVIDER_PROXY.to_string(),
+                id: "p".to_string(),
+                attributes: json!({}),
+            },
+        ];
+
+        let changes = plan(&desired, &[]);
+
+        assert_eq!(changes[0].resource.kind, KIND_PROVIDER_PROXY);
+        assert_eq!(changes[1].resource.kind, KIND_APPLICATION);
+    }
+
+    #[test]
+    fn an_application_is_deleted_before_its_provider() {
+        let observed = vec![
+            ObservedResource {
+                kind: KIND_PROVIDER_PROXY.to_string(),
+                id: "p".to_string(),
+                attributes: json!({}),
+                owned: true,
+            },
+            ObservedResource {
+                kind: KIND_APPLICATION.to_string(),
+                id: "app".to_string(),
+                attributes: json!({}),
+                owned: true,
+            },
+        ];
+
+        let changes = plan(&[], &observed);
+
+        assert_eq!(changes[0].resource.kind, KIND_APPLICATION);
+        assert_eq!(changes[1].resource.kind, KIND_PROVIDER_PROXY);
     }
 
     #[test]
