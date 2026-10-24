@@ -225,8 +225,12 @@ impl Authentik {
         let mut applications = Vec::new();
         let mut page = 1u64;
         loop {
+            // Authentik filters this list by policy for every non-superuser and
+            // returns only the applications the account may access. The flag asks
+            // for the full list and is honoured only for a superuser — the fleet's
+            // provider account is one because it is the sole writer.
             let url = format!(
-                "{}/api/v3/core/applications/?page={}&page_size={}",
+                "{}/api/v3/core/applications/?page={}&page_size={}&superuser_full_list=true",
                 self.base, page, self.page_size
             );
             let body: ApplicationPage = self.get(&url)?;
