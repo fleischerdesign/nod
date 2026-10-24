@@ -17,6 +17,9 @@
     {
       nixosModules.default = import ./modules/nixos/default.nix;
       nixosModules.nod = self.nixosModules.default;
+      nixosModules.fleet = import ./modules/nixos/fleet.nix;
+
+      lib.nod = import ./lib/nod.nix { lib = nixpkgs-unstable.lib; };
 
       packages.${system} = {
         default = pkgs.rustPlatform.buildRustPackage {
