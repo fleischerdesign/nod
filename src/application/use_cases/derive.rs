@@ -6,61 +6,13 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::domain::errors::NodError;
 use crate::domain::provider::{DesiredResource, ObservedResource};
 
-/// The desired-state schema this core understands.
-///
-/// `derive` was added in schema 2; a file that declares a newer schema is
-/// refused instead of being silently misread.
-pub const SCHEMA: u64 = 2;
-
-/// One declared rule.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeriveRule {
-    /// Stable rule id, used for provenance and the deletion budget.
-    pub id: String,
-    /// The observed resource and attribute the set follows.
-    #[serde(rename = "from")]
-    pub from: Source,
-    /// What to materialise per member.
-    pub template: Template,
-    /// How many derived removals this rule may cause in one run.
-    ///
-    /// `0` freezes the set: a member that leaves is not deleted until the
-    /// operator allows it. The default is deliberately the safe one.
-    #[serde(default)]
-    pub max_deletions: usize,
-}
-
-/// Where a rule reads its members.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Source {
-    /// Observed resource kind.
-    pub kind: String,
-    /// Observed resource id.
-    pub id: String,
-    /// Attribute holding the member list.
-    pub attribute: String,
-}
-
-/// What a rule materialises per member.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Template {
-    /// Resource kind to create.
-    pub kind: String,
-    /// Resource id, with `{member}` substituted.
-    pub id: String,
-    /// Resource attributes, with `{member}` substituted in strings.
-    #[serde(default)]
-    pub attributes: Value,
-}
+pub use crate::domain::desired::{parse_derive, DeriveRule, SCHEMA, Source, Template};
 
 /// One expanded resource and where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -71,12 +23,6 @@ pub struct Derived {
     pub rule: String,
     /// Member that produced it.
     pub member: String,
-}
-
-/// Parses the `derive` list of a desired-state document.
-pub fn parse(value: &Value) -> Result<Vec<DeriveRule>, NodError> {
-    serde_json::from_value(value.clone())
-        .map_err(|error| NodError::config(format!("invalid derivation rule: {error}")))
 }
 
 /// Expands every rule against one successful observation.
@@ -298,13 +244,13 @@ mod tests {
             "from": {"kind": "k", "id": "i", "attribute": "a"},
             "template": {"kind": "t", "id": "{member}"}
         }]);
-        assert_eq!(parse(&value).expect("a valid rule").len(), 1);
+        assert_eq!(parse_derive(&value).expect("a valid rule").len(), 1);
 
         let typo = json!([{
             "id": "rule",
             "form": {"kind": "k", "id": "i", "attribute": "a"},
             "template": {"kind": "t", "id": "{member}"}
         }]);
-        assert!(parse(&typo).is_err(), "a typo must be loud");
+        assert!(parse_derive(&typo).is_err(), "a typo must be loud");
     }
 }

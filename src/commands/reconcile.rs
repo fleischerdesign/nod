@@ -131,22 +131,25 @@ pub async fn execute(
         .await;
     }
 
-    let desired_path = match desired_path {
-        Some(path) => path.to_path_buf(),
-        None => configured
-            .and_then(|entry| entry.desired.clone())
-            .ok_or_else(|| {
-                NodError::config("pass --desired or declare `desired` for the provider")
-            })?,
+    let desired = match desired_path {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path).map_err(|error| {
+                NodError::config(format!(
+                    "cannot read desired state {}: {error}",
+                    path.display()
+                ))
+            })?;
+            reconcile::parse_desired(&raw)?
+        }
+        None => {
+            let source = configured
+                .and_then(|entry| entry.desired.as_ref())
+                .ok_or_else(|| {
+                    NodError::config("pass --desired or declare `desired` for the provider")
+                })?;
+            crate::infrastructure::config::fleet::resolve_desired(source)?
+        }
     };
-
-    let raw = std::fs::read_to_string(&desired_path).map_err(|error| {
-        NodError::config(format!(
-            "cannot read desired state {}: {error}",
-            desired_path.display()
-        ))
-    })?;
-    let desired = reconcile::parse_desired(&raw)?;
 
     let ownership = ProviderOwnershipStore::new(state_dir);
     let record = match provider {

@@ -224,10 +224,12 @@ pub struct TomlProvider {
     /// same value without a conversion step.
     #[serde(default)]
     pub settings: Option<serde_json::Value>,
-    /// Desired state file for the daemon; without it the provider is not
-    /// scheduled.
+    /// Desired state for the daemon: an inline declaration or a JSON file.
+    ///
+    /// The flake carries the declaration as a value (one evaluation, no
+    /// artifact); a configuration file names a file. Both are first-class.
     #[serde(default)]
-    pub desired: Option<PathBuf>,
+    pub desired: Option<crate::domain::desired::DesiredSource>,
     /// Whether the daemon may apply changes (default: false, dry-run only).
     #[serde(default)]
     pub apply: Option<bool>,

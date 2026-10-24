@@ -210,21 +210,17 @@ async fn load_providers(
     let mut entries = Vec::new();
 
     for (name, provider) in &fleet.providers {
-        let Some(desired_path) = &provider.desired else {
+        let Some(source) = &provider.desired else {
             tracing::warn!(
                 provider = %name,
-                "no desired file declared; provider is not scheduled"
+                "no desired state declared; provider is not scheduled"
             );
             continue;
         };
 
-        let raw = std::fs::read_to_string(desired_path).map_err(|error| {
-            NodError::config(format!(
-                "cannot read desired state {} for provider {name}: {error}",
-                desired_path.display()
-            ))
-        })?;
-        let desired = reconcile::parse_desired(&raw)?;
+        let desired = crate::infrastructure::config::fleet::resolve_desired(source).map_err(
+            |error| NodError::config(format!("{error} (provider {name})")),
+        )?;
 
         let settings = match &provider.settings {
             Some(value) => value.clone(),

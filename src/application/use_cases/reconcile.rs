@@ -635,24 +635,8 @@ pub async fn rollback(
     })
 }
 
-/// Parses a desired-state document: either a bare array or `{ "resources": [...] }`.
 /// A parsed declaration: what must exist and what must not.
-#[derive(Debug, Clone, Default)]
-pub struct Desired {
-    /// Resources the provider must create or keep in shape.
-    pub resources: Vec<DesiredResource>,
-    /// Resources the declaration says must not exist.
-    ///
-    /// The provider never sees this list: it plans from `resources` alone, and
-    /// the delete it proposes for an owned resource outside that list is
-    /// reclassified by the core. A separate list keeps an old provider from
-    /// mistaking a tombstone for something to create.
-    pub absent: Vec<DesiredResource>,
-    /// Declared derivations: rules that materialise a set from an observed fact
-    /// (ADR-036). The provider never sees them; the core expands them into
-    /// `resources` before planning.
-    pub derive: Vec<derive::DeriveRule>,
-}
+pub use crate::domain::desired::{parse as parse_desired, Desired};
 
 impl Desired {
     /// The deletions this declaration authorizes, explicit and derived.
@@ -714,82 +698,6 @@ impl Declared {
     fn authorizes(&self, kind: &str, id: &str) -> bool {
         self.is_explicit(kind, id) || self.derived_budget(kind, id).is_some()
     }
-}
-
-/// Parses a declaration from the desired-state file.
-pub fn parse_desired(raw: &str) -> Result<Desired, NodError> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|error| NodError::config(format!("cannot parse desired state: {error}")))?;
-
-    match value {
-        serde_json::Value::Array(items) => Ok(Desired {
-            resources: parse_resources(items)?,
-            absent: Vec::new(),
-            derive: Vec::new(),
-        }),
-        serde_json::Value::Object(mut map) => {
-            let schema = match map.remove("schema") {
-                None | Some(serde_json::Value::Null) => 1,
-                Some(serde_json::Value::Number(number)) => number.as_u64().ok_or_else(|| {
-                    NodError::config("desired state `schema` must be a positive integer")
-                })?,
-                Some(_) => {
-                    return Err(NodError::config(
-                        "desired state `schema` must be a positive integer",
-                    ))
-                }
-            };
-            if schema > derive::SCHEMA {
-                return Err(NodError::config(format!(
-                    "desired state declares schema {schema}, this core understands {}",
-                    derive::SCHEMA
-                )));
-            }
-            let resources = match map.remove("resources") {
-                Some(serde_json::Value::Array(items)) => items,
-                _ => {
-                    return Err(NodError::config(
-                        "desired state object must contain a `resources` array",
-                    ))
-                }
-            };
-            let absent = match map.remove("absent") {
-                Some(serde_json::Value::Array(items)) => parse_resources(items)?,
-                None | Some(serde_json::Value::Null) => Vec::new(),
-                Some(_) => return Err(NodError::config("desired state `absent` must be an array")),
-            };
-            let derive = match map.remove("derive") {
-                None | Some(serde_json::Value::Null) => Vec::new(),
-                Some(value) => {
-                    if schema < 2 {
-                        return Err(NodError::config(
-                            "desired state uses `derive`, which requires schema 2",
-                        ));
-                    }
-                    derive::parse(&value)?
-                }
-            };
-            Ok(Desired {
-                resources: parse_resources(resources)?,
-                absent,
-                derive,
-            })
-        }
-        _ => Err(NodError::config(
-            "desired state must be an array or an object with `resources`",
-        )),
-    }
-}
-
-/// Parses a list of desired resources.
-fn parse_resources(items: Vec<serde_json::Value>) -> Result<Vec<DesiredResource>, NodError> {
-    items
-        .into_iter()
-        .map(|item| {
-            serde_json::from_value(item)
-                .map_err(|error| NodError::config(format!("invalid desired resource: {error}")))
-        })
-        .collect()
 }
 
 /// Reports the observed resources that the declaration no longer contains.

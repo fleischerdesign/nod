@@ -161,20 +161,11 @@ pub async fn execute(
 
 /// Runs one read-only reconcile and maps it to a summary line.
 async fn summarise(name: &str, declaration: &TomlProvider, state_dir: &Path) -> Entry {
-    let Some(desired_path) = &declaration.desired else {
-        return Entry::skipped(name, "no desired file declared; not scheduled");
+    let Some(source) = &declaration.desired else {
+        return Entry::skipped(name, "no desired state declared; not scheduled");
     };
 
-    let raw = match std::fs::read_to_string(desired_path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            return Entry::failed(
-                name,
-                format!("cannot read {}: {error}", desired_path.display()),
-            )
-        }
-    };
-    let desired = match reconcile::parse_desired(&raw) {
+    let desired = match crate::infrastructure::config::fleet::resolve_desired(source) {
         Ok(desired) => desired,
         Err(error) => return Entry::failed(name, error.to_string()),
     };

@@ -10,11 +10,12 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::domain::desired::{self, Desired, DesiredSource};
 use crate::domain::errors::NodError;
 use crate::infrastructure::config::toml_config::{TomlConfigStore, TomlProvider};
 
 /// The schema version this binary understands for the `nod` flake output.
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 /// Where the fleet came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,9 +89,9 @@ fn resolve_relative(
             if provider.command.is_relative() {
                 provider.command = base.join(&provider.command);
             }
-            if let Some(desired) = &provider.desired {
-                if desired.is_relative() {
-                    provider.desired = Some(base.join(desired));
+            if let Some(DesiredSource::Path(path)) = &mut provider.desired {
+                if path.is_relative() {
+                    *path = base.join(&*path);
                 }
             }
             (name, provider)
@@ -147,14 +148,40 @@ async fn read_flake(flake_path: &Path) -> Result<Option<FlakeFleet>, NodError> {
         ))
     })?;
 
-    if parsed.schema != SCHEMA {
+    if parsed.schema > SCHEMA {
         return Err(NodError::config(format!(
-            "the `nod` flake output declares schema {}, this nod understands {}",
-            parsed.schema, SCHEMA
+            "the `nod` flake output declares schema {}, this nod understands {SCHEMA}",
+            parsed.schema
         )));
+    }
+    // An inline declaration is schema 2; a schema-1 output predates it.
+    if parsed.schema < 2 {
+        for (name, provider) in &parsed.providers {
+            if matches!(provider.desired, Some(DesiredSource::Inline(_))) {
+                return Err(NodError::config(format!(
+                    "provider `{name}` declares an inline desired state, which requires the `nod` output schema 2"
+                )));
+            }
+        }
     }
 
     Ok(Some(parsed))
+}
+
+/// Resolves a provider's declaration: inline, or read and parsed from a file.
+pub fn resolve_desired(source: &DesiredSource) -> Result<Desired, NodError> {
+    match source {
+        DesiredSource::Inline(desired) => Ok(desired.clone()),
+        DesiredSource::Path(path) => {
+            let raw = std::fs::read_to_string(path).map_err(|error| {
+                NodError::config(format!(
+                    "cannot read desired state {}: {error}",
+                    path.display()
+                ))
+            })?;
+            desired::parse(&raw)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +215,16 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_desired_state_is_a_value() {
+        let raw = r#"{"schema": 2, "providers": {"p": {"command": "/x", "desired": {"resources": []}}}}"#;
+        let parsed: FlakeFleet = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            parsed.providers.get("p").unwrap().desired,
+            Some(DesiredSource::Inline(_))
+        ));
+    }
+
+    #[test]
     fn an_unknown_schema_is_rejected() {
         let raw = r#"{"schema": 99, "providers": {}}"#;
         let parsed: FlakeFleet = serde_json::from_str(raw).unwrap();
@@ -198,7 +235,7 @@ mod tests {
         TomlProvider {
             command: PathBuf::from("bin/provider"),
             settings: None,
-            desired: Some(PathBuf::from("desired.json")),
+            desired: Some(DesiredSource::Path(PathBuf::from("desired.json"))),
             apply: None,
             interval_secs: None,
             order: None,
@@ -218,7 +255,7 @@ mod tests {
         assert_eq!(provider.command, PathBuf::from("/etc/nod/bin/provider"));
         assert_eq!(
             provider.desired,
-            Some(PathBuf::from("/etc/nod/desired.json"))
+            Some(DesiredSource::Path(PathBuf::from("/etc/nod/desired.json")))
         );
     }
 
@@ -227,7 +264,7 @@ mod tests {
         let mut providers = BTreeMap::new();
         let mut provider = provider();
         provider.command = PathBuf::from("/nix/store/x/bin/provider");
-        provider.desired = Some(PathBuf::from("/nix/store/y/desired.json"));
+        provider.desired = Some(DesiredSource::Path(PathBuf::from("/nix/store/y/desired.json")));
         providers.insert("example".to_string(), provider);
 
         let resolved = resolve_relative(providers, Some(Path::new("/etc/nod")));
@@ -235,7 +272,7 @@ mod tests {
         assert_eq!(provider.command, PathBuf::from("/nix/store/x/bin/provider"));
         assert_eq!(
             provider.desired,
-            Some(PathBuf::from("/nix/store/y/desired.json"))
+            Some(DesiredSource::Path(PathBuf::from("/nix/store/y/desired.json")))
         );
     }
 }
