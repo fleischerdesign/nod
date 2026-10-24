@@ -24,11 +24,12 @@ const PROTOCOL: u32 = 1;
 /// Deletion is not listed: `apply` only deletes when the core's policy allows
 /// it, and then the missing `authentik_core.delete_group` is reported with the
 /// change that needed it.
-const REQUIRED_PERMISSIONS: [&str; 4] = [
+const REQUIRED_PERMISSIONS: [&str; 5] = [
     "authentik_core.view_group",
     "authentik_core.view_user",
     "authentik_core.change_group",
     "authentik_core.add_group",
+    "authentik_core.add_user",
 ];
 
 fn main() {
@@ -82,7 +83,7 @@ fn handshake() -> Value {
         "provider": "authentik",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL,
-        "capabilities": ["authentik.group"],
+        "capabilities": ["authentik.group", "authentik.user"],
         "operations": ["adopt"],
         "required_permissions": REQUIRED_PERMISSIONS,
         "ownership": "marker",
@@ -226,15 +227,19 @@ fn observe(request: &Value) -> Value {
         Err(error) => return api_error(&error),
     };
 
-    // Membership resolution needs the users endpoint. A token without it can
-    // still observe and plan, so the gap is a condition, not a failure.
+    // Membership resolution and the user seed both read the users endpoint. A
+    // token without it can still observe groups, so the gap is a condition.
     let mut conditions = Vec::new();
-    if let Err(error) = client.users() {
-        conditions.push(json!({
-            "kind": if matches!(error, ApiError::Auth) { "permission" } else { error.kind() },
-            "message": failure_message(&error, "authentik_core.view_user"),
-        }));
-    }
+    let users = match client.users() {
+        Ok(users) => users,
+        Err(error) => {
+            conditions.push(json!({
+                "kind": if matches!(error, ApiError::Auth) { "permission" } else { error.kind() },
+                "message": failure_message(&error, "authentik_core.view_user"),
+            }));
+            Vec::new()
+        }
+    };
 
     let marker = Marker {
         key: settings.marker_key,
@@ -251,6 +256,15 @@ fn observe(request: &Value) -> Value {
                 "owned": resource.owned,
             })
         })
+        .chain(users.iter().map(|user| {
+            let resource = model::user_resource(user, &marker);
+            json!({
+                "kind": resource.kind,
+                "id": resource.id,
+                "attributes": resource.attributes,
+                "owned": resource.owned,
+            })
+        }))
         .collect();
 
     json!({ "resources": resources, "conditions": conditions })
@@ -318,7 +332,7 @@ fn apply(request: &Value) -> Value {
         }
         Err(error) => return api_error(&error),
     };
-    let users = match client.users() {
+    let mut users = match client.users() {
         Ok(users) => users,
         Err(ApiError::Auth) => {
             return error_message(
@@ -347,8 +361,36 @@ fn apply(request: &Value) -> Value {
             continue;
         }
 
-        match change.kind.as_str() {
-            "create" => {
+        match (change.kind.as_str(), change.resource.kind.as_str()) {
+            ("create", model::KIND_USER) => {
+                let name = attribute_str(&change.resource.attributes, "name");
+                let email = attribute_str(&change.resource.attributes, "email");
+                let attributes = marker.stamp(&json!({}));
+                match client.create_user(&id, name, email, &attributes) {
+                    Ok(user) => {
+                        // A group in the same plan may name this user; resolve it
+                        // against what now exists, not the opening snapshot.
+                        users.push(user);
+                        applied.push(ok(&id));
+                    }
+                    Err(error) => applied.push(failed(
+                        &id,
+                        &failure_message(&error, "authentik_core.add_user"),
+                        error.kind(),
+                    )),
+                }
+            }
+            ("update", model::KIND_USER) => applied.push(failed(
+                &id,
+                "a user is a seed and is never updated",
+                "config",
+            )),
+            ("delete", model::KIND_USER) => applied.push(failed(
+                &id,
+                "a user is never deleted by the provider",
+                "config",
+            )),
+            ("create", _) => {
                 let user_pks = match resolve_users(&change.resource.attributes, &users) {
                     Ok(pks) => pks,
                     Err(()) => {
@@ -372,7 +414,7 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
-            "update" => {
+            ("update", _) => {
                 let Some(group) = groups.iter().find(|group| group.name == id) else {
                     applied.push(failed(&id, "group not found", "config"));
                     continue;
@@ -399,7 +441,7 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
-            "delete" => {
+            ("delete", _) => {
                 let Some(group) = groups.iter().find(|group| group.name == id) else {
                     applied.push(json!({ "id": id, "ok": true, "message": "already absent" }));
                     continue;
@@ -413,7 +455,7 @@ fn apply(request: &Value) -> Value {
                     )),
                 }
             }
-            other => applied.push(failed(
+            (other, _) => applied.push(failed(
                 &id,
                 &format!("unsupported change kind: {other}"),
                 "protocol",
@@ -439,6 +481,10 @@ fn failed(id: &str, message: &str, kind: &str) -> Value {
 
 fn attribute_bool(attributes: &Value, key: &str) -> Option<bool> {
     attributes.get(key).and_then(Value::as_bool)
+}
+
+fn attribute_str<'a>(attributes: &'a Value, key: &str) -> &'a str {
+    attributes.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
 /// The keys the nod resource carries for the provider's own control, never for

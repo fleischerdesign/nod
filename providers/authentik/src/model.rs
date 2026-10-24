@@ -10,6 +10,9 @@ use serde_json::{json, Value};
 /// Resource kind for an Authentik group.
 pub const KIND_GROUP: &str = "authentik.group";
 
+/// Resource kind for an Authentik user.
+pub const KIND_USER: &str = "authentik.user";
+
 /// A user as the group serializer's `users_obj` returns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartialUser {
@@ -45,9 +48,14 @@ pub struct Marker {
 }
 
 impl Marker {
+    /// Whether `attributes` carries this marker.
+    pub fn matches_attributes(&self, attributes: &Value) -> bool {
+        attributes.get(&self.key).and_then(Value::as_str) == Some(self.value.as_str())
+    }
+
     /// Whether `group` carries this marker.
     pub fn matches(&self, group: &Group) -> bool {
-        group.attributes.get(&self.key).and_then(Value::as_str) == Some(self.value.as_str())
+        self.matches_attributes(&group.attributes)
     }
 
     /// Returns a copy of `attributes` with the marker set, preserving the rest.
@@ -147,12 +155,47 @@ fn differs(declared: &Value, observed: &Value) -> bool {
     }
 }
 
+/// Maps a user to the resource the core sees.
+///
+/// The username is the id; the display name and the e-mail are the attributes.
+/// The marker lives in the user's free-form attributes. A user is a seed: the
+/// plan never updates or deletes one, because credentials, profile edits and
+/// the account itself belong to the person.
+pub fn user_resource(user: &crate::api::User, marker: &Marker) -> ObservedResource {
+    ObservedResource {
+        kind: KIND_USER.to_string(),
+        id: user.username.clone(),
+        attributes: json!({
+            "name": user.name,
+            "email": user.email,
+        }),
+        owned: marker.matches_attributes(&user.attributes),
+    }
+}
+
 /// Computes the plan from a declaration and an observation.
 ///
 /// A foreign resource is never updated or deleted: adoption is an explicit
 /// operation, not something a reconcile invents (ADR-032).
 pub fn plan(desired: &[Resource], observed: &[ObservedResource]) -> Vec<Change> {
     let mut changes = Vec::new();
+
+    // Users first: a group's membership can only resolve against a user that
+    // exists. A user is a seed - created when missing, never updated, never
+    // deleted.
+    for want in desired.iter().filter(|resource| resource.kind == KIND_USER) {
+        let exists = observed
+            .iter()
+            .any(|current| current.kind == want.kind && current.id == want.id);
+        if !exists {
+            changes.push(Change {
+                kind: "create".to_string(),
+                owned: true,
+                destructive: false,
+                resource: want.clone(),
+            });
+        }
+    }
 
     for want in desired
         .iter()
@@ -236,6 +279,75 @@ mod tests {
                 "users": [],
             }),
         }
+    }
+
+    fn desired_user(username: &str) -> Resource {
+        Resource {
+            kind: KIND_USER.to_string(),
+            id: username.to_string(),
+            attributes: json!({ "name": "Display", "email": "display@example.test" }),
+        }
+    }
+
+    fn api_user(username: &str, name: &str, email: &str, attributes: Value) -> crate::api::User {
+        crate::api::User {
+            pk: 7,
+            username: username.to_string(),
+            name: name.to_string(),
+            email: email.to_string(),
+            attributes,
+        }
+    }
+
+    #[test]
+    fn a_user_maps_username_to_id_and_profile_to_attributes() {
+        let mapped = user_resource(
+            &api_user("ada", "Ada", "ada@example.test", json!({ "nod": "owned" })),
+            &marker(),
+        );
+        assert_eq!(mapped.kind, KIND_USER);
+        assert_eq!(mapped.id, "ada");
+        assert_eq!(
+            mapped.attributes,
+            json!({ "name": "Ada", "email": "ada@example.test" })
+        );
+        assert!(mapped.owned);
+    }
+
+    #[test]
+    fn a_missing_user_is_created() {
+        let changes = plan(&[desired_user("ada")], &[]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, "create");
+        assert_eq!(changes[0].resource.kind, KIND_USER);
+    }
+
+    #[test]
+    fn an_existing_user_is_never_updated() {
+        let observed = vec![user_resource(
+            &api_user(
+                "ada",
+                "Old name",
+                "old@example.test",
+                json!({ "nod": "owned" }),
+            ),
+            &marker(),
+        )];
+        assert!(
+            plan(&[desired_user("ada")], &observed).is_empty(),
+            "a user is a seed, not a managed profile"
+        );
+    }
+
+    #[test]
+    fn users_are_planned_before_groups() {
+        let mut group = resource("media", false);
+        group.attributes["users"] = json!(["ada"]);
+
+        let changes = plan(&[group, desired_user("ada")], &[]);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].resource.kind, KIND_USER);
+        assert_eq!(changes[1].resource.kind, KIND_GROUP);
     }
 
     #[test]

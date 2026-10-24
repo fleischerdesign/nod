@@ -12,6 +12,7 @@ request. Users, roles, parents and bindings stay outside its scope.
 | Kind | Id | Attributes |
 |---|---|---|
 | `authentik.group` | group name (unique in Authentik) | `is_superuser`, `description`, `users` |
+| `authentik.user` | username | `name`, `email` |
 
 `users` lists login names. `description` and `users` are written into the group's
 free-form `attributes` and membership respectively; `is_superuser` is the group's
@@ -97,6 +98,7 @@ The manifest and the handshake name what the token must be allowed to do:
 | `authentik_core.view_user` | resolving declared members to primary keys |
 | `authentik_core.change_group` | `update`, `adopt` |
 | `authentik_core.add_group` | `create` |
+| `authentik_core.add_user` | `create` of a user |
 | `authentik_core.delete_group` | `delete`, only when the core's policy allows it |
 
 `observe` checks the two read permissions by using them: a token without
@@ -110,6 +112,9 @@ permission it needed instead of saying "credentials rejected".
 
 - Groups only. Users, roles, parents, policy bindings and applications are not
   managed here.
+- A user is a **seed**: created when missing, never updated and never deleted.
+  The profile, the credentials and the account belong to the person, so a
+  reconcile must not turn a UI edit into drift.
 - The API is `/api/v3/core/groups/`; pagination follows `pagination.next` to the
   end. The provider was written against Authentik 2026.5.6 and speaks API v3.
 - A declared username that does not exist fails the change instead of being

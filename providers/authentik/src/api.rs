@@ -66,6 +66,15 @@ pub struct User {
     pub pk: i64,
     /// Login name.
     pub username: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// E-mail address.
+    #[serde(default)]
+    pub email: String,
+    /// Free-form attributes; the ownership marker lives here.
+    #[serde(default)]
+    pub attributes: serde_json::Value,
 }
 
 /// One page of the Authentik user list response.
@@ -204,8 +213,35 @@ impl Authentik {
         self.write("DELETE", &url, serde_json::Value::Null)
     }
 
+    /// Creates a user with the seed profile and the ownership marker.
+    pub fn create_user(
+        &self,
+        username: &str,
+        name: &str,
+        email: &str,
+        attributes: &serde_json::Value,
+    ) -> Result<User, ApiError> {
+        let url = format!("{}/api/v3/core/users/", self.base);
+        self.write_json(
+            "POST",
+            &url,
+            serde_json::json!({
+                "username": username,
+                "name": name,
+                "email": email,
+                "attributes": attributes,
+                "is_active": true,
+            }),
+        )
+    }
+
     /// Sends one write request and maps its failure.
-    fn write(&self, method: &str, url: &str, body: serde_json::Value) -> Result<(), ApiError> {
+    fn send(
+        &self,
+        method: &str,
+        url: &str,
+        body: serde_json::Value,
+    ) -> Result<ureq::Response, ApiError> {
         let request = self
             .agent
             .request(method, url)
@@ -218,7 +254,7 @@ impl Authentik {
         };
 
         match response {
-            Ok(_) => Ok(()),
+            Ok(response) => Ok(response),
             Err(ureq::Error::Status(code, response)) => Err(match code {
                 401 | 403 => ApiError::Auth,
                 429 => ApiError::RateLimited(retry_after(&response)),
@@ -227,6 +263,23 @@ impl Authentik {
             }),
             Err(ureq::Error::Transport(error)) => Err(ApiError::Transient(error.to_string())),
         }
+    }
+
+    /// Sends one write request and ignores the response body.
+    fn write(&self, method: &str, url: &str, body: serde_json::Value) -> Result<(), ApiError> {
+        self.send(method, url, body).map(|_| ())
+    }
+
+    /// Sends one write request and reads the created or updated object.
+    fn write_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        url: &str,
+        body: serde_json::Value,
+    ) -> Result<T, ApiError> {
+        self.send(method, url, body)?
+            .into_json()
+            .map_err(|error| ApiError::Config(format!("cannot read the response: {error}")))
     }
 
     fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, ApiError> {
