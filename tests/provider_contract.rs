@@ -11,7 +11,8 @@ use std::time::Duration;
 use nod::application::use_cases::adopt::{execute as adopt, AdoptOptions};
 use nod::application::use_cases::derive::{DeriveRule, Source, Template};
 use nod::application::use_cases::reconcile::{execute, rollback, Desired, ReconcileOptions};
-use nod::domain::ownership::{OwnedId, Ownership};
+use nod::domain::errors::NodError;
+use nod::domain::ownership::{NoopSink, OwnedId, Ownership, OwnershipSink};
 use nod::domain::policy::Policy;
 use nod::domain::provider::{Change, ChangeKind, DesiredResource, InverseChange, RollbackPlan};
 
@@ -76,6 +77,7 @@ async fn a_half_applied_plan_records_only_what_happened() {
         &serde_json::json!({}),
         &desired(&["a", "b"]),
         &Ownership::default(),
+        &NoopSink,
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -130,6 +132,7 @@ done
         &serde_json::json!({}),
         &desired(&["a"]),
         &Ownership::default(),
+        &NoopSink,
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -397,6 +400,7 @@ done
         &serde_json::json!({}),
         &desired(&["a"]),
         &Ownership::default(),
+        &NoopSink,
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -431,6 +435,7 @@ done
         &serde_json::json!({}),
         &desired(&["a"]),
         &Ownership::default(),
+        &NoopSink,
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -495,6 +500,7 @@ done
         &serde_json::json!({}),
         &declaration,
         &Ownership::default(),
+        &NoopSink,
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -588,6 +594,7 @@ done
         &serde_json::json!({}),
         &declaration,
         &record,
+        &NoopSink,
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -650,6 +657,7 @@ done
         &serde_json::json!({}),
         &declaration,
         &record,
+        &NoopSink,
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -724,6 +732,7 @@ done
         &serde_json::json!({}),
         &declaration,
         &Ownership::default(),
+        &NoopSink,
         ReconcileOptions { apply: true },
         &Policy::default(),
         &[],
@@ -742,6 +751,7 @@ done
         &serde_json::json!({}),
         &declaration,
         &first.ownership,
+        &NoopSink,
         ReconcileOptions { apply: false },
         &Policy::default(),
         &[],
@@ -754,5 +764,141 @@ done
     assert!(
         second.ownership.owns("authentik.application", "canary"),
         "the next record still carries the creation"
+    );
+}
+
+/// Records every persist so a test can read what the run wrote, and when.
+#[derive(Default)]
+struct RecordingSink {
+    writes: std::cell::RefCell<Vec<Ownership>>,
+}
+
+impl OwnershipSink for RecordingSink {
+    fn persist(&self, record: &Ownership) -> Result<(), NodError> {
+        self.writes.borrow_mut().push(record.clone());
+        Ok(())
+    }
+}
+
+/// A provider that plans one create and reports it as applied.
+/// A provider that reports nothing and plans nothing.
+const IDLE: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":["dns.record"],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[],"conditions":[]}'
+      ;;
+    *'"op":"plan"'*)
+      echo '{"changes":[],"conditions":[]}'
+      ;;
+  esac
+done
+"#;
+
+const CREATING: &str = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol"'*)
+      echo '{"provider":"fake","version":"0.1.0","protocol":1,"capabilities":["dns.record"],"ownership":"marker","settings_schema":{}}'
+      ;;
+    *'"op":"observe"'*)
+      echo '{"resources":[],"conditions":[]}'
+      ;;
+    *'"op":"plan"'*)
+      echo '{"changes":[{"kind":"create","owned":true,"destructive":false,"resource":{"kind":"dns.record","id":"a"}}],"conditions":[]}'
+      ;;
+    *'"op":"apply"'*)
+      echo '{"applied":[{"id":"a","ok":true}],"conditions":[]}'
+      ;;
+  esac
+done
+"#;
+
+#[tokio::test]
+async fn a_create_is_recorded_before_the_provider_performs_it() {
+    let _guard = SERIAL.lock().await;
+    let (_dir, path) = script(CREATING);
+
+    let sink = RecordingSink::default();
+    let report = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired(&["a"]),
+        &Ownership::default(),
+        &sink,
+        ReconcileOptions { apply: true },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+
+    let writes = sink.writes.borrow();
+    assert_eq!(
+        writes.len(),
+        2,
+        "one write-ahead and one finished record, got {writes:#?}"
+    );
+    assert_eq!(
+        writes[0].pending.len(),
+        1,
+        "the intent is on disk before the provider is asked"
+    );
+    assert!(
+        writes[0].created.is_empty(),
+        "an intent is not yet evidence of ownership"
+    );
+    assert!(
+        writes[1].pending.is_empty(),
+        "the finished record carries no open intent"
+    );
+    assert!(
+        writes[1].owns("dns.record", "a"),
+        "a successful create is the evidence"
+    );
+    assert!(report.ownership.owns("dns.record", "a"));
+}
+
+#[tokio::test]
+async fn an_interrupted_intent_is_settled_by_the_next_observation() {
+    let _guard = SERIAL.lock().await;
+    let (_dir, path) = script(IDLE);
+
+    // The previous run wrote the intent and died before the provider answered.
+    let mut interrupted = Ownership::default();
+    interrupted.mark_pending(&[OwnedId::new("dns.record", "a")]);
+
+    let sink = RecordingSink::default();
+    let report = execute(
+        Path::new(&path),
+        &serde_json::json!({}),
+        &desired(&[]),
+        &interrupted,
+        &sink,
+        ReconcileOptions { apply: true },
+        &Policy::default(),
+        &[],
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+
+    let writes = sink.writes.borrow();
+    // Two writes: the resolved record before the plan runs, and the finished one
+    // after it. Nothing was planned, so both carry the same answer.
+    assert_eq!(writes.len(), 2, "got {writes:#?}");
+    for write in writes.iter() {
+        assert!(
+            write.pending.is_empty(),
+            "an intent the observation does not confirm must be forgotten"
+        );
+    }
+    assert!(
+        !report.ownership.owns("dns.record", "a"),
+        "the provider reports nothing, so nothing was created"
     );
 }

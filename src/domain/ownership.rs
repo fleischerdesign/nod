@@ -14,6 +14,38 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::errors::NodError;
+
+/// Persists an ownership record between two steps of a reconcile run.
+///
+/// The run cannot write the record itself - the store lives outside the use
+/// case - but a write-ahead has to happen while the run is in flight: the
+/// intent is recorded before the provider is asked to create anything, so a
+/// crash in between leaves evidence instead of a resource nobody claims.
+///
+/// A sink is called at most twice per run: once with the resolved record
+/// (after the observation, when an earlier attempt's intent can be settled)
+/// and once with the record a create is about to produce. A failed persist is
+/// a configuration error and aborts the run - continuing would perform writes
+/// the record does not back.
+pub trait OwnershipSink {
+    /// Writes `record`, replacing the provider's previous record.
+    fn persist(&self, record: &Ownership) -> Result<(), NodError>;
+}
+
+/// The sink for runs that observe without writing.
+///
+/// `provider status` and dry runs resolve a pending intent in memory so their
+/// report is truthful, but they must not touch the record: a read-only command
+/// that rewrites state is not read-only.
+pub struct NoopSink;
+
+impl OwnershipSink for NoopSink {
+    fn persist(&self, _record: &Ownership) -> Result<(), NodError> {
+        Ok(())
+    }
+}
+
 /// One resource, by kind and id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

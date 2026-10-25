@@ -189,6 +189,9 @@ async fn summarise(name: &str, declaration: &TomlProvider, state_dir: &Path) -> 
         &settings,
         &desired,
         &ownership,
+        // Status observes only: a pending intent is resolved in memory so the
+        // report is truthful, but a read-only command must not rewrite state.
+        &crate::domain::ownership::NoopSink,
         ReconcileOptions { apply: false },
         &policy,
         &declaration.env,

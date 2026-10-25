@@ -27,7 +27,9 @@ use crate::domain::sync::now_secs;
 use crate::domain::watch::SyncOptions;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::state::provider_lock::ProviderLock;
-use crate::infrastructure::storage::provider_ownership::ProviderOwnershipStore;
+use crate::infrastructure::storage::provider_ownership::{
+    OwnershipFileSink, ProviderOwnershipStore,
+};
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs reconciliation cycles until the process is stopped.
@@ -313,6 +315,7 @@ async fn reconcile_due(entries: &mut [ProviderEntry], state_dir: &Path, order: P
             &entry.settings,
             &entry.desired,
             &record,
+            &OwnershipFileSink::new(&ownership),
             ReconcileOptions { apply: entry.apply },
             &entry.policy,
             &entry.env,

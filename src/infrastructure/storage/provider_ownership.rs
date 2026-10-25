@@ -105,6 +105,28 @@ impl ProviderOwnershipStore {
     }
 }
 
+/// Adapts the store to the core's persistence port.
+///
+/// The store knows where a record lives, not when it must be written - the run
+/// decides that. This is the seam the run uses, and keeping it here means the
+/// use case depends on the port, never on the file layout.
+pub struct OwnershipFileSink<'a> {
+    store: &'a ProviderOwnershipStore,
+}
+
+impl<'a> OwnershipFileSink<'a> {
+    /// Wraps `store` as a sink.
+    pub fn new(store: &'a ProviderOwnershipStore) -> Self {
+        Self { store }
+    }
+}
+
+impl crate::domain::ownership::OwnershipSink for OwnershipFileSink<'_> {
+    fn persist(&self, record: &Ownership) -> Result<(), NodError> {
+        self.store.save(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

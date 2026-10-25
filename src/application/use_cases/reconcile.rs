@@ -265,6 +265,7 @@ pub async fn execute(
     settings: &serde_json::Value,
     desired: &Desired,
     record: &crate::domain::ownership::Ownership,
+    sink: &dyn crate::domain::ownership::OwnershipSink,
     options: ReconcileOptions,
     policy: &Policy,
     env: &[String],
@@ -274,10 +275,30 @@ pub async fn execute(
 
     let mut observed = provider.observe(settings).await?;
     check_capabilities(&handshake, &observed.resources, &[])?;
+
+    // An earlier attempt records what it is about to create before the provider
+    // is asked to create it. If it died in between, that intent is still here:
+    // settle it against what the provider reports now and persist the answer, so
+    // the next run does not ask the same question again. A create the provider
+    // does not report never happened - keeping it would claim a resource that is
+    // not ours.
+    let mut record = record.clone();
+    if !record.pending.is_empty() {
+        record.resolve_pending(|kind, id| {
+            observed
+                .resources
+                .iter()
+                .any(|resource| resource.kind == kind && resource.id == id)
+        });
+        if options.apply {
+            sink.persist(&record)?;
+        }
+    }
+
     // A kind without a marker reports `owned: false` even for a resource this
     // fleet created. The record is the core's evidence, and it applies before
     // planning so the provider sees the resource as owned (ADR-037).
-    mark_owned(record, &mut observed.resources);
+    mark_owned(&record, &mut observed.resources);
     let mut conditions = Vec::new();
     merge_conditions(&mut conditions, &observed.conditions);
     // A derivation reads a successful observation. A source or attribute that
@@ -298,7 +319,7 @@ pub async fn execute(
         .map(|change| (change.resource.kind.clone(), change.resource.id.clone()))
         .collect();
 
-    let declared = desired.declared(record);
+    let declared = desired.declared(&record);
     check_absent(&desired.absent, &observed.resources, &plan.changes)?;
     let (approved, refused) = approve_declared(&handshake, &plan.changes, policy, &declared);
 
@@ -307,6 +328,23 @@ pub async fn execute(
     let mut failed_resources: Vec<(String, String)> = Vec::new();
     let mut succeeded: Vec<Change> = Vec::new();
     if options.apply && !approved.is_empty() {
+        // Write-ahead: the intent reaches the disk before the provider performs
+        // it, so a crash in between leaves evidence instead of a resource nobody
+        // claims. A failed persist aborts the run - a write the record does not
+        // back is worse than no write.
+        let creates: Vec<crate::domain::ownership::OwnedId> = approved
+            .iter()
+            .filter(|change| change.kind == ChangeKind::Create)
+            .map(|change| {
+                crate::domain::ownership::OwnedId::new(&change.resource.kind, &change.resource.id)
+            })
+            .collect();
+        if !creates.is_empty() {
+            let mut write_ahead = record.clone();
+            write_ahead.mark_pending(&creates);
+            sink.persist(&write_ahead)?;
+        }
+
         let result = provider.apply(settings, &approved).await?;
         merge_conditions(&mut conditions, &result.conditions);
 
@@ -418,6 +456,14 @@ pub async fn execute(
         },
         &created,
     );
+
+    // The record is complete: everything this run created, every rule it
+    // derives, and nothing it failed to create. Persist it here - the report is
+    // downstream of this write, not the other way round.
+    if options.apply {
+        sink.persist(&ownership)?;
+    }
+
     let inverse = if succeeded.is_empty() {
         Vec::new()
     } else {

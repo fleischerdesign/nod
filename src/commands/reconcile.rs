@@ -12,7 +12,9 @@ use crate::domain::provider::RollbackPlan;
 use crate::domain::sync::now_secs;
 use crate::infrastructure::config::toml_config::TomlConfigStore;
 use crate::infrastructure::state::provider_lock::ProviderLock;
-use crate::infrastructure::storage::provider_ownership::ProviderOwnershipStore;
+use crate::infrastructure::storage::provider_ownership::{
+    OwnershipFileSink, ProviderOwnershipStore,
+};
 use crate::infrastructure::storage::provider_plan::ProviderPlanStore;
 
 /// Runs one reconcile cycle or one rollback, and renders the result.
@@ -162,6 +164,7 @@ pub async fn execute(
         &settings,
         &desired,
         &record,
+        &OwnershipFileSink::new(&ownership),
         ReconcileOptions { apply },
         &policy,
         &environment,
