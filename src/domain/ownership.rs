@@ -59,6 +59,21 @@ pub struct Ownership {
     /// keeps one ownership model.
     #[serde(default)]
     pub adopted: Vec<OwnedId>,
+    /// Resources a run was about to create when it wrote this record.
+    ///
+    /// This is the write-ahead: a create is recorded *before* the provider is
+    /// asked to perform it, so a crash between apply and the final record
+    /// leaves evidence instead of a foreign resource. A pending entry is not
+    /// ownership on its own - `owns` ignores it, because a create that never
+    /// happened must not let a later run claim a resource that happens to
+    /// carry the id. `resolve_pending` promotes it once an observation
+    /// confirms the resource exists, and drops it otherwise.
+    ///
+    /// Skipped when empty so the field does not appear in records that have
+    /// nothing pending: an older reader refuses unknown fields, and that
+    /// refusal would turn a readable record into "everything is foreign".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<OwnedId>,
 }
 
 impl Ownership {
@@ -123,9 +138,46 @@ impl Ownership {
         prune(&mut self.adopted);
     }
 
+    /// Records what this run is about to create, replacing any previous plan.
+    ///
+    /// Replacing rather than appending is deliberate: a pending entry belongs
+    /// to one attempt. An earlier attempt whose outcome is unknown was already
+    /// resolved by `resolve_pending` before this run planned anything.
+    pub fn mark_pending(&mut self, ids: &[OwnedId]) {
+        self.pending = ids
+            .iter()
+            .filter(|entry| !self.owns(&entry.kind, &entry.id))
+            .cloned()
+            .collect();
+    }
+
+    /// Turns every pending create the observation confirms into a creation, and
+    /// forgets the rest.
+    ///
+    /// Run this before `mark_owned`: it is the only place where an interrupted
+    /// run's intent becomes evidence. A pending entry the provider does not
+    /// report never happened - a failed apply, a declined provider, a crash
+    /// before the call - and keeping it would be a claim without a resource.
+    pub fn resolve_pending(&mut self, exists: impl Fn(&str, &str) -> bool) {
+        let mut confirmed: Vec<OwnedId> = Vec::new();
+        for entry in std::mem::take(&mut self.pending) {
+            if exists(&entry.kind, &entry.id) {
+                confirmed.push(entry);
+            }
+        }
+        for entry in confirmed {
+            if !self.owns(&entry.kind, &entry.id) {
+                self.created.push(entry);
+            }
+        }
+    }
+
     /// Whether the record knows nothing at all.
     pub fn is_empty(&self) -> bool {
-        self.created.is_empty() && self.adopted.is_empty() && self.rules.values().all(Vec::is_empty)
+        self.created.is_empty()
+            && self.adopted.is_empty()
+            && self.pending.is_empty()
+            && self.rules.values().all(Vec::is_empty)
     }
 }
 
@@ -215,5 +267,75 @@ mod tests {
         let mut record = Ownership::default();
         record.rules.insert("per-member".to_string(), Vec::new());
         assert!(record.is_empty());
+    }
+
+    #[test]
+    fn a_pending_create_is_not_ownership_before_it_is_resolved() {
+        let mut record = Ownership::default();
+        record.mark_pending(&[OwnedId::new("authentik.certificate_keypair", "OIDC signing key")]);
+
+        assert!(
+            !record.owns("authentik.certificate_keypair", "OIDC signing key"),
+            "an intent is not evidence"
+        );
+        assert!(!record.is_empty(), "a pending create is worth writing");
+    }
+
+    #[test]
+    fn a_pending_create_becomes_a_creation_once_the_provider_reports_it() {
+        let mut record = Ownership::default();
+        record.mark_pending(&[OwnedId::new("kind", "made")]);
+
+        record.resolve_pending(|_kind, id| id == "made");
+
+        assert!(record.owns("kind", "made"));
+        assert_eq!(record.created.len(), 1);
+        assert!(record.pending.is_empty(), "the intent is resolved, not kept");
+    }
+
+    #[test]
+    fn a_pending_create_that_never_happened_is_forgotten() {
+        let mut record = Ownership::default();
+        record.mark_pending(&[OwnedId::new("kind", "never-created")]);
+
+        record.resolve_pending(|_kind, _id| false);
+
+        assert!(
+            !record.owns("kind", "never-created"),
+            "a create that did not happen must not claim a foreign resource"
+        );
+        assert!(record.pending.is_empty());
+    }
+
+    #[test]
+    fn resolving_a_pending_create_a_rule_already_owns_keeps_the_rules_provenance() {
+        let mut record = Ownership::default();
+        record
+            .rules
+            .insert("per-member".to_string(), vec![OwnedId::new("app", "ada")]);
+
+        record.mark_pending(&[OwnedId::new("app", "ada")]);
+
+        assert!(
+            record.pending.is_empty(),
+            "a rule already owns it, so nothing is pending"
+        );
+        assert!(record.created.is_empty(), "the rule keeps its provenance");
+    }
+
+    #[test]
+    fn a_record_without_pending_does_not_carry_the_field() {
+        let raw = serde_json::to_string(&Ownership::default()).unwrap();
+        assert!(
+            !raw.contains("pending"),
+            "an older reader refuses unknown fields; the empty case must not appear"
+        );
+
+        let mut record = Ownership::default();
+        record.mark_pending(&[OwnedId::new("kind", "made")]);
+        let raw = serde_json::to_string(&record).unwrap();
+        assert!(raw.contains("pending"));
+        let back: Ownership = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.pending.len(), 1);
     }
 }
